@@ -1,0 +1,28 @@
+[package]
+name = "vibepod"
+version = "0.1.0"
+edition = "2021"
+description = "Safely run AI coding agents in Docker containers"
+license = "MIT"
+repository = "https://github.com/ryugou/vibepod"
+
+[[bin]]
+name = "vibepod"
+path = "src/main.rs"
+
+[dependencies]
+bollard = "0.18"
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11"
+indicatif = "0.17"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+rand = "0.8"
+ctrlc = "3"
+anyhow = "1"
+futures-util = "0.3"
+tar = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+libc = "0.2"
