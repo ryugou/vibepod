@@ -52,8 +52,11 @@ This follows [Anthropic's official recommendation](https://docs.anthropic.com/en
 VibePod can be aliased as `vp` for convenience:
 
 ```bash
+ln -sf $(which vibepod) /usr/local/bin/vp
 vp run --prompt "Fix the failing tests"
 ```
+
+Note: Homebrew and the install script create this symlink automatically.
 
 ## Install
 
