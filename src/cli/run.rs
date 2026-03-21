@@ -194,14 +194,18 @@ pub async fn execute(
 
     // Stream logs until shutdown
     tokio::select! {
-        _ = runtime.stream_logs(&container_id) => {}
+        _ = runtime.stream_logs(&container_id) => {
+            // Agent finished naturally
+        }
         _ = shutdown.notified() => {
             println!("\n  Stopping container...");
-            runtime.stop_container(&container_id, 10).await.ok();
-            runtime.remove_container(&container_id).await.ok();
-            println!("  Container stopped and removed.");
         }
     }
+
+    // Always clean up container
+    runtime.stop_container(&container_id, 10).await.ok();
+    runtime.remove_container(&container_id).await.ok();
+    println!("  Container stopped and removed.");
 
     Ok(())
 }

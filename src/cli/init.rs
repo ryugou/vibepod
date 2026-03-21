@@ -25,6 +25,7 @@ pub async fn execute(claude_version: Option<String>) -> Result<()> {
 
     let dockerfile = include_str!("../../templates/Dockerfile");
 
+    // SAFETY: getuid() and getgid() are simple syscalls with no preconditions
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
 

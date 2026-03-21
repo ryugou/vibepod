@@ -53,3 +53,31 @@ fn test_register_and_check_project() {
         "/other/path"
     ));
 }
+
+#[test]
+fn test_save_and_load_projects() {
+    let tmp = TempDir::new().unwrap();
+    let config_dir = tmp.path().to_path_buf();
+
+    let mut config = vibepod::config::ProjectsConfig::default();
+    vibepod::config::register_project(
+        &mut config,
+        vibepod::config::ProjectEntry {
+            name: "test-project".to_string(),
+            path: "/path/to/test".to_string(),
+            remote: Some("github.com/user/test".to_string()),
+            registered_at: "2026-03-22T10:00:00Z".to_string(),
+        },
+    );
+
+    vibepod::config::save_projects(&config, &config_dir).unwrap();
+    let loaded = vibepod::config::load_projects(&config_dir).unwrap();
+
+    assert_eq!(loaded.projects.len(), 1);
+    assert_eq!(loaded.projects[0].name, "test-project");
+    assert_eq!(loaded.projects[0].path, "/path/to/test");
+    assert_eq!(
+        loaded.projects[0].remote,
+        Some("github.com/user/test".to_string())
+    );
+}
