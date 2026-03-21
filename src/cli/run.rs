@@ -1,7 +1,5 @@
 use anyhow::{bail, Context, Result};
 use std::process::Command;
-use std::sync::Arc;
-use tokio::sync::Notify;
 
 use crate::config::{self, ProjectEntry};
 use crate::runtime::{ContainerConfig, DockerRuntime};
@@ -184,20 +182,12 @@ pub async fn execute(
     println!("  │  Press Ctrl+C to stop the container.");
     println!("  └\n");
 
-    // 8. Signal handling
-    let shutdown = Arc::new(Notify::new());
-    let shutdown_clone = shutdown.clone();
-
-    ctrlc::set_handler(move || {
-        shutdown_clone.notify_one();
-    })?;
-
-    // Stream logs until shutdown
+    // 8. Stream logs until agent exits or Ctrl+C
     tokio::select! {
         _ = runtime.stream_logs(&container_id) => {
             // Agent finished naturally
         }
-        _ = shutdown.notified() => {
+        _ = tokio::signal::ctrl_c() => {
             println!("\n  Stopping container...");
         }
     }

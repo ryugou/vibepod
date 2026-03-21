@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a Rust CLI tool (`vibepod` / `vp`) that wraps Docker to safely run AI coding agents with `--dangerously-skip-permissions` inside containers.
+**Goal:** Build a Rust CLI tool (`vibepod`) that wraps Docker to safely run AI coding agents with `--dangerously-skip-permissions` inside containers. `vp` is provided as a shell alias.
 
-**Architecture:** Two commands (`init` + `run`) backed by a Docker API layer (`bollard`), config management (`serde`), and interactive UI (`dialoguer` / `indicatif`). The Docker runtime module is designed for reuse by v2's dashboard.
+**Architecture:** Two commands (`init` + `run`) backed by a Docker API layer (`bollard`), config management (`serde`), and interactive UI (`dialoguer`). The Docker runtime module is designed for reuse by v2's dashboard.
 
-**Tech Stack:** Rust, bollard (Docker API), clap (CLI), dialoguer/indicatif (UI), tokio (async), serde (config)
+**Tech Stack:** Rust, bollard (Docker API), clap (CLI), dialoguer (UI), tokio (async), serde (config)
 
-**Spec:** `docs/superpowers/specs/2026-03-22-vibepod-design.md`
+**Spec:** `docs/design.md`
 
 ---
 

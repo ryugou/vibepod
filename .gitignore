@@ -2,3 +2,14 @@
 target/
 .claude/
 *.code-workspace
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Secrets
+.env
+.env.*
+
+# Logs
+*.log

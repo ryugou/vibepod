@@ -43,6 +43,6 @@ pub fn load_global_config(config_dir: &Path) -> Result<GlobalConfig> {
 }
 
 pub fn default_config_dir() -> Result<std::path::PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(".vibepod"))
+    let config = dirs::config_dir().context("Could not determine config directory")?;
+    Ok(config.join("vibepod"))
 }

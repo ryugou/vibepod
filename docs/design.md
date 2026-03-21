@@ -117,7 +117,7 @@ ENTRYPOINT ["claude"]
 > これによりコンテナ内の `node` ユーザーとホストのファイル所有者が一致し、
 > git 操作やファイル書き込みの権限問題を回避する。
 
-**グローバル設定 (`~/.vibepod/config.json`)：**
+**グローバル設定 (`~/.config/vibepod/config.json`)：**
 
 ```json
 {
@@ -162,7 +162,7 @@ ENTRYPOINT ["claude"]
 **フロー：**
 
 1. カレントディレクトリが git リポジトリか確認
-2. `~/.vibepod/config.json` からイメージ名を取得
+2. `~/.config/vibepod/config.json` からイメージ名を取得
 3. 初回実行のプロジェクトなら登録するか対話で確認
 4. Docker API でコンテナを作成・起動
 5. コンテナの stdout/stderr をターミナルにストリーミング
@@ -210,7 +210,7 @@ API キーを使いたいユーザーは `--env ANTHROPIC_API_KEY=...` オプシ
 - `.env` — シークレットの漏洩防止
 - ホームディレクトリ全体
 
-**プロジェクト登録 (`~/.vibepod/projects.json`)：**
+**プロジェクト登録 (`~/.config/vibepod/projects.json`)：**
 
 v2 のダッシュボードでプロジェクト一覧・実行履歴を表示するためのデータ。
 v1 では登録・保存のみ行い、参照する UI は v2 で実装する。

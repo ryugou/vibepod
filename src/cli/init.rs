@@ -25,9 +25,15 @@ pub async fn execute(claude_version: Option<String>) -> Result<()> {
 
     let dockerfile = include_str!("../../templates/Dockerfile");
 
-    // SAFETY: getuid() and getgid() are simple syscalls with no preconditions
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
+    #[cfg(unix)]
+    let (uid, gid) = {
+        // SAFETY: getuid() and getgid() are simple syscalls with no preconditions
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        (uid, gid)
+    };
+    #[cfg(not(unix))]
+    let (uid, gid): (u32, u32) = (1000, 1000);
 
     let mut build_args = HashMap::new();
     build_args.insert("HOST_UID".to_string(), uid.to_string());
