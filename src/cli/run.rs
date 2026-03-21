@@ -132,7 +132,7 @@ pub async fn execute(
         args.push("--resume".to_string());
     }
     if let Some(ref p) = prompt {
-        args.push("--prompt".to_string());
+        args.push("-p".to_string());
         args.push(p.clone());
     }
 

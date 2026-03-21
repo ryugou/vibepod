@@ -21,7 +21,7 @@ ENV PATH=$PATH:/usr/local/share/npm-global/bin
 
 USER node
 ARG CLAUDE_VERSION=latest
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION}
+RUN npm install -g --loglevel=error @anthropic-ai/claude-code@${CLAUDE_VERSION}
 
 USER root
 RUN mkdir -p /workspace && chown node:node /workspace
