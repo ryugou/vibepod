@@ -117,7 +117,7 @@ ENTRYPOINT ["claude"]
 > これによりコンテナ内の `node` ユーザーとホストのファイル所有者が一致し、
 > git 操作やファイル書き込みの権限問題を回避する。
 
-**グローバル設定 (`~/.vibepod/config.json`)：**
+**グローバル設定 (`~/.config/vibepod/config.json`)：**
 
 ```json
 {
@@ -162,7 +162,7 @@ ENTRYPOINT ["claude"]
 **フロー：**
 
 1. カレントディレクトリが git リポジトリか確認
-2. `~/.vibepod/config.json` からイメージ名を取得
+2. `~/.config/vibepod/config.json` からイメージ名を取得
 3. 初回実行のプロジェクトなら登録するか対話で確認
 4. Docker API でコンテナを作成・起動
 5. コンテナの stdout/stderr をターミナルにストリーミング
@@ -210,7 +210,7 @@ API キーを使いたいユーザーは `--env ANTHROPIC_API_KEY=...` オプシ
 - `.env` — シークレットの漏洩防止
 - ホームディレクトリ全体
 
-**プロジェクト登録 (`~/.vibepod/projects.json`)：**
+**プロジェクト登録 (`~/.config/vibepod/projects.json`)：**
 
 v2 のダッシュボードでプロジェクト一覧・実行履歴を表示するためのデータ。
 v1 では登録・保存のみ行い、参照する UI は v2 で実装する。
@@ -220,8 +220,8 @@ v1 では登録・保存のみ行い、参照する UI は v2 で実装する。
   "projects": [
     {
       "name": "my-project",
-      "path": "/Users/ryugo/repos/my-project",
-      "remote": "github.com/ryugou/my-project",
+      "path": "/home/user/repos/my-project",
+      "remote": "github.com/user/my-project",
       "registered_at": "2026-03-22T10:00:00Z"
     }
   ]
@@ -234,7 +234,7 @@ v1 では登録・保存のみ行い、参照する UI は v2 で実装する。
   ┌  VibePod
   │
   ◇  Detected git repository: my-project
-  │  Remote: github.com/ryugou/my-project
+  │  Remote: github.com/user/my-project
   │  Branch: feat/add-dashboard
   │
   ◆  First time running in this project. Register it?
@@ -244,7 +244,7 @@ v1 では登録・保存のみ行い、参照する UI は v2 で実装する。
   ◇  Starting container...
   │  Agent: Claude Code
   │  Mode: --dangerously-skip-permissions
-  │  Mount: /Users/ryugo/repos/my-project → /workspace
+  │  Mount: /home/user/repos/my-project → /workspace
   │
   ◇  Container started: vibepod-my-project-a1b2c3
   │  Press Ctrl+C to stop the container.
@@ -346,13 +346,3 @@ cargo install vibepod
 - GitHub Releases に配置
 - Homebrew tap (`vibepod/tap`) が GitHub Releases を参照
 
----
-
-## ロードマップ
-
-| バージョン | 機能 |
-|-----------|------|
-| **v1** | `init` + `run`、Claude Code 対応、Homebrew 配布 |
-| **v1.1** | 1Password CLI 連携、`vibepod restore`（git HEAD 自動リカバリ） |
-| **v2** | ダッシュボード（Web UI）、実行ログ、進捗モニタリング |
-| **v2.1+** | Gemini CLI / Codex 対応、マルチコンテナ同時実行 |
