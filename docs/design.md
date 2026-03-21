@@ -346,13 +346,3 @@ cargo install vibepod
 - GitHub Releases に配置
 - Homebrew tap (`vibepod/tap`) が GitHub Releases を参照
 
----
-
-## ロードマップ
-
-| バージョン | 機能 |
-|-----------|------|
-| **v1** | `init` + `run`、Claude Code 対応、Homebrew 配布 |
-| **v1.1** | 1Password CLI 連携、`vibepod restore`（git HEAD 自動リカバリ） |
-| **v2** | ダッシュボード（Web UI）、実行ログ、進捗モニタリング |
-| **v2.1+** | Gemini CLI / Codex 対応、マルチコンテナ同時実行 |

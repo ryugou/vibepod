@@ -65,6 +65,15 @@ cargo install vibepod
 ln -s $(which vibepod) ~/.local/bin/vp
 ```
 
+## Roadmap
+
+| Version | Features |
+|---------|----------|
+| **v1** | `init` + `run`, Claude Code support |
+| **v1.1** | 1Password CLI integration, `vibepod restore` (git HEAD auto-recovery) |
+| **v2** | Dashboard (Web UI), execution logs, progress monitoring |
+| **v2.1+** | Gemini CLI / Codex support, multi-container execution |
+
 ## License
 
 [MIT](LICENSE)
