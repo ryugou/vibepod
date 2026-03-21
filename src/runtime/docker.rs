@@ -1,0 +1,236 @@
+use anyhow::{Context, Result};
+use bollard::container::{
+    Config, CreateContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions,
+    StartContainerOptions, StopContainerOptions,
+};
+use bollard::image::BuildImageOptions;
+use bollard::models::{HostConfig, Mount, MountTypeEnum};
+use bollard::Docker;
+use futures_util::StreamExt;
+use std::collections::HashMap;
+
+pub struct DockerRuntime {
+    docker: Docker,
+}
+
+pub struct ContainerConfig {
+    pub image: String,
+    pub container_name: String,
+    pub workspace_path: String,
+    pub claude_dir: String,
+    pub claude_json: Option<String>,
+    pub args: Vec<String>,
+    pub env_vars: Vec<String>,
+    pub network_disabled: bool,
+}
+
+impl DockerRuntime {
+    pub async fn new() -> Result<Self> {
+        let docker = Docker::connect_with_local_defaults()
+            .context("Failed to connect to Docker. Is Docker Desktop or OrbStack running?")?;
+        Ok(Self { docker })
+    }
+
+    pub async fn ping(&self) -> Result<()> {
+        self.docker
+            .ping()
+            .await
+            .context("Docker is not responding")?;
+        Ok(())
+    }
+
+    pub async fn build_image(
+        &self,
+        dockerfile_content: &str,
+        image_name: &str,
+        build_args: HashMap<String, String>,
+    ) -> Result<()> {
+        let mut header = tar::Header::new_gnu();
+        let dockerfile_bytes = dockerfile_content.as_bytes();
+        header.set_path("Dockerfile")?;
+        header.set_size(dockerfile_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+
+        let mut tar_builder = tar::Builder::new(Vec::new());
+        tar_builder.append(&header, dockerfile_bytes)?;
+        let tar_data = tar_builder.into_inner()?;
+
+        let options = BuildImageOptions {
+            t: image_name,
+            buildargs: build_args
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect(),
+            ..Default::default()
+        };
+
+        let mut stream = self
+            .docker
+            .build_image(options, None, Some(tar_data.into()));
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(output) => {
+                    if let Some(stream) = output.stream {
+                        print!("{}", stream);
+                    }
+                    if let Some(error) = output.error {
+                        anyhow::bail!("Build error: {}", error);
+                    }
+                }
+                Err(e) => anyhow::bail!("Build failed: {}", e),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn image_exists(&self, image_name: &str) -> Result<bool> {
+        match self.docker.inspect_image(image_name).await {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    pub async fn find_running_container(
+        &self,
+        name_prefix: &str,
+    ) -> Result<Option<(String, String)>> {
+        let options = ListContainersOptions::<String> {
+            all: false,
+            ..Default::default()
+        };
+        let containers = self.docker.list_containers(Some(options)).await?;
+        for container in containers {
+            if let Some(names) = &container.names {
+                for name in names {
+                    let clean_name = name.trim_start_matches('/').to_string();
+                    if clean_name.starts_with(name_prefix) {
+                        if let Some(id) = &container.id {
+                            return Ok(Some((id.clone(), clean_name)));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn create_and_start_container(&self, config: &ContainerConfig) -> Result<String> {
+        let mut mounts = vec![
+            Mount {
+                target: Some("/workspace".to_string()),
+                source: Some(config.workspace_path.clone()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(false),
+                ..Default::default()
+            },
+            Mount {
+                target: Some("/home/node/.claude".to_string()),
+                source: Some(config.claude_dir.clone()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(false),
+                ..Default::default()
+            },
+        ];
+
+        if let Some(ref claude_json_path) = config.claude_json {
+            mounts.push(Mount {
+                target: Some("/home/node/.claude.json".to_string()),
+                source: Some(claude_json_path.clone()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+
+        let host_config = HostConfig {
+            mounts: Some(mounts),
+            network_mode: if config.network_disabled {
+                Some("none".to_string())
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+
+        let mut env = config.env_vars.clone();
+        env.push("TERM=xterm-256color".to_string());
+
+        let container_config = Config {
+            image: Some(config.image.clone()),
+            cmd: Some(config.args.clone()),
+            host_config: Some(host_config),
+            env: Some(env),
+            tty: Some(true),
+            open_stdin: Some(true),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+
+        let options = CreateContainerOptions {
+            name: config.container_name.clone(),
+            ..Default::default()
+        };
+
+        let response = self
+            .docker
+            .create_container(Some(options), container_config)
+            .await
+            .context("Failed to create container")?;
+
+        self.docker
+            .start_container(&response.id, None::<StartContainerOptions<String>>)
+            .await
+            .context("Failed to start container")?;
+
+        Ok(response.id)
+    }
+
+    pub async fn stream_logs(&self, container_id: &str) -> Result<()> {
+        let options = LogsOptions::<String> {
+            follow: true,
+            stdout: true,
+            stderr: true,
+            ..Default::default()
+        };
+
+        let mut stream = self.docker.logs(container_id, Some(options));
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(output) => print!("{}", output),
+                Err(e) => {
+                    eprintln!("Log stream error: {}", e);
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> Result<()> {
+        let options = StopContainerOptions { t: timeout_secs };
+        self.docker
+            .stop_container(container_id, Some(options))
+            .await
+            .context("Failed to stop container")?;
+        Ok(())
+    }
+
+    pub async fn remove_container(&self, container_id: &str) -> Result<()> {
+        let options = RemoveContainerOptions {
+            force: true,
+            ..Default::default()
+        };
+        self.docker
+            .remove_container(container_id, Some(options))
+            .await
+            .context("Failed to remove container")?;
+        Ok(())
+    }
+}
