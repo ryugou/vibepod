@@ -203,8 +203,8 @@ impl DockerRuntime {
         while let Some(result) = stream.next().await {
             match result {
                 Ok(output) => print!("{}", output),
-                Err(e) => {
-                    eprintln!("Log stream error: {}", e);
+                Err(_) => {
+                    // Stream closed — container exited, this is expected
                     break;
                 }
             }
