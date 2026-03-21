@@ -220,8 +220,8 @@ v1 では登録・保存のみ行い、参照する UI は v2 で実装する。
   "projects": [
     {
       "name": "my-project",
-      "path": "/Users/ryugo/repos/my-project",
-      "remote": "github.com/ryugou/my-project",
+      "path": "/home/user/repos/my-project",
+      "remote": "github.com/user/my-project",
       "registered_at": "2026-03-22T10:00:00Z"
     }
   ]
@@ -234,7 +234,7 @@ v1 では登録・保存のみ行い、参照する UI は v2 で実装する。
   ┌  VibePod
   │
   ◇  Detected git repository: my-project
-  │  Remote: github.com/ryugou/my-project
+  │  Remote: github.com/user/my-project
   │  Branch: feat/add-dashboard
   │
   ◆  First time running in this project. Register it?
@@ -244,7 +244,7 @@ v1 では登録・保存のみ行い、参照する UI は v2 で実装する。
   ◇  Starting container...
   │  Agent: Claude Code
   │  Mode: --dangerously-skip-permissions
-  │  Mount: /Users/ryugo/repos/my-project → /workspace
+  │  Mount: /home/user/repos/my-project → /workspace
   │
   ◇  Container started: vibepod-my-project-a1b2c3
   │  Press Ctrl+C to stop the container.

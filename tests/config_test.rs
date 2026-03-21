@@ -22,7 +22,7 @@ fn test_save_and_load_global_config() {
 #[test]
 fn test_load_global_config_not_found() {
     let tmp = TempDir::new().unwrap();
-    let result = vibepod::config::load_global_config(&tmp.path().to_path_buf());
+    let result = vibepod::config::load_global_config(tmp.path());
     assert!(result.is_err());
 }
 

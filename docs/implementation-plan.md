@@ -54,7 +54,6 @@ vibepod/
 - [ ] **Step 1: Rust プロジェクトを初期化**
 
 ```bash
-cd /Users/ryugo/Developer/src/settings/claude-devcontainer
 cargo init --name vibepod
 ```
 
@@ -69,7 +68,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Safely run AI coding agents in Docker containers"
 license = "MIT"
-repository = "https://github.com/ryugou/vibepod"
+repository = "https://github.com/user/vibepod"
 
 [[bin]]
 name = "vibepod"

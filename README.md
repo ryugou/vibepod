@@ -8,7 +8,7 @@ VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/
 
 ```bash
 # Install
-brew install vibepod
+cargo install vibepod
 
 # Build the Docker image (one-time setup)
 vibepod init
@@ -49,7 +49,7 @@ This follows [Anthropic's official recommendation](https://docs.anthropic.com/en
 
 ## Alias
 
-VibePod ships a `vp` symlink for convenience:
+VibePod can be aliased as `vp` for convenience:
 
 ```bash
 vp run --prompt "Fix the failing tests"
@@ -58,14 +58,11 @@ vp run --prompt "Fix the failing tests"
 ## Install
 
 ```bash
-# macOS (Homebrew)
-brew install vibepod
-
-# Linux / macOS (install script)
-curl -fsSL https://vibepod.dev/install.sh | sh
-
 # From source
 cargo install vibepod
+
+# Alias (optional)
+ln -s $(which vibepod) ~/.local/bin/vp
 ```
 
 ## License
