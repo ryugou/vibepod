@@ -7,8 +7,8 @@ VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/
 ## Quick Start
 
 ```bash
-# Install
-cargo install vibepod
+# Install (see below for other methods)
+brew install ryugou/tap/vibepod
 
 # Build the Docker image (one-time setup)
 vibepod init
