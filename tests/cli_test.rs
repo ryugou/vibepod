@@ -29,7 +29,15 @@ fn test_parse_run_with_prompt() {
 
 #[test]
 fn test_parse_run_with_env() {
-    let cli = Cli::parse_from(["vibepod", "run", "--resume", "--env", "KEY=VALUE", "--env", "FOO=BAR"]);
+    let cli = Cli::parse_from([
+        "vibepod",
+        "run",
+        "--resume",
+        "--env",
+        "KEY=VALUE",
+        "--env",
+        "FOO=BAR",
+    ]);
     if let vibepod::cli::Commands::Run { env, .. } = cli.command {
         assert_eq!(env, vec!["KEY=VALUE", "FOO=BAR"]);
     } else {

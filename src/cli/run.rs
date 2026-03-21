@@ -95,8 +95,7 @@ pub async fn execute(
 
     // 4. Check for existing container
     let name_prefix = format!("vibepod-{}", project_name);
-    if let Some((existing_id, existing_name)) =
-        runtime.find_running_container(&name_prefix).await?
+    if let Some((existing_id, existing_name)) = runtime.find_running_container(&name_prefix).await?
     {
         match prompts::handle_existing_container(&existing_name)? {
             prompts::ExistingContainerAction::Attach => {
@@ -114,19 +113,19 @@ pub async fn execute(
     // 5. Project registration
     let mut projects = config::load_projects(&config_dir)?;
     let cwd_str = cwd.to_string_lossy().to_string();
-    if !config::is_project_registered(&projects, &cwd_str) {
-        if prompts::confirm_project_registration(&project_name)? {
-            config::register_project(
-                &mut projects,
-                ProjectEntry {
-                    name: project_name.clone(),
-                    path: cwd_str.clone(),
-                    remote: remote.clone(),
-                    registered_at: chrono::Utc::now().to_rfc3339(),
-                },
-            );
-            config::save_projects(&projects, &config_dir)?;
-        }
+    if !config::is_project_registered(&projects, &cwd_str)
+        && prompts::confirm_project_registration(&project_name)?
+    {
+        config::register_project(
+            &mut projects,
+            ProjectEntry {
+                name: project_name.clone(),
+                path: cwd_str.clone(),
+                remote: remote.clone(),
+                registered_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
+        config::save_projects(&projects, &config_dir)?;
     }
 
     // 6. Build container args

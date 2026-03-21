@@ -32,8 +32,12 @@ pub fn save_global_config(config: &GlobalConfig, config_dir: &Path) -> Result<()
 
 pub fn load_global_config(config_dir: &Path) -> Result<GlobalConfig> {
     let path = config_dir.join("config.json");
-    let json = fs::read_to_string(&path)
-        .with_context(|| format!("Config not found: {}. Run `vibepod init` first.", path.display()))?;
+    let json = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "Config not found: {}. Run `vibepod init` first.",
+            path.display()
+        )
+    })?;
     let config: GlobalConfig = serde_json::from_str(&json)?;
     Ok(config)
 }

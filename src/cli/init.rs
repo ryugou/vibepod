@@ -9,7 +9,8 @@ pub async fn execute(claude_version: Option<String>) -> Result<()> {
     banner::print_banner();
 
     // 1. Check Docker
-    let runtime = DockerRuntime::new().await
+    let runtime = DockerRuntime::new()
+        .await
         .context("Docker is not running. Please start Docker Desktop or OrbStack.")?;
     runtime.ping().await?;
 
@@ -32,7 +33,10 @@ pub async fn execute(claude_version: Option<String>) -> Result<()> {
     build_args.insert("HOST_GID".to_string(), gid.to_string());
     build_args.insert("CLAUDE_VERSION".to_string(), version.clone());
 
-    match runtime.build_image(dockerfile, &image_name, build_args).await {
+    match runtime
+        .build_image(dockerfile, &image_name, build_args)
+        .await
+    {
         Ok(_) => {}
         Err(e) => {
             eprintln!("\n  ✗ Build failed: {}", e);

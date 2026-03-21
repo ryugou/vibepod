@@ -4,7 +4,10 @@ pub mod run;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "vibepod", about = "Safely run AI coding agents in Docker containers")]
+#[command(
+    name = "vibepod",
+    about = "Safely run AI coding agents in Docker containers"
+)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]

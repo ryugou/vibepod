@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
@@ -30,15 +29,27 @@ fn test_load_global_config_not_found() {
 #[test]
 fn test_register_and_check_project() {
     let mut config = vibepod::config::ProjectsConfig::default();
-    assert!(!vibepod::config::is_project_registered(&config, "/path/to/project"));
+    assert!(!vibepod::config::is_project_registered(
+        &config,
+        "/path/to/project"
+    ));
 
-    vibepod::config::register_project(&mut config, vibepod::config::ProjectEntry {
-        name: "my-project".to_string(),
-        path: "/path/to/project".to_string(),
-        remote: Some("github.com/user/repo".to_string()),
-        registered_at: "2026-03-22T10:00:00Z".to_string(),
-    });
+    vibepod::config::register_project(
+        &mut config,
+        vibepod::config::ProjectEntry {
+            name: "my-project".to_string(),
+            path: "/path/to/project".to_string(),
+            remote: Some("github.com/user/repo".to_string()),
+            registered_at: "2026-03-22T10:00:00Z".to_string(),
+        },
+    );
 
-    assert!(vibepod::config::is_project_registered(&config, "/path/to/project"));
-    assert!(!vibepod::config::is_project_registered(&config, "/other/path"));
+    assert!(vibepod::config::is_project_registered(
+        &config,
+        "/path/to/project"
+    ));
+    assert!(!vibepod::config::is_project_registered(
+        &config,
+        "/other/path"
+    ));
 }

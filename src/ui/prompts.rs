@@ -41,10 +41,7 @@ pub fn handle_existing_container(container_name: &str) -> Result<ExistingContain
     ];
 
     let selection = Select::new()
-        .with_prompt(format!(
-            "Container '{}' is already running",
-            container_name
-        ))
+        .with_prompt(format!("Container '{}' is already running", container_name))
         .items(&items)
         .default(0)
         .interact()?;
