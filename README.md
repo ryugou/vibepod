@@ -58,11 +58,14 @@ vp run --prompt "Fix the failing tests"
 ## Install
 
 ```bash
-# From source
-cargo install vibepod
+# macOS (Homebrew)
+brew install ryugou/tap/vibepod
 
-# Alias (optional)
-ln -s $(which vibepod) ~/.local/bin/vp
+# Linux / macOS (install script)
+curl -fsSL https://raw.githubusercontent.com/ryugou/vibepod/main/install.sh | sh
+
+# From source (requires Rust)
+cargo install vibepod
 ```
 
 ## Roadmap
