@@ -23,10 +23,16 @@ USER node
 ARG CLAUDE_VERSION=latest
 RUN npm install -g --loglevel=error @anthropic-ai/claude-code@${CLAUDE_VERSION}
 
+# Install Claude Code plugins
+RUN claude plugin marketplace add anthropics/claude-code --sparse .claude-plugin plugins && \
+    claude plugin marketplace add obra/superpowers-marketplace && \
+    claude plugin install superpowers && \
+    claude plugin install frontend-design
+
 USER root
 RUN mkdir -p /workspace && chown node:node /workspace
 
 USER node
 WORKDIR /workspace
 
-ENTRYPOINT ["claude"]
+CMD ["claude"]
