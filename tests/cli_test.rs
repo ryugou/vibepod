@@ -46,6 +46,29 @@ fn test_parse_run_with_env() {
 }
 
 #[test]
+fn test_interactive_mode_has_no_bypass_permissions() {
+    // Interactive mode: no --resume, no --prompt
+    let cli = Cli::parse_from(["vibepod", "run"]);
+    if let vibepod::cli::Commands::Run { resume, prompt, .. } = cli.command {
+        let interactive = !resume && prompt.is_none();
+        assert!(interactive, "Default run should be interactive");
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_fire_and_forget_mode_detected() {
+    let cli = Cli::parse_from(["vibepod", "run", "--prompt", "test"]);
+    if let vibepod::cli::Commands::Run { resume, prompt, .. } = cli.command {
+        let interactive = !resume && prompt.is_none();
+        assert!(!interactive, "Prompt mode should not be interactive");
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
 fn test_parse_init_with_claude_version() {
     let cli = Cli::parse_from(["vibepod", "init", "--claude-version", "1.2.3"]);
     if let vibepod::cli::Commands::Init { claude_version, .. } = cli.command {

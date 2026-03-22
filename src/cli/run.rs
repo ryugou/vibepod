@@ -121,7 +121,10 @@ pub async fn execute(
     }
 
     // 6. Build claude args
-    let mut claude_args = vec!["--dangerously-skip-permissions".to_string()];
+    let mut claude_args: Vec<String> = Vec::new();
+    if !interactive {
+        claude_args.push("--dangerously-skip-permissions".to_string());
+    }
     if resume {
         claude_args.push("--resume".to_string());
     }
@@ -149,13 +152,13 @@ pub async fn execute(
     let mode_label = if interactive {
         "interactive"
     } else if resume {
-        "resume"
+        "resume (--dangerously-skip-permissions)"
     } else {
-        "fire-and-forget"
+        "fire-and-forget (--dangerously-skip-permissions)"
     };
     println!("  ◇  Starting container...");
     println!("  │  Agent: Claude Code");
-    println!("  │  Mode: {} (--dangerously-skip-permissions)", mode_label);
+    println!("  │  Mode: {}", mode_label);
     println!("  │  Mount: {} → /workspace", cwd.display());
     println!("  │");
 
@@ -190,6 +193,7 @@ pub async fn execute(
         docker_args.push("-e".to_string());
         docker_args.push("TERM=xterm-256color".to_string());
         docker_args.push(global_config.image.clone());
+        docker_args.push("claude".to_string());
         docker_args.extend(claude_args);
 
         println!("  ◇  Container: {}", container_name);
@@ -220,7 +224,11 @@ pub async fn execute(
             } else {
                 None
             },
-            args: claude_args,
+            args: {
+                let mut full = vec!["claude".to_string()];
+                full.extend(claude_args);
+                full
+            },
             env_vars,
             network_disabled: no_network,
         };

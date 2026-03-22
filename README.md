@@ -2,7 +2,7 @@
 
 Safely run AI coding agents in Docker containers.
 
-VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with `--dangerously-skip-permissions` inside an isolated container — with just two commands.
+VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) inside an isolated container — with just two commands.
 
 ## Quick Start
 
@@ -42,8 +42,8 @@ Runs an AI coding agent inside a container, mounting your project directory.
 
 #### When to use which?
 
-- **`vibepod run`** (interactive) — day-to-day development. You get a normal Claude Code session, but safely inside a Docker container with `--dangerously-skip-permissions` enabled. Design, implement, and iterate interactively — all without risking your host system.
-- **`--prompt`** (fire-and-forget) — when the spec is already written and you want to kick off autonomous execution. Great for running overnight or during meetings. Pair with a spec file in your repo: `vibepod run --prompt "Follow specs/login.md and implement"`.
+- **`vibepod run`** (interactive) — day-to-day development. You get a normal Claude Code session safely inside a Docker container. Permission prompts work normally — no bypass mode.
+- **`--prompt`** (fire-and-forget) — when the spec is already written and you want to kick off autonomous execution with `--dangerously-skip-permissions`. Great for running overnight or during meetings. Pair with a spec file in your repo: `vibepod run --prompt "Follow specs/login.md and implement"`.
 
 ## Security Model
 
