@@ -127,7 +127,7 @@ impl DockerRuntime {
                 ..Default::default()
             },
             Mount {
-                target: Some("/home/node/.claude/.credentials.json".to_string()),
+                target: Some("/home/vibepod/.claude/.credentials.json".to_string()),
                 source: Some(config.claude_credentials.clone()),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(true),
@@ -137,7 +137,7 @@ impl DockerRuntime {
 
         if let Some(ref claude_json_path) = config.claude_json {
             mounts.push(Mount {
-                target: Some("/home/node/.claude.json".to_string()),
+                target: Some("/home/vibepod/.claude.json".to_string()),
                 source: Some(claude_json_path.clone()),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(false),
