@@ -10,6 +10,7 @@ pub async fn execute(
     prompt: Option<String>,
     no_network: bool,
     env_vars: Vec<String>,
+    env_file: Option<String>,
 ) -> Result<()> {
     // Determine mode: interactive (default), prompt, or resume
     let interactive = !resume && prompt.is_none();
@@ -133,7 +134,76 @@ pub async fn execute(
         claude_args.push(p.clone());
     }
 
-    // 7. Generate container name
+    // 7. Resolve env file if provided
+    let mut resolved_env_vars = env_vars.clone();
+    if let Some(ref env_file_path) = env_file {
+        let content = std::fs::read_to_string(env_file_path)
+            .with_context(|| format!("Failed to read env file: {}", env_file_path))?;
+
+        let parsed: Vec<(String, String)> = content
+            .lines()
+            .filter(|line| {
+                let t = line.trim();
+                !t.is_empty() && !t.starts_with('#')
+            })
+            .filter_map(|line| {
+                let t = line.trim();
+                let (key, value) = t.split_once('=')?;
+                let value = value.trim_matches('"').trim_matches('\'');
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect();
+
+        let has_op_refs = parsed.iter().any(|(_, v)| v.starts_with("op://"));
+
+        if has_op_refs {
+            // Use `op run` to resolve op:// references
+            let op_check = Command::new("op").arg("--version").output();
+            if op_check.is_err() || !op_check.unwrap().status.success() {
+                bail!(
+                    "env file contains op:// references but 1Password CLI (op) is not installed.\n  \
+                     Install it: https://developer.1password.com/docs/cli/"
+                );
+            }
+
+            println!("  ◇  Resolving op:// references via 1Password CLI...");
+
+            let output = Command::new("op")
+                .args([
+                    "run",
+                    &format!("--env-file={}", env_file_path),
+                    "--no-masking",
+                    "--",
+                    "env",
+                ])
+                .output()
+                .context("Failed to run `op run` to resolve secrets")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("1Password CLI failed to resolve secrets: {}", stderr);
+            }
+
+            // Parse resolved env output — only keep keys that were in our env file
+            let env_keys: std::collections::HashSet<String> =
+                parsed.iter().map(|(k, _)| k.clone()).collect();
+            let resolved_output = String::from_utf8_lossy(&output.stdout);
+            for line in resolved_output.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    if env_keys.contains(key) {
+                        resolved_env_vars.push(format!("{}={}", key, value));
+                    }
+                }
+            }
+        } else {
+            // No op:// references, pass as-is
+            for (key, value) in &parsed {
+                resolved_env_vars.push(format!("{}={}", key, value));
+            }
+        }
+    }
+
+    // 8. Generate container name
     let short_hash: String = (0..6)
         .map(|_| format!("{:x}", rand::random::<u8>() % 16))
         .collect();
@@ -186,7 +256,7 @@ pub async fn execute(
             docker_args.push("--network".to_string());
             docker_args.push("none".to_string());
         }
-        for env_var in &env_vars {
+        for env_var in &resolved_env_vars {
             docker_args.push("-e".to_string());
             docker_args.push(env_var.clone());
         }
@@ -229,7 +299,7 @@ pub async fn execute(
                 full.extend(claude_args);
                 full
             },
-            env_vars,
+            env_vars: resolved_env_vars,
             network_disabled: no_network,
         };
 

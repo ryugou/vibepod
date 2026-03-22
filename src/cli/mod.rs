@@ -36,5 +36,8 @@ pub enum Commands {
         /// Environment variables to pass (KEY=VALUE)
         #[arg(long, num_args = 1)]
         env: Vec<String>,
+        /// Environment file (supports op:// references via 1Password CLI)
+        #[arg(long)]
+        env_file: Option<String>,
     },
 }

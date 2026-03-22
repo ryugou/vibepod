@@ -77,3 +77,13 @@ fn test_parse_init_with_claude_version() {
         panic!("Expected Init command");
     }
 }
+
+#[test]
+fn test_parse_run_with_env_file() {
+    let cli = Cli::parse_from(["vibepod", "run", "--env-file", ".env.template"]);
+    if let vibepod::cli::Commands::Run { env_file, .. } = cli.command {
+        assert_eq!(env_file, Some(".env.template".to_string()));
+    } else {
+        panic!("Expected Run command");
+    }
+}

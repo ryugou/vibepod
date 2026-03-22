@@ -17,8 +17,9 @@ async fn main() -> Result<()> {
             prompt,
             no_network,
             env,
+            env_file,
         } => {
-            vibepod::cli::run::execute(resume, prompt, no_network, env).await?;
+            vibepod::cli::run::execute(resume, prompt, no_network, env, env_file).await?;
         }
     }
 

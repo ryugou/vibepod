@@ -39,11 +39,27 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--resume` | Continue from the previous session (fire-and-forget) |
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
+| `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
 
 #### When to use which?
 
 - **`vibepod run`** (interactive) — day-to-day development. You get a normal Claude Code session safely inside a Docker container. Permission prompts work normally — no bypass mode.
 - **`--prompt`** (fire-and-forget) — when the spec is already written and you want to kick off autonomous execution with `--dangerously-skip-permissions`. Great for running overnight or during meetings. Pair with a spec file in your repo: `vibepod run --prompt "Follow specs/login.md and implement"`.
+
+#### Passing secrets with 1Password
+
+Create a `.env.template` with `op://` references (safe to commit to Git):
+
+```
+GITHUB_TOKEN="op://ai-agents/GitHub/token"
+DB_URL="op://ai-agents/PostgreSQL/url"
+```
+
+VibePod resolves them via 1Password CLI before passing to the container:
+
+```bash
+vibepod run --env-file .env.template
+```
 
 ## Security Model
 
