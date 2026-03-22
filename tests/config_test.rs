@@ -8,7 +8,6 @@ fn test_save_and_load_global_config() {
     let config = vibepod::config::GlobalConfig {
         default_agent: "claude".to_string(),
         image: "vibepod-claude:latest".to_string(),
-        claude_version: "latest".to_string(),
     };
 
     vibepod::config::save_global_config(&config, &config_dir).unwrap();
@@ -16,7 +15,6 @@ fn test_save_and_load_global_config() {
 
     assert_eq!(loaded.default_agent, "claude");
     assert_eq!(loaded.image, "vibepod-claude:latest");
-    assert_eq!(loaded.claude_version, "latest");
 }
 
 #[test]

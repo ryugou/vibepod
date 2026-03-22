@@ -69,16 +69,6 @@ fn test_fire_and_forget_mode_detected() {
 }
 
 #[test]
-fn test_parse_init_with_claude_version() {
-    let cli = Cli::parse_from(["vibepod", "init", "--claude-version", "1.2.3"]);
-    if let vibepod::cli::Commands::Init { claude_version, .. } = cli.command {
-        assert_eq!(claude_version, Some("1.2.3".to_string()));
-    } else {
-        panic!("Expected Init command");
-    }
-}
-
-#[test]
 fn test_parse_run_with_env_file() {
     let cli = Cli::parse_from(["vibepod", "run", "--env-file", ".env.template"]);
     if let vibepod::cli::Commands::Run { env_file, .. } = cli.command {

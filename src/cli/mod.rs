@@ -17,11 +17,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize VibePod (build Docker image)
-    Init {
-        /// Pin Claude Code to a specific version
-        #[arg(long)]
-        claude_version: Option<String>,
-    },
+    Init {},
     /// Run AI agent in a container
     Run {
         /// Resume previous session
