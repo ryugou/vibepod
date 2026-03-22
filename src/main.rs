@@ -9,8 +9,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { claude_version } => {
-            vibepod::cli::init::execute(claude_version).await?;
+        Commands::Init {} => {
+            vibepod::cli::init::execute().await?;
         }
         Commands::Run {
             resume,

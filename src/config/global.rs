@@ -7,7 +7,6 @@ use std::path::Path;
 pub struct GlobalConfig {
     pub default_agent: String,
     pub image: String,
-    pub claude_version: String,
 }
 
 impl Default for GlobalConfig {
@@ -15,7 +14,6 @@ impl Default for GlobalConfig {
         Self {
             default_agent: "claude".to_string(),
             image: "vibepod-claude:latest".to_string(),
-            claude_version: "latest".to_string(),
         }
     }
 }

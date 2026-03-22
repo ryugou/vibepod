@@ -13,15 +13,9 @@ RUN groupmod --non-unique -g ${HOST_GID} node && \
     usermod --non-unique -u ${HOST_UID} -g ${HOST_GID} node && \
     chown -R node:node /home/node
 
-RUN mkdir -p /usr/local/share/npm-global && \
-    chown -R node:node /usr/local/share
-
-ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
-ENV PATH=$PATH:/usr/local/share/npm-global/bin
-
 USER node
-ARG CLAUDE_VERSION=latest
-RUN npm install -g --loglevel=error @anthropic-ai/claude-code@${CLAUDE_VERSION}
+ENV PATH=/home/node/.local/bin:$PATH
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Install Claude Code plugins
 RUN claude plugin marketplace add anthropics/claude-code --sparse .claude-plugin plugins && \
