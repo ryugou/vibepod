@@ -204,16 +204,24 @@ pub async fn execute(
         let mut exec_args = vec!["exec".to_string(), "-it".to_string(), container_id.clone()];
         exec_args.extend(claude_args);
 
-        let status = Command::new("docker")
+        let mut child = Command::new("docker")
             .args(&exec_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
-            .status()
+            .spawn()
             .context("Failed to exec into container")?;
 
-        if !status.success() {
-            // Claude exited with non-zero, which is fine (e.g., user quit)
+        // Wait for either claude to exit or Ctrl+C
+        tokio::select! {
+            _ = async { tokio::task::block_in_place(|| child.wait()) } => {
+                // Claude exited naturally
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n  Stopping container...");
+                child.kill().ok();
+                child.wait().ok();
+            }
         }
     } else {
         // Fire-and-forget mode: stream logs
