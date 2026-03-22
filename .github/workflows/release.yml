@@ -96,10 +96,16 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
+      - name: Download release assets and compute checksums
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE_URL="https://github.com/ryugou/vibepod/releases/download/v${VERSION}"
+          TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin" "aarch64-unknown-linux-gnu" "x86_64-unknown-linux-gnu")
+          for target in "${TARGETS[@]}"; do
+            curl -fSL -o "vibepod-${VERSION}-${target}.tar.gz" "${BASE_URL}/vibepod-${VERSION}-${target}.tar.gz"
+          done
       - name: Generate and push Homebrew formula
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -107,10 +113,10 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           BASE_URL="https://github.com/ryugou/vibepod/releases/download/v${VERSION}"
 
-          SHA_DARWIN_ARM=$(awk '{print $1}' "vibepod-${VERSION}-aarch64-apple-darwin.tar.gz.sha256")
-          SHA_DARWIN_X86=$(awk '{print $1}' "vibepod-${VERSION}-x86_64-apple-darwin.tar.gz.sha256")
-          SHA_LINUX_ARM=$(awk '{print $1}' "vibepod-${VERSION}-aarch64-unknown-linux-gnu.tar.gz.sha256")
-          SHA_LINUX_X86=$(awk '{print $1}' "vibepod-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256")
+          SHA_DARWIN_ARM=$(sha256sum "vibepod-${VERSION}-aarch64-apple-darwin.tar.gz" | awk '{print $1}')
+          SHA_DARWIN_X86=$(sha256sum "vibepod-${VERSION}-x86_64-apple-darwin.tar.gz" | awk '{print $1}')
+          SHA_LINUX_ARM=$(sha256sum "vibepod-${VERSION}-aarch64-unknown-linux-gnu.tar.gz" | awk '{print $1}')
+          SHA_LINUX_X86=$(sha256sum "vibepod-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" | awk '{print $1}')
 
           cat > vibepod.rb <<EOF
           class Vibepod < Formula
