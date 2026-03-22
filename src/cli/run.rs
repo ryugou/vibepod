@@ -250,7 +250,10 @@ pub async fn execute(
         ];
         if claude_json.exists() {
             docker_args.push("-v".to_string());
-            docker_args.push(format!("{}:/home/vibepod/.claude.json", claude_json.display()));
+            docker_args.push(format!(
+                "{}:/home/vibepod/.claude.json",
+                claude_json.display()
+            ));
         }
         if no_network {
             docker_args.push("--network".to_string());
