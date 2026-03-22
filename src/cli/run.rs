@@ -11,14 +11,8 @@ pub async fn execute(
     no_network: bool,
     env_vars: Vec<String>,
 ) -> Result<()> {
-    // Validate: need either --resume or --prompt
-    if !resume && prompt.is_none() {
-        bail!(
-            "Either --resume or --prompt is required.\n  \
-             Use --resume to continue a previous session, or\n  \
-             Use --prompt \"...\" to start with a specific instruction."
-        );
-    }
+    // Determine mode: interactive (default), prompt, or resume
+    let interactive = !resume && prompt.is_none();
 
     // 1. Check git repo
     let cwd = std::env::current_dir()?;
@@ -153,9 +147,16 @@ pub async fn execute(
 
     let mount_claude_json = claude_json.exists();
 
+    let mode_label = if interactive {
+        "interactive"
+    } else if resume {
+        "resume"
+    } else {
+        "fire-and-forget"
+    };
     println!("  ◇  Starting container...");
     println!("  │  Agent: Claude Code");
-    println!("  │  Mode: --dangerously-skip-permissions");
+    println!("  │  Mode: {} (--dangerously-skip-permissions)", mode_label);
     println!("  │  Mount: {} → /workspace", cwd.display());
     println!("  │");
 
@@ -179,16 +180,36 @@ pub async fn execute(
         .await?;
 
     println!("  ◇  Container started: {}", container_name);
-    println!("  │  Press Ctrl+C to stop the container.");
-    println!("  └\n");
+    if interactive {
+        println!("  └\n");
+    } else {
+        println!("  │  Press Ctrl+C to stop the container.");
+        println!("  └\n");
+    }
 
-    // 8. Stream logs until agent exits or Ctrl+C
-    tokio::select! {
-        _ = runtime.stream_logs(&container_id) => {
-            // Agent finished naturally
+    // 8. Attach or stream logs
+    if interactive {
+        // Interactive mode: attach stdin/stdout/stderr via docker CLI
+        let status = Command::new("docker")
+            .args(["attach", &container_id])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("Failed to attach to container")?;
+
+        if !status.success() {
+            // Container may have already exited, which is fine
         }
-        _ = tokio::signal::ctrl_c() => {
-            println!("\n  Stopping container...");
+    } else {
+        // Fire-and-forget mode: stream logs
+        tokio::select! {
+            _ = runtime.stream_logs(&container_id) => {
+                // Agent finished naturally
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n  Stopping container...");
+            }
         }
     }
 

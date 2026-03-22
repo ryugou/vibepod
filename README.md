@@ -14,8 +14,11 @@ brew install vibepod
 # Build the Docker image (one-time setup)
 vibepod init
 
-# Run an AI agent in your project
+# Run interactively inside a safe container
 cd your-project
+vibepod run
+
+# Or fire-and-forget with a prompt
 vibepod run --prompt "Implement the login page"
 ```
 
@@ -31,12 +34,16 @@ Runs an AI coding agent inside a container, mounting your project directory.
 
 | Option | Description |
 |--------|-------------|
-| `--prompt "..."` | Initial prompt for the agent |
-| `--resume` | Continue from the previous session |
+| *(none)* | **Interactive mode** — opens a Claude Code session inside the container |
+| `--prompt "..."` | Fire-and-forget mode — agent runs autonomously and exits when done |
+| `--resume` | Continue from the previous session (fire-and-forget) |
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 
-Either `--prompt` or `--resume` is required.
+#### When to use which?
+
+- **`vibepod run`** (interactive) — day-to-day development. You get a normal Claude Code session, but safely inside a Docker container with `--dangerously-skip-permissions` enabled. Design, implement, and iterate interactively — all without risking your host system.
+- **`--prompt`** (fire-and-forget) — when the spec is already written and you want to kick off autonomous execution. Great for running overnight or during meetings. Pair with a spec file in your repo: `vibepod run --prompt "Follow specs/login.md and implement"`.
 
 ## Security Model
 
@@ -77,8 +84,9 @@ cargo install vibepod
 
 | Version | Features |
 |---------|----------|
-| **v1** | `init` + `run`, Claude Code support |
-| **v1.1** | 1Password CLI integration, `vibepod restore` (git HEAD auto-recovery) |
+| **v1.0** | `init` + `run` (fire-and-forget), Claude Code support |
+| **v1.1** | Interactive mode (default `run`), improved UX |
+| **v1.2** | 1Password CLI integration, `vibepod restore` (git HEAD auto-recovery) |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
 | **v2.1+** | Gemini CLI / Codex support, multi-container execution |
 
