@@ -84,9 +84,8 @@ cargo install vibepod
 
 | Version | Features |
 |---------|----------|
-| **v1.0** | `init` + `run` (fire-and-forget), Claude Code support |
-| **v1.1** | Interactive mode (default `run`), improved UX |
-| **v1.2** | 1Password CLI integration, `vibepod restore` (git HEAD auto-recovery) |
+| **v1.0** | `init` + `run` (interactive / fire-and-forget), Claude Code support |
+| **v1.1** | 1Password CLI integration, `vibepod restore` (git HEAD auto-recovery) |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
 | **v2.1+** | Gemini CLI / Codex support, multi-container execution |
 

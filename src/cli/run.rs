@@ -120,11 +120,8 @@ pub async fn execute(
         config::save_projects(&projects, &config_dir)?;
     }
 
-    // 6. Build container command
-    let mut claude_args = vec![
-        "claude".to_string(),
-        "--dangerously-skip-permissions".to_string(),
-    ];
+    // 6. Build claude args
+    let mut claude_args = vec!["--dangerously-skip-permissions".to_string()];
     if resume {
         claude_args.push("--resume".to_string());
     }
@@ -132,14 +129,6 @@ pub async fn execute(
         claude_args.push("-p".to_string());
         claude_args.push(p.clone());
     }
-
-    // Interactive mode: container runs sleep, we exec claude into it with proper TTY
-    // Fire-and-forget: container runs claude directly
-    let container_cmd = if interactive {
-        vec!["sleep".to_string(), "infinity".to_string()]
-    } else {
-        claude_args.clone()
-    };
 
     // 7. Generate container name
     let short_hash: String = (0..6)
@@ -150,13 +139,12 @@ pub async fn execute(
     // Resolve paths
     let home = dirs::home_dir().context("Cannot determine home directory")?;
     let claude_dir = home.join(".claude");
+    let claude_credentials = claude_dir.join(".credentials.json");
     let claude_json = home.join(".claude.json");
 
-    if !claude_dir.exists() {
-        bail!("~/.claude not found. Please run `claude` once to log in first.");
+    if !claude_credentials.exists() {
+        bail!("~/.claude/.credentials.json not found. Please run `claude` once to log in first.");
     }
-
-    let mount_claude_json = claude_json.exists();
 
     let mode_label = if interactive {
         "interactive"
@@ -171,60 +159,80 @@ pub async fn execute(
     println!("  │  Mount: {} → /workspace", cwd.display());
     println!("  │");
 
-    let container_config = ContainerConfig {
-        image: global_config.image,
-        container_name: container_name.clone(),
-        workspace_path: cwd_str,
-        claude_dir: claude_dir.to_string_lossy().to_string(),
-        claude_json: if mount_claude_json {
-            Some(claude_json.to_string_lossy().to_string())
-        } else {
-            None
-        },
-        args: container_cmd,
-        env_vars,
-        network_disabled: no_network,
-    };
-
-    let container_id = runtime
-        .create_and_start_container(&container_config)
-        .await?;
-
-    println!("  ◇  Container started: {}", container_name);
     if interactive {
-        println!("  └\n");
-    } else {
-        println!("  │  Press Ctrl+C to stop the container.");
-        println!("  └\n");
-    }
+        // Interactive mode: docker run -it with inherited stdio
+        let mut docker_args = vec![
+            "run".to_string(),
+            "-it".to_string(),
+            "--rm".to_string(),
+            "--name".to_string(),
+            container_name.clone(),
+            "-v".to_string(),
+            format!("{}:/workspace", cwd_str),
+            "-v".to_string(),
+            format!(
+                "{}:/home/node/.claude/.credentials.json:ro",
+                claude_credentials.display()
+            ),
+        ];
+        if claude_json.exists() {
+            docker_args.push("-v".to_string());
+            docker_args.push(format!("{}:/home/node/.claude.json", claude_json.display()));
+        }
+        if no_network {
+            docker_args.push("--network".to_string());
+            docker_args.push("none".to_string());
+        }
+        for env_var in &env_vars {
+            docker_args.push("-e".to_string());
+            docker_args.push(env_var.clone());
+        }
+        docker_args.push("-e".to_string());
+        docker_args.push("TERM=xterm-256color".to_string());
+        docker_args.push(global_config.image.clone());
+        docker_args.extend(claude_args);
 
-    // 8. Exec or stream logs
-    if interactive {
-        // Interactive mode: exec claude into the running container with proper TTY
-        let mut exec_args = vec!["exec".to_string(), "-it".to_string(), container_id.clone()];
-        exec_args.extend(claude_args);
+        println!("  ◇  Container: {}", container_name);
+        println!("  └\n");
 
-        let mut child = Command::new("docker")
-            .args(&exec_args)
+        let status = Command::new("docker")
+            .args(&docker_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
-            .spawn()
-            .context("Failed to exec into container")?;
+            .status()
+            .context("Failed to run container")?;
 
-        // Wait for either claude to exit or Ctrl+C
-        tokio::select! {
-            _ = async { tokio::task::block_in_place(|| child.wait()) } => {
-                // Claude exited naturally
-            }
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n  Stopping container...");
-                child.kill().ok();
-                child.wait().ok();
-            }
+        if !status.success() {
+            // Claude exited with non-zero, which is fine (e.g., user quit)
         }
+
+        println!("  Container stopped and removed.");
     } else {
-        // Fire-and-forget mode: stream logs
+        // Fire-and-forget mode: use bollard API
+        let container_config = ContainerConfig {
+            image: global_config.image,
+            container_name: container_name.clone(),
+            workspace_path: cwd_str,
+            claude_credentials: claude_credentials.to_string_lossy().to_string(),
+            claude_json: if claude_json.exists() {
+                Some(claude_json.to_string_lossy().to_string())
+            } else {
+                None
+            },
+            args: claude_args,
+            env_vars,
+            network_disabled: no_network,
+        };
+
+        let container_id = runtime
+            .create_and_start_container(&container_config)
+            .await?;
+
+        println!("  ◇  Container started: {}", container_name);
+        println!("  │  Press Ctrl+C to stop the container.");
+        println!("  └\n");
+
         tokio::select! {
             _ = runtime.stream_logs(&container_id) => {
                 // Agent finished naturally
@@ -233,12 +241,11 @@ pub async fn execute(
                 println!("\n  Stopping container...");
             }
         }
-    }
 
-    // Always clean up container
-    runtime.stop_container(&container_id, 10).await.ok();
-    runtime.remove_container(&container_id).await.ok();
-    println!("  Container stopped and removed.");
+        runtime.stop_container(&container_id, 10).await.ok();
+        runtime.remove_container(&container_id).await.ok();
+        println!("  Container stopped and removed.");
+    }
 
     Ok(())
 }

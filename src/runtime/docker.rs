@@ -17,7 +17,7 @@ pub struct ContainerConfig {
     pub image: String,
     pub container_name: String,
     pub workspace_path: String,
-    pub claude_dir: String,
+    pub claude_credentials: String,
     pub claude_json: Option<String>,
     pub args: Vec<String>,
     pub env_vars: Vec<String>,
@@ -127,10 +127,10 @@ impl DockerRuntime {
                 ..Default::default()
             },
             Mount {
-                target: Some("/home/node/.claude".to_string()),
-                source: Some(config.claude_dir.clone()),
+                target: Some("/home/node/.claude/.credentials.json".to_string()),
+                source: Some(config.claude_credentials.clone()),
                 typ: Some(MountTypeEnum::BIND),
-                read_only: Some(false),
+                read_only: Some(true),
                 ..Default::default()
             },
         ];
@@ -140,7 +140,7 @@ impl DockerRuntime {
                 target: Some("/home/node/.claude.json".to_string()),
                 source: Some(claude_json_path.clone()),
                 typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
+                read_only: Some(false),
                 ..Default::default()
             });
         }

@@ -4,7 +4,7 @@ ARG HOST_UID=501
 ARG HOST_GID=20
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  git sudo jq curl \
+  git sudo jq curl ca-certificates \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ホストの uid/gid に合わせて node ユーザーを再設定（macOS: 501:20）
@@ -29,4 +29,4 @@ RUN mkdir -p /workspace && chown node:node /workspace
 USER node
 WORKDIR /workspace
 
-CMD ["claude", "--dangerously-skip-permissions"]
+ENTRYPOINT ["claude"]
