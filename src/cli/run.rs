@@ -244,13 +244,13 @@ pub async fn execute(
             format!("{}:/workspace", cwd_str),
             "-v".to_string(),
             format!(
-                "{}:/home/node/.claude/.credentials.json:ro",
+                "{}:/home/vibepod/.claude/.credentials.json:ro",
                 claude_credentials.display()
             ),
         ];
         if claude_json.exists() {
             docker_args.push("-v".to_string());
-            docker_args.push(format!("{}:/home/node/.claude.json", claude_json.display()));
+            docker_args.push(format!("{}:/home/vibepod/.claude.json", claude_json.display()));
         }
         if no_network {
             docker_args.push("--network".to_string());

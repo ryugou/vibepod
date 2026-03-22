@@ -1,4 +1,4 @@
-FROM node:24-slim
+FROM debian:bookworm-slim
 
 ARG HOST_UID=501
 ARG HOST_GID=20
@@ -7,14 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   git sudo jq curl ca-certificates \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# ホストの uid/gid に合わせて node ユーザーを再設定（macOS: 501:20）
-# --non-unique で既存 GID との衝突を許容（macOS GID 20 は Debian の dialout と重複）
-RUN groupmod --non-unique -g ${HOST_GID} node && \
-    usermod --non-unique -u ${HOST_UID} -g ${HOST_GID} node && \
-    chown -R node:node /home/node
+# vibepod ユーザーを作成し、ホストの uid/gid に合わせる
+RUN groupadd --non-unique -g ${HOST_GID} vibepod && \
+    useradd -m -u ${HOST_UID} -g ${HOST_GID} -s /bin/bash vibepod
 
-USER node
-ENV PATH=/home/node/.local/bin:$PATH
+USER vibepod
+ENV PATH=/home/vibepod/.local/bin:$PATH
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Install Claude Code plugins
@@ -24,9 +22,9 @@ RUN claude plugin marketplace add anthropics/claude-code --sparse .claude-plugin
     claude plugin install frontend-design
 
 USER root
-RUN mkdir -p /workspace && chown node:node /workspace
+RUN mkdir -p /workspace && chown vibepod:vibepod /workspace
 
-USER node
+USER vibepod
 WORKDIR /workspace
 
 CMD ["claude"]
