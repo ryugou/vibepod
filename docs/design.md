@@ -327,7 +327,8 @@ v1 では登録・保存のみ行い、参照する UI は v2 で実装する。
 
 ```bash
 # macOS (Homebrew)
-brew install ryugou/tap/vibepod
+brew tap ryugou/tap
+brew install vibepod
 
 # Linux / macOS (インストールスクリプト)
 curl -fsSL https://raw.githubusercontent.com/ryugou/vibepod/main/install.sh | sh
