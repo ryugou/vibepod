@@ -120,15 +120,26 @@ pub async fn execute(
         config::save_projects(&projects, &config_dir)?;
     }
 
-    // 6. Build container args
-    let mut args = vec!["--dangerously-skip-permissions".to_string()];
+    // 6. Build container command
+    let mut claude_args = vec![
+        "claude".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+    ];
     if resume {
-        args.push("--resume".to_string());
+        claude_args.push("--resume".to_string());
     }
     if let Some(ref p) = prompt {
-        args.push("-p".to_string());
-        args.push(p.clone());
+        claude_args.push("-p".to_string());
+        claude_args.push(p.clone());
     }
+
+    // Interactive mode: container runs sleep, we exec claude into it with proper TTY
+    // Fire-and-forget: container runs claude directly
+    let container_cmd = if interactive {
+        vec!["sleep".to_string(), "infinity".to_string()]
+    } else {
+        claude_args.clone()
+    };
 
     // 7. Generate container name
     let short_hash: String = (0..6)
@@ -170,7 +181,7 @@ pub async fn execute(
         } else {
             None
         },
-        args,
+        args: container_cmd,
         env_vars,
         network_disabled: no_network,
     };
@@ -187,19 +198,26 @@ pub async fn execute(
         println!("  └\n");
     }
 
-    // 8. Attach or stream logs
+    // 8. Exec or stream logs
     if interactive {
-        // Interactive mode: attach stdin/stdout/stderr via docker CLI
+        // Interactive mode: exec claude into the running container with proper TTY
+        let mut exec_args = vec![
+            "exec".to_string(),
+            "-it".to_string(),
+            container_id.clone(),
+        ];
+        exec_args.extend(claude_args);
+
         let status = Command::new("docker")
-            .args(["attach", &container_id])
+            .args(&exec_args)
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .status()
-            .context("Failed to attach to container")?;
+            .context("Failed to exec into container")?;
 
         if !status.success() {
-            // Container may have already exited, which is fine
+            // Claude exited with non-zero, which is fine (e.g., user quit)
         }
     } else {
         // Fire-and-forget mode: stream logs

@@ -29,4 +29,4 @@ RUN mkdir -p /workspace && chown node:node /workspace
 USER node
 WORKDIR /workspace
 
-ENTRYPOINT ["claude"]
+CMD ["claude", "--dangerously-skip-permissions"]
