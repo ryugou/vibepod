@@ -1,6 +1,6 @@
 [package]
 name = "vibepod"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Safely run AI coding agents in Docker containers"
 license = "MIT"
