@@ -201,11 +201,7 @@ pub async fn execute(
     // 8. Exec or stream logs
     if interactive {
         // Interactive mode: exec claude into the running container with proper TTY
-        let mut exec_args = vec![
-            "exec".to_string(),
-            "-it".to_string(),
-            container_id.clone(),
-        ];
+        let mut exec_args = vec!["exec".to_string(), "-it".to_string(), container_id.clone()];
         exec_args.extend(claude_args);
 
         let status = Command::new("docker")
