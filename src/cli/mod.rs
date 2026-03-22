@@ -27,7 +27,7 @@ pub enum Commands {
         /// Resume previous session
         #[arg(long)]
         resume: bool,
-        /// Initial prompt for the agent
+        /// Initial prompt for the agent (fire-and-forget mode)
         #[arg(long)]
         prompt: Option<String>,
         /// Disable network access in the container
