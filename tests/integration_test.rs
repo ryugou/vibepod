@@ -17,16 +17,18 @@ fn test_vibepod_version() {
 }
 
 #[test]
-fn test_run_without_resume_or_prompt_fails() {
+fn test_run_interactive_outside_git_repo_fails() {
+    let tmp = tempfile::TempDir::new().unwrap();
     let output = Command::new(vibepod_bin())
         .arg("run")
+        .current_dir(tmp.path())
         .output()
         .expect("Failed to run vibepod");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--resume") || stderr.contains("--prompt"),
-        "Error should mention --resume or --prompt, got: {}",
+        stderr.contains("git") || stderr.contains("repository"),
+        "Error should mention git repository, got: {}",
         stderr
     );
 }
