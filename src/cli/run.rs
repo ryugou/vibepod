@@ -4,6 +4,7 @@ use std::process::Command;
 use crate::config::{self, ProjectEntry};
 use crate::git;
 use crate::runtime::{ContainerConfig, DockerRuntime};
+use crate::session::{self, SessionStore};
 use crate::ui::prompts;
 
 pub async fn execute(
@@ -22,6 +23,50 @@ pub async fn execute(
         bail!("Not a git repository. Run this command inside a git-initialized directory.");
     }
 
+    // Record session for restore
+    let head_before = git::get_head_hash(&cwd)?;
+    let current_branch = git::get_current_branch(&cwd).unwrap_or_else(|_| "unknown".to_string());
+
+    let vibepod_dir = cwd.join(".vibepod");
+    let store = SessionStore::new(vibepod_dir.clone());
+
+    // Ensure .vibepod/ is in .gitignore
+    let gitignore_path = cwd.join(".gitignore");
+    if gitignore_path.exists() {
+        let content = std::fs::read_to_string(&gitignore_path)?;
+        if !content
+            .lines()
+            .any(|l| l.trim() == ".vibepod/" || l.trim() == ".vibepod")
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&gitignore_path)?;
+            use std::io::Write;
+            writeln!(file, "\n.vibepod/")?;
+        }
+    } else {
+        std::fs::write(&gitignore_path, ".vibepod/\n")?;
+    }
+
+    let prompt_label = if interactive {
+        "interactive".to_string()
+    } else if resume {
+        "--resume".to_string()
+    } else {
+        prompt.as_deref().unwrap_or("").to_string()
+    };
+
+    let session_record = session::Session {
+        id: session::generate_session_id(),
+        started_at: chrono::Local::now().to_rfc3339(),
+        head_before,
+        branch: current_branch.clone(),
+        prompt: prompt_label,
+        claude_session_path: None,
+        restored: false,
+    };
+    store.add(session_record)?;
+
     let project_name = cwd
         .file_name()
         .context("Cannot determine project name")?
@@ -32,7 +77,7 @@ pub async fn execute(
     let remote = git::get_remote_url(&cwd);
 
     // Get branch
-    let branch = git::get_current_branch(&cwd).unwrap_or_else(|_| "unknown".to_string());
+    let branch = current_branch;
 
     println!("\n  ┌  VibePod");
     println!("  │");
