@@ -17,8 +17,8 @@ pub struct ContainerConfig {
     pub image: String,
     pub container_name: String,
     pub workspace_path: String,
-    pub claude_credentials: String,
     pub claude_json: Option<String>,
+    pub gitconfig: Option<String>,
     pub args: Vec<String>,
     pub env_vars: Vec<String>,
     pub network_disabled: bool,
@@ -118,22 +118,13 @@ impl DockerRuntime {
     }
 
     pub async fn create_and_start_container(&self, config: &ContainerConfig) -> Result<String> {
-        let mut mounts = vec![
-            Mount {
-                target: Some("/workspace".to_string()),
-                source: Some(config.workspace_path.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(false),
-                ..Default::default()
-            },
-            Mount {
-                target: Some("/home/vibepod/.claude/.credentials.json".to_string()),
-                source: Some(config.claude_credentials.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
-                ..Default::default()
-            },
-        ];
+        let mut mounts = vec![Mount {
+            target: Some("/workspace".to_string()),
+            source: Some(config.workspace_path.clone()),
+            typ: Some(MountTypeEnum::BIND),
+            read_only: Some(false),
+            ..Default::default()
+        }];
 
         if let Some(ref claude_json_path) = config.claude_json {
             mounts.push(Mount {
@@ -141,6 +132,16 @@ impl DockerRuntime {
                 source: Some(claude_json_path.clone()),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(false),
+                ..Default::default()
+            });
+        }
+
+        if let Some(ref gitconfig_path) = config.gitconfig {
+            mounts.push(Mount {
+                target: Some("/home/vibepod/.gitconfig".to_string()),
+                source: Some(gitconfig_path.clone()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
                 ..Default::default()
             });
         }

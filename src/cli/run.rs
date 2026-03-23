@@ -2,7 +2,9 @@ use anyhow::{bail, Context, Result};
 use std::process::Command;
 
 use crate::config::{self, ProjectEntry};
+use crate::git;
 use crate::runtime::{ContainerConfig, DockerRuntime};
+use crate::session::{self, SessionStore};
 use crate::ui::prompts;
 
 pub async fn execute(
@@ -17,14 +19,53 @@ pub async fn execute(
 
     // 1. Check git repo
     let cwd = std::env::current_dir()?;
-    let git_check = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(&cwd)
-        .output();
-
-    if git_check.is_err() || !git_check.unwrap().status.success() {
+    if !git::is_git_repo(&cwd) {
         bail!("Not a git repository. Run this command inside a git-initialized directory.");
     }
+
+    // Record session for restore
+    let head_before = git::get_head_hash(&cwd)?;
+    let current_branch = git::get_current_branch(&cwd).unwrap_or_else(|_| "unknown".to_string());
+
+    let vibepod_dir = cwd.join(".vibepod");
+    let store = SessionStore::new(vibepod_dir.clone());
+
+    // Ensure .vibepod/ is in .gitignore
+    let gitignore_path = cwd.join(".gitignore");
+    if gitignore_path.exists() {
+        let content = std::fs::read_to_string(&gitignore_path)?;
+        if !content
+            .lines()
+            .any(|l| l.trim() == ".vibepod/" || l.trim() == ".vibepod")
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&gitignore_path)?;
+            use std::io::Write;
+            writeln!(file, "\n.vibepod/")?;
+        }
+    } else {
+        std::fs::write(&gitignore_path, ".vibepod/\n")?;
+    }
+
+    let prompt_label = if interactive {
+        "interactive".to_string()
+    } else if resume {
+        "--resume".to_string()
+    } else {
+        prompt.as_deref().unwrap_or("").to_string()
+    };
+
+    let session_record = session::Session {
+        id: session::generate_session_id(),
+        started_at: chrono::Local::now().to_rfc3339(),
+        head_before,
+        branch: current_branch.clone(),
+        prompt: prompt_label,
+        claude_session_path: None,
+        restored: false,
+    };
+    store.add(session_record)?;
 
     let project_name = cwd
         .file_name()
@@ -33,33 +74,10 @@ pub async fn execute(
         .to_string();
 
     // Get remote URL (optional)
-    let remote = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&cwd)
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
+    let remote = git::get_remote_url(&cwd);
 
     // Get branch
-    let branch = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(&cwd)
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
+    let branch = current_branch;
 
     println!("\n  ┌  VibePod");
     println!("  │");
@@ -209,15 +227,33 @@ pub async fn execute(
         .collect();
     let container_name = format!("vibepod-{}-{}", project_name, short_hash);
 
-    // Resolve paths
+    // 8. Auth: load token
+    let config_dir_for_auth = config::default_config_dir()?;
+    let auth_manager = crate::auth::AuthManager::new(config_dir_for_auth);
     let home = dirs::home_dir().context("Cannot determine home directory")?;
-    let claude_dir = home.join(".claude");
-    let claude_credentials = claude_dir.join(".credentials.json");
     let claude_json = home.join(".claude.json");
 
-    if !claude_credentials.exists() {
-        bail!("~/.claude/.credentials.json not found. Please run `claude` once to log in first.");
+    let token_data = auth_manager
+        .load_token()?
+        .context("Not authenticated. Run `vibepod login` first.")?;
+
+    if token_data.needs_renewal() {
+        bail!("Token expires soon. Please run `vibepod login` to renew.");
     }
+
+    // Add token as environment variable
+    resolved_env_vars.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", token_data.token));
+
+    // Copy .claude.json to temp file to protect host file from container writes
+    let temp_claude_json = if claude_json.exists() {
+        let temp_dir = std::env::temp_dir().join("vibepod-run");
+        std::fs::create_dir_all(&temp_dir)?;
+        let temp_path = temp_dir.join("claude.json");
+        std::fs::copy(&claude_json, &temp_path)?;
+        Some(temp_path)
+    } else {
+        None
+    };
 
     let mode_label = if interactive {
         "interactive"
@@ -242,18 +278,19 @@ pub async fn execute(
             container_name.clone(),
             "-v".to_string(),
             format!("{}:/workspace", cwd_str),
-            "-v".to_string(),
-            format!(
-                "{}:/home/vibepod/.claude/.credentials.json:ro",
-                claude_credentials.display()
-            ),
         ];
-        if claude_json.exists() {
+        // Mount host gitconfig for user identity
+        let gitconfig = home.join(".gitconfig");
+        if gitconfig.exists() {
             docker_args.push("-v".to_string());
             docker_args.push(format!(
-                "{}:/home/vibepod/.claude.json",
-                claude_json.display()
+                "{}:/home/vibepod/.gitconfig:ro",
+                gitconfig.display()
             ));
+        }
+        if let Some(ref temp_cj) = temp_claude_json {
+            docker_args.push("-v".to_string());
+            docker_args.push(format!("{}:/home/vibepod/.claude.json", temp_cj.display()));
         }
         if no_network {
             docker_args.push("--network".to_string());
@@ -284,23 +321,31 @@ pub async fn execute(
             // Claude exited with non-zero, which is fine (e.g., user quit)
         }
 
+        // Clean up temp claude.json
+        if let Some(ref temp_cj) = temp_claude_json {
+            std::fs::remove_file(temp_cj).ok();
+        }
+
         println!("  Container stopped and removed.");
     } else {
         // Fire-and-forget mode: use bollard API
+        let gitconfig = home.join(".gitconfig");
         let container_config = ContainerConfig {
             image: global_config.image,
             container_name: container_name.clone(),
             workspace_path: cwd_str,
-            claude_credentials: claude_credentials.to_string_lossy().to_string(),
-            claude_json: if claude_json.exists() {
-                Some(claude_json.to_string_lossy().to_string())
-            } else {
-                None
-            },
+            claude_json: temp_claude_json
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             args: {
                 let mut full = vec!["claude".to_string()];
                 full.extend(claude_args);
                 full
+            },
+            gitconfig: if gitconfig.exists() {
+                Some(gitconfig.to_string_lossy().to_string())
+            } else {
+                None
             },
             env_vars: resolved_env_vars,
             network_disabled: no_network,
@@ -325,6 +370,12 @@ pub async fn execute(
 
         runtime.stop_container(&container_id, 10).await.ok();
         runtime.remove_container(&container_id).await.ok();
+
+        // Clean up temp claude.json
+        if let Some(ref temp_cj) = temp_claude_json {
+            std::fs::remove_file(temp_cj).ok();
+        }
+
         println!("  Container stopped and removed.");
     }
 

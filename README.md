@@ -14,6 +14,9 @@ brew install vibepod
 # Build the Docker image (one-time setup)
 vibepod init
 
+# Authenticate for container use (one-time)
+vibepod login
+
 # Run interactively inside a safe container
 cd your-project
 vibepod run
@@ -28,6 +31,36 @@ vibepod run --prompt "Implement the login page"
 
 Builds the Docker image and creates global configuration. Detects your host UID/GID automatically for seamless file permissions.
 
+### `vibepod login`
+
+Authenticates for container use. Creates a dedicated OAuth session stored in `~/.config/vibepod/auth/credentials.json`. This session is separate from your host's Claude credentials and is used when running containers.
+
+```bash
+vibepod login
+```
+
+### `vibepod logout`
+
+Removes the shared authentication session. Use `--all` to also remove all isolated container sessions.
+
+```bash
+vibepod logout
+vibepod logout --all
+```
+
+### `vibepod restore`
+
+Restores the workspace to a previous session's state. VibePod automatically records the git HEAD at the start of each `vibepod run` session. If the agent makes unwanted changes, you can revert them with a single command.
+
+```bash
+vibepod restore
+```
+
+This will:
+1. Show a list of restorable sessions
+2. Generate a Markdown report of all changes (saved to `.vibepod/reports/`)
+3. Run `git reset --hard` + `git clean -fd` to restore the workspace
+
 ### `vibepod run`
 
 Runs an AI coding agent inside a container, mounting your project directory.
@@ -40,6 +73,8 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
+| `--isolated` | Use an isolated auth session for this container (allows multiple containers simultaneously) |
+| `--name <name>` | Name for the isolated session (default: `vibepod-<project>-isolated`) |
 
 #### When to use which?
 
@@ -102,7 +137,7 @@ cargo install vibepod
 |---------|----------|
 | **v1.0** | `init` + `run` (interactive / fire-and-forget), Claude Code support |
 | **v1.1** | Pre-installed plugins (superpowers, frontend-design), `--env-file` with 1Password integration |
-| **v1.2** | `vibepod restore` (git HEAD auto-recovery) |
+| **v1.2** ✅ | `vibepod restore` (git HEAD auto-recovery with session reports) |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
 | **v2.1+** | Gemini CLI / Codex support, multi-container execution |
 

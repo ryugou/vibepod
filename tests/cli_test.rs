@@ -47,7 +47,6 @@ fn test_parse_run_with_env() {
 
 #[test]
 fn test_interactive_mode_has_no_bypass_permissions() {
-    // Interactive mode: no --resume, no --prompt
     let cli = Cli::parse_from(["vibepod", "run"]);
     if let vibepod::cli::Commands::Run { resume, prompt, .. } = cli.command {
         let interactive = !resume && prompt.is_none();
@@ -76,4 +75,22 @@ fn test_parse_run_with_env_file() {
     } else {
         panic!("Expected Run command");
     }
+}
+
+#[test]
+fn test_parse_restore_command() {
+    let cli = Cli::parse_from(["vibepod", "restore"]);
+    assert!(matches!(cli.command, vibepod::cli::Commands::Restore {}));
+}
+
+#[test]
+fn test_parse_login_command() {
+    let cli = Cli::parse_from(["vibepod", "login"]);
+    assert!(matches!(cli.command, vibepod::cli::Commands::Login {}));
+}
+
+#[test]
+fn test_parse_logout_command() {
+    let cli = Cli::parse_from(["vibepod", "logout"]);
+    assert!(matches!(cli.command, vibepod::cli::Commands::Logout {}));
 }

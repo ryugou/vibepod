@@ -1,4 +1,7 @@
 pub mod init;
+pub mod login;
+pub mod logout;
+pub mod restore;
 pub mod run;
 
 use clap::{Parser, Subcommand};
@@ -18,6 +21,10 @@ pub struct Cli {
 pub enum Commands {
     /// Initialize VibePod (build Docker image)
     Init {},
+    /// Authenticate for container use (creates long-lived token)
+    Login {},
+    /// Remove authentication token
+    Logout {},
     /// Run AI agent in a container
     Run {
         /// Resume previous session
@@ -36,4 +43,6 @@ pub enum Commands {
         #[arg(long)]
         env_file: Option<String>,
     },
+    /// Restore workspace to a previous session state
+    Restore {},
 }
