@@ -235,8 +235,7 @@ pub fn detect_oauth_url(text: &str) -> Option<String> {
 }
 
 /// コンテナ内で claude auth login を実行し、credentials を取得する共通フロー。
-/// 全 stdio を継承してインタラクティブにログインする。
-/// コンテナ内ではブラウザが開けないため、表示される URL をユーザーが手動でコピペする。
+/// コンテナをバックグラウンドで起動し、docker exec -it でログインする。
 pub fn run_login_flow(image: &str) -> Result<Credentials> {
     use std::process::Command;
 
@@ -246,22 +245,35 @@ pub fn run_login_flow(image: &str) -> Result<Credentials> {
     eprintln!("  │  表示される URL を手動でブラウザにコピペしてください。");
     eprintln!("  │");
 
-    let status = Command::new("docker")
+    // Start container in background with a long-running process
+    let run_result = Command::new("docker")
         .args([
             "run",
-            "-it",
+            "-d",
             "--name",
             &container_name,
             image,
-            "claude",
-            "auth",
-            "login",
+            "sleep",
+            "300",
         ])
+        .output()
+        .context("Failed to start login container")?;
+
+    if !run_result.status.success() {
+        anyhow::bail!(
+            "Failed to start container: {}",
+            String::from_utf8_lossy(&run_result.stderr)
+        );
+    }
+
+    // Run claude auth login via docker exec -it
+    let status = Command::new("docker")
+        .args(["exec", "-it", &container_name, "claude", "auth", "login"])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status()
-        .context("Failed to start login container")?;
+        .context("Failed to run claude auth login")?;
 
     // Extract credentials via docker cp
     let temp_dir = std::env::temp_dir().join("vibepod-login");
