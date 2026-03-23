@@ -176,8 +176,12 @@ pub async fn execute(
 
         if has_op_refs {
             // Use `op run` to resolve op:// references
-            let op_check = Command::new("op").arg("--version").output();
-            if op_check.is_err() || !op_check.unwrap().status.success() {
+            let op_available = Command::new("op")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !op_available {
                 bail!(
                     "env file contains op:// references but 1Password CLI (op) is not installed.\n  \
                      Install it: https://developer.1password.com/docs/cli/"
@@ -223,13 +227,12 @@ pub async fn execute(
 
     // 8. Generate container name
     let short_hash: String = (0..6)
-        .map(|_| format!("{:x}", rand::random::<u8>() % 16))
+        .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
         .collect();
     let container_name = format!("vibepod-{}-{}", project_name, short_hash);
 
     // 8. Auth: load token
-    let config_dir_for_auth = config::default_config_dir()?;
-    let auth_manager = crate::auth::AuthManager::new(config_dir_for_auth);
+    let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
     let home = dirs::home_dir().context("Cannot determine home directory")?;
     let claude_json = home.join(".claude.json");
 
