@@ -114,7 +114,7 @@ pub fn run_setup_token(image: &str) -> Result<String> {
             "-q",
             "/dev/null",
             "-c",
-            "claude setup-token",
+            "COLUMNS=10000 claude setup-token",
         ])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::piped())
