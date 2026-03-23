@@ -123,23 +123,27 @@ pub fn run_setup_token(image: &str) -> Result<String> {
         .context("Failed to run claude setup-token")?;
 
     // Monitor stdout for OAuth URL, open browser, and relay output
+    // URL may be split across multiple lines due to terminal wrapping,
+    // so we accumulate cleaned text and check for URL across line boundaries.
     let mut url_opened = false;
+    let mut accumulated_clean = String::new();
     if let Some(stdout) = child.stdout.take() {
         use std::io::{BufRead, BufReader, Write};
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
-            // Strip ANSI escape codes for URL detection
-            let clean = strip_ansi_codes(&line);
+            // Relay original output to terminal
+            let _ = std::io::stdout().write_all(line.as_bytes());
+            let _ = std::io::stdout().write_all(b"\n");
+            let _ = std::io::stdout().flush();
+
             if !url_opened {
-                if let Some(url) = detect_oauth_url(&clean) {
+                let clean = strip_ansi_codes(&line);
+                accumulated_clean.push_str(&clean);
+                if let Some(url) = detect_oauth_url(&accumulated_clean) {
                     open_browser(&url);
                     url_opened = true;
                 }
             }
-            // Relay original output (with ANSI codes) to terminal
-            let _ = std::io::stdout().write_all(line.as_bytes());
-            let _ = std::io::stdout().write_all(b"\n");
-            let _ = std::io::stdout().flush();
         }
     }
 
