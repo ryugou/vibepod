@@ -193,9 +193,11 @@ pub fn run_setup_token(image: &str) -> Result<String> {
 }
 
 fn detect_oauth_url(text: &str) -> Option<String> {
-    let re =
-        Regex::new(r#"https://[a-zA-Z0-9._-]*claude[a-zA-Z0-9._-]*/oauth/authorize[^\s)"'>]*"#)
-            .unwrap();
+    // Require &state= parameter to ensure we have the complete URL
+    let re = Regex::new(
+        r#"https://[a-zA-Z0-9._-]*claude[a-zA-Z0-9._-]*/oauth/authorize[^\s)"'>]*&state=[a-zA-Z0-9_-]+"#,
+    )
+    .unwrap();
     re.find(text).map(|m| m.as_str().to_string())
 }
 
