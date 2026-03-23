@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -191,12 +192,13 @@ pub fn run_setup_token(image: &str) -> Result<String> {
         anyhow::bail!("setup-token に失敗しました");
     }
 
-    // Parse token from output (look for sk-ant-oat01-...)
+    // Parse token from output (look for sk-ant-oat01-... pattern through ANSI codes)
     let raw_output = String::from_utf8_lossy(&output.stdout);
-    let token = raw_output
-        .split_whitespace()
-        .find(|s| s.starts_with("sk-ant-"))
+    let token_re = Regex::new(r"sk-ant-[a-zA-Z0-9_-]+").unwrap();
+    let token = token_re
+        .find(&raw_output)
         .context("トークンが出力から見つかりませんでした")?
+        .as_str()
         .to_string();
 
     Ok(token)
