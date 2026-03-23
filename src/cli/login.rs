@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 
-use crate::auth::{self, AuthManager};
+use crate::auth::{self, AuthManager, TokenData};
 use crate::config;
 use crate::runtime::DockerRuntime;
 
@@ -22,12 +22,14 @@ pub async fn execute() -> Result<()> {
         );
     }
 
-    let cwd = std::env::current_dir()?;
-    let auth_manager = AuthManager::new(config_dir.clone(), cwd);
+    let auth_manager = AuthManager::new(config_dir.clone());
 
-    if let Some(existing) = auth_manager.load_shared()? {
+    if let Some(existing) = auth_manager.load_token()? {
         if !existing.is_expired() {
-            println!("  ⚠  既存のセッションがあります。");
+            println!(
+                "  ⚠  既存のトークンがあります（有効期限: {}）。",
+                existing.expires_at
+            );
             if !dialoguer::Confirm::new()
                 .with_prompt("  上書きしますか？")
                 .default(false)
@@ -39,15 +41,24 @@ pub async fn execute() -> Result<()> {
         }
     }
 
-    println!("  ◇  コンテナ用の認証セッションを作成します");
+    println!("  ◇  コンテナ用の長期トークンを作成します");
     println!("  │");
 
-    let creds = auth::run_login_flow(&global_config.image)?;
-    auth_manager.save_shared(&creds)?;
+    let token = auth::run_setup_token(&global_config.image)?;
+
+    let now = chrono::Utc::now();
+    let expires_at = now + chrono::Duration::days(365);
+    let token_data = TokenData {
+        token,
+        created_at: now.to_rfc3339(),
+        expires_at: expires_at.to_rfc3339(),
+    };
+    auth_manager.save_token(&token_data)?;
 
     println!("  │");
     println!("  ◇  認証完了！");
-    println!("  │  セッションを保存しました: ~/.config/vibepod/auth/credentials.json");
+    println!("  │  トークンを保存しました: ~/.config/vibepod/auth/token.json");
+    println!("  │  有効期限: {}", expires_at.format("%Y-%m-%d"));
     println!("  └\n");
 
     Ok(())

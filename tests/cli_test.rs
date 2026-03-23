@@ -47,7 +47,6 @@ fn test_parse_run_with_env() {
 
 #[test]
 fn test_interactive_mode_has_no_bypass_permissions() {
-    // Interactive mode: no --resume, no --prompt
     let cli = Cli::parse_from(["vibepod", "run"]);
     if let vibepod::cli::Commands::Run { resume, prompt, .. } = cli.command {
         let interactive = !resume && prompt.is_none();
@@ -93,40 +92,5 @@ fn test_parse_login_command() {
 #[test]
 fn test_parse_logout_command() {
     let cli = Cli::parse_from(["vibepod", "logout"]);
-    assert!(matches!(
-        cli.command,
-        vibepod::cli::Commands::Logout { all: false }
-    ));
-}
-
-#[test]
-fn test_parse_logout_all_command() {
-    let cli = Cli::parse_from(["vibepod", "logout", "--all"]);
-    if let vibepod::cli::Commands::Logout { all } = cli.command {
-        assert!(all);
-    } else {
-        panic!("Expected Logout command");
-    }
-}
-
-#[test]
-fn test_parse_run_with_isolated() {
-    let cli = Cli::parse_from(["vibepod", "run", "--isolated"]);
-    if let vibepod::cli::Commands::Run { isolated, name, .. } = cli.command {
-        assert!(isolated);
-        assert!(name.is_none());
-    } else {
-        panic!("Expected Run command");
-    }
-}
-
-#[test]
-fn test_parse_run_with_isolated_name() {
-    let cli = Cli::parse_from(["vibepod", "run", "--isolated", "--name", "my-session"]);
-    if let vibepod::cli::Commands::Run { isolated, name, .. } = cli.command {
-        assert!(isolated);
-        assert_eq!(name, Some("my-session".to_string()));
-    } else {
-        panic!("Expected Run command");
-    }
+    assert!(matches!(cli.command, vibepod::cli::Commands::Logout {}));
 }

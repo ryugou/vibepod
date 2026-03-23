@@ -21,14 +21,10 @@ pub struct Cli {
 pub enum Commands {
     /// Initialize VibePod (build Docker image)
     Init {},
-    /// Authenticate for container use
+    /// Authenticate for container use (creates long-lived token)
     Login {},
-    /// Remove authentication session
-    Logout {
-        /// Also remove all isolated container sessions
-        #[arg(long)]
-        all: bool,
-    },
+    /// Remove authentication token
+    Logout {},
     /// Run AI agent in a container
     Run {
         /// Resume previous session
@@ -46,12 +42,6 @@ pub enum Commands {
         /// Environment file (supports op:// references via 1Password CLI)
         #[arg(long)]
         env_file: Option<String>,
-        /// Use isolated auth session for this container
-        #[arg(long)]
-        isolated: bool,
-        /// Name for isolated session (default: vibepod-<project>-isolated)
-        #[arg(long)]
-        name: Option<String>,
     },
     /// Restore workspace to a previous session state
     Restore {},

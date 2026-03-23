@@ -15,8 +15,8 @@ async fn main() -> Result<()> {
         Commands::Login {} => {
             vibepod::cli::login::execute().await?;
         }
-        Commands::Logout { all } => {
-            vibepod::cli::logout::execute(all)?;
+        Commands::Logout {} => {
+            vibepod::cli::logout::execute()?;
         }
         Commands::Run {
             resume,
@@ -24,11 +24,8 @@ async fn main() -> Result<()> {
             no_network,
             env,
             env_file,
-            isolated,
-            name,
         } => {
-            vibepod::cli::run::execute(resume, prompt, no_network, env, env_file, isolated, name)
-                .await?;
+            vibepod::cli::run::execute(resume, prompt, no_network, env, env_file).await?;
         }
         Commands::Restore {} => {
             vibepod::cli::restore::execute()?;

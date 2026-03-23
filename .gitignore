@@ -13,3 +13,5 @@ target/
 
 # Logs
 *.log
+
+.vibepod/

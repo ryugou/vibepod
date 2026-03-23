@@ -13,8 +13,6 @@ pub async fn execute(
     no_network: bool,
     env_vars: Vec<String>,
     env_file: Option<String>,
-    isolated: bool,
-    session_name: Option<String>,
 ) -> Result<()> {
     // Determine mode: interactive (default), prompt, or resume
     let interactive = !resume && prompt.is_none();
@@ -229,63 +227,22 @@ pub async fn execute(
         .collect();
     let container_name = format!("vibepod-{}-{}", project_name, short_hash);
 
-    // 8. Auth: prepare credentials for container
+    // 8. Auth: load token
     let config_dir_for_auth = config::default_config_dir()?;
-    let auth_manager = crate::auth::AuthManager::new(config_dir_for_auth, cwd.clone());
+    let auth_manager = crate::auth::AuthManager::new(config_dir_for_auth);
     let home = dirs::home_dir().context("Cannot determine home directory")?;
     let claude_json = home.join(".claude.json");
 
-    // Resolve isolated session name early (avoids ownership issues)
-    let iso_name = if isolated {
-        Some(
-            session_name
-                .clone()
-                .unwrap_or_else(|| format!("vibepod-{}-isolated", project_name)),
-        )
-    } else {
-        None
-    };
+    let token_data = auth_manager
+        .load_token()?
+        .context("`vibepod login` を先に実行してください")?;
 
-    let (temp_creds_path, is_shared_lock) = if isolated {
-        let name = iso_name.as_ref().unwrap();
+    if token_data.needs_renewal() {
+        bail!("トークンの有効期限が近づいています。`vibepod login` を再実行してください");
+    }
 
-        match auth_manager.load_isolated(name)? {
-            Some(creds) if !creds.is_expired() => {
-                let temp = auth_manager.copy_isolated_to_temp(name)?;
-                (temp, false)
-            }
-            _ => {
-                // Need to login for isolated session
-                println!("  ◇  コンテナ専用セッションが必要です。ログインしてください...");
-                let creds = crate::auth::run_login_flow(&global_config.image)?;
-                auth_manager.save_isolated(name, &creds)?;
-                let temp = auth_manager.copy_isolated_to_temp(name)?;
-                (temp, false)
-            }
-        }
-    } else {
-        // Shared mode
-        match auth_manager.load_shared()? {
-            None => {
-                bail!("`vibepod login` を先に実行してください");
-            }
-            Some(creds) if creds.is_expired() => {
-                bail!("セッションの有効期限が切れています。`vibepod login` を再実行してください");
-            }
-            Some(_) => {
-                if !auth_manager.try_acquire_lock(&container_name)? {
-                    let lock_info = auth_manager.lock_info()?.unwrap_or_default();
-                    println!(
-                        "  ⚠  共有セッションは別のコンテナ ({}) で使用中です。",
-                        lock_info
-                    );
-                    bail!("`vibepod run --isolated` を使用してください");
-                }
-                let temp = auth_manager.copy_shared_to_temp()?;
-                (temp, true)
-            }
-        }
-    };
+    // Add token as environment variable
+    resolved_env_vars.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", token_data.token));
 
     let mode_label = if interactive {
         "interactive"
@@ -310,11 +267,6 @@ pub async fn execute(
             container_name.clone(),
             "-v".to_string(),
             format!("{}:/workspace", cwd_str),
-            "-v".to_string(),
-            format!(
-                "{}:/home/vibepod/.claude/.credentials.json",
-                temp_creds_path.display()
-            ),
         ];
         if claude_json.exists() {
             docker_args.push("-v".to_string());
@@ -352,15 +304,6 @@ pub async fn execute(
             // Claude exited with non-zero, which is fine (e.g., user quit)
         }
 
-        // Writeback and cleanup (order: writeback THEN unlock)
-        if is_shared_lock {
-            auth_manager.writeback_shared(&temp_creds_path).ok();
-            auth_manager.release_lock().ok();
-        } else if let Some(ref name) = iso_name {
-            auth_manager.writeback_isolated(name, &temp_creds_path).ok();
-        }
-        auth_manager.cleanup_temp(&temp_creds_path);
-
         println!("  Container stopped and removed.");
     } else {
         // Fire-and-forget mode: use bollard API
@@ -368,8 +311,6 @@ pub async fn execute(
             image: global_config.image,
             container_name: container_name.clone(),
             workspace_path: cwd_str,
-            claude_credentials: temp_creds_path.to_string_lossy().to_string(),
-            credentials_readonly: false,
             claude_json: if claude_json.exists() {
                 Some(claude_json.to_string_lossy().to_string())
             } else {
@@ -403,15 +344,6 @@ pub async fn execute(
 
         runtime.stop_container(&container_id, 10).await.ok();
         runtime.remove_container(&container_id).await.ok();
-
-        // Writeback and cleanup (order: writeback THEN unlock)
-        if is_shared_lock {
-            auth_manager.writeback_shared(&temp_creds_path).ok();
-            auth_manager.release_lock().ok();
-        } else if let Some(ref name) = iso_name {
-            auth_manager.writeback_isolated(name, &temp_creds_path).ok();
-        }
-        auth_manager.cleanup_temp(&temp_creds_path);
 
         println!("  Container stopped and removed.");
     }

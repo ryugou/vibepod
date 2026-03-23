@@ -2,68 +2,52 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+const EXPIRY_THRESHOLD_DAYS: i64 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Credentials {
-    #[serde(rename = "claudeAiOauth")]
-    pub claude_ai_oauth: serde_json::Value,
+pub struct TokenData {
+    pub token: String,
+    pub created_at: String,
+    pub expires_at: String,
 }
 
-impl Credentials {
+impl TokenData {
     pub fn is_expired(&self) -> bool {
-        if let Some(expires_at) = self.claude_ai_oauth.get("expiresAt") {
-            if let Some(ts) = expires_at.as_i64() {
-                let now = chrono::Utc::now().timestamp_millis();
-                return ts < now;
-            }
-        }
-        // If we can't determine expiry, assume not expired
-        false
+        chrono::DateTime::parse_from_rfc3339(&self.expires_at)
+            .map(|exp| chrono::Utc::now() >= exp)
+            .unwrap_or(false)
+    }
+
+    pub fn needs_renewal(&self) -> bool {
+        chrono::DateTime::parse_from_rfc3339(&self.expires_at)
+            .map(|exp| {
+                let threshold = chrono::Duration::days(EXPIRY_THRESHOLD_DAYS);
+                chrono::Utc::now() + threshold >= exp
+            })
+            .unwrap_or(false)
     }
 }
 
 pub struct AuthManager {
     config_dir: PathBuf,
-    project_dir: PathBuf,
 }
 
 impl AuthManager {
-    pub fn new(config_dir: PathBuf, project_dir: PathBuf) -> Self {
-        Self {
-            config_dir,
-            project_dir,
-        }
+    pub fn new(config_dir: PathBuf) -> Self {
+        Self { config_dir }
     }
 
-    fn shared_dir(&self) -> PathBuf {
-        self.config_dir.join("auth")
+    fn token_path(&self) -> PathBuf {
+        self.config_dir.join("auth").join("token.json")
     }
 
-    fn shared_path(&self) -> PathBuf {
-        self.shared_dir().join("credentials.json")
-    }
-
-    fn lock_path(&self) -> PathBuf {
-        self.shared_dir().join("credentials.lock")
-    }
-
-    fn isolated_dir(&self) -> PathBuf {
-        self.project_dir
-            .join(".vibepod")
-            .join("auth")
-            .join("containers")
-    }
-
-    fn isolated_path(&self, name: &str) -> PathBuf {
-        self.isolated_dir().join(format!("{}.json", name))
-    }
-
-    pub fn save_shared(&self, creds: &Credentials) -> Result<()> {
-        let dir = self.shared_dir();
+    pub fn save_token(&self, data: &TokenData) -> Result<()> {
+        let dir = self.config_dir.join("auth");
         fs::create_dir_all(&dir)?;
-        let path = self.shared_path();
-        let json = serde_json::to_string_pretty(creds)?;
+        let path = self.token_path();
+        let json = serde_json::to_string_pretty(data)?;
         fs::write(&path, &json)?;
         #[cfg(unix)]
         {
@@ -73,185 +57,37 @@ impl AuthManager {
         Ok(())
     }
 
-    pub fn load_shared(&self) -> Result<Option<Credentials>> {
-        let path = self.shared_path();
+    pub fn load_token(&self) -> Result<Option<TokenData>> {
+        let path = self.token_path();
         if !path.exists() {
             return Ok(None);
         }
         let json = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let creds: Credentials = serde_json::from_str(&json)?;
-        Ok(Some(creds))
+        let data: TokenData = serde_json::from_str(&json)?;
+        Ok(Some(data))
     }
 
-    pub fn save_isolated(&self, name: &str, creds: &Credentials) -> Result<()> {
-        let dir = self.isolated_dir();
-        fs::create_dir_all(&dir)?;
-        let path = self.isolated_path(name);
-        let json = serde_json::to_string_pretty(creds)?;
-        fs::write(&path, &json)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
-    }
-
-    pub fn load_isolated(&self, name: &str) -> Result<Option<Credentials>> {
-        let path = self.isolated_path(name);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let json = fs::read_to_string(&path)?;
-        let creds: Credentials = serde_json::from_str(&json)?;
-        Ok(Some(creds))
-    }
-
-    pub fn try_acquire_lock(&self, container_name: &str) -> Result<bool> {
-        let lock_path = self.lock_path();
-        if lock_path.exists() {
-            // Check if stale
-            if let Ok(existing) = fs::read_to_string(&lock_path) {
-                let existing_container = existing.trim();
-                if !existing_container.is_empty() && is_container_running(existing_container) {
-                    return Ok(false);
-                }
-            }
-            // Stale lock, remove it
-            fs::remove_file(&lock_path).ok();
-        }
-        fs::create_dir_all(self.shared_dir())?;
-        fs::write(&lock_path, container_name)?;
-        Ok(true)
-    }
-
-    pub fn release_lock(&self) -> Result<()> {
-        let lock_path = self.lock_path();
-        if lock_path.exists() {
-            fs::remove_file(&lock_path)?;
-        }
-        Ok(())
-    }
-
-    pub fn lock_info(&self) -> Result<Option<String>> {
-        let lock_path = self.lock_path();
-        if !lock_path.exists() {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(&lock_path)?;
-        let name = content.trim().to_string();
-        if name.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(name))
-        }
-    }
-
-    pub fn copy_shared_to_temp(&self) -> Result<PathBuf> {
-        let creds = self.load_shared()?.context("No shared credentials found")?;
-        self.write_creds_to_temp(&creds)
-    }
-
-    pub fn copy_isolated_to_temp(&self, name: &str) -> Result<PathBuf> {
-        let creds = self
-            .load_isolated(name)?
-            .context("No isolated credentials found")?;
-        self.write_creds_to_temp(&creds)
-    }
-
-    fn write_creds_to_temp(&self, creds: &Credentials) -> Result<PathBuf> {
-        use std::io::Write;
-        let mut temp_file = tempfile::Builder::new()
-            .prefix("vibepod-creds-")
-            .suffix(".json")
-            .tempfile()
-            .context("Failed to create temp file")?;
-        let json = serde_json::to_string_pretty(creds)?;
-        temp_file.write_all(json.as_bytes())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(temp_file.path(), fs::Permissions::from_mode(0o600))?;
-        }
-        // Persist so it survives the NamedTempFile drop
-        let path = temp_file.into_temp_path().keep()?;
-        Ok(path)
-    }
-
-    pub fn writeback_shared(&self, temp_path: &Path) -> Result<()> {
-        let json = fs::read_to_string(temp_path)?;
-        let creds: Credentials = serde_json::from_str(&json)?;
-        self.save_shared(&creds)
-    }
-
-    pub fn writeback_isolated(&self, name: &str, temp_path: &Path) -> Result<()> {
-        let json = fs::read_to_string(temp_path)?;
-        let creds: Credentials = serde_json::from_str(&json)?;
-        self.save_isolated(name, &creds)
-    }
-
-    pub fn delete_shared(&self) -> Result<()> {
-        let path = self.shared_path();
+    pub fn delete_token(&self) -> Result<()> {
+        let path = self.token_path();
         if path.exists() {
             fs::remove_file(&path)?;
         }
-        self.release_lock()
-    }
-
-    pub fn delete_all_isolated(&self) -> Result<()> {
-        let dir = self.isolated_dir();
-        if dir.exists() {
-            fs::remove_dir_all(&dir)?;
-        }
         Ok(())
     }
-
-    pub fn cleanup_temp(&self, temp_path: &Path) {
-        fs::remove_file(temp_path).ok();
-    }
 }
 
-fn is_container_running(container_name: &str) -> bool {
-    match std::process::Command::new("docker")
-        .args(["inspect", "--format", "{{.State.Running}}", container_name])
-        .output()
-    {
-        Ok(o) if o.status.success() => {
-            // Only treat as stopped if docker explicitly says "false"
-            String::from_utf8_lossy(&o.stdout).trim() != "false"
-        }
-        // If docker inspect fails (container not found), assume still active
-        // to avoid accidentally breaking locks
-        _ => true,
-    }
-}
-
-pub fn detect_oauth_url(text: &str) -> Option<String> {
-    let re =
-        Regex::new(r#"https://[a-zA-Z0-9._-]*claude[a-zA-Z0-9._-]*/oauth/authorize[^\s)"'>]*"#)
-            .unwrap();
-    re.find(text).map(|m| m.as_str().to_string())
-}
-
-/// コンテナ内で claude auth login を実行し、credentials を取得する共通フロー。
-/// コンテナをバックグラウンドで起動し、docker exec -it でログインする。
-pub fn run_login_flow(image: &str) -> Result<Credentials> {
+/// コンテナ内で claude setup-token を実行し、長期トークンを取得する。
+pub fn run_setup_token(image: &str) -> Result<String> {
     use std::process::Command;
 
     let container_name = format!("vibepod-login-{}", chrono::Utc::now().timestamp_millis());
 
-    eprintln!("  │  コンテナ内ではブラウザが開けません。");
-    eprintln!("  │  表示される URL を手動でブラウザにコピペしてください。");
-    eprintln!("  │");
-
-    // Start container in background with --network host for OAuth callback
+    // Start container in background
     let run_result = Command::new("docker")
         .args([
             "run",
             "-d",
-            "--network",
-            "host",
             "--name",
             &container_name,
             image,
@@ -268,27 +104,64 @@ pub fn run_login_flow(image: &str) -> Result<Credentials> {
         );
     }
 
-    // Run claude auth login via docker exec -it
-    let status = Command::new("docker")
-        .args(["exec", "-it", &container_name, "claude", "auth", "login"])
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .context("Failed to run claude auth login")?;
-
-    // Extract credentials via docker cp
-    let temp_dir = std::env::temp_dir().join("vibepod-login");
-    fs::create_dir_all(&temp_dir)?;
-    let temp_creds = temp_dir.join("credentials.json");
-
-    let cp_result = Command::new("docker")
+    // Run claude setup-token via docker exec with script for PTY + stdout capture
+    let mut child = Command::new("docker")
         .args([
-            "cp",
-            &format!("{}:/home/vibepod/.claude/.credentials.json", container_name),
-            &temp_creds.to_string_lossy(),
+            "exec",
+            "-i",
+            &container_name,
+            "script",
+            "-q",
+            "/dev/null",
+            "-c",
+            "claude setup-token",
         ])
-        .output();
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("Failed to run claude setup-token")?;
+
+    // Monitor stdout for OAuth URL, open browser, and relay output
+    let mut url_opened = false;
+    if let Some(stdout) = child.stdout.take() {
+        use std::io::{BufRead, BufReader, Write};
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            // Strip ANSI escape codes for URL detection
+            let clean = strip_ansi_codes(&line);
+            if !url_opened {
+                if let Some(url) = detect_oauth_url(&clean) {
+                    open_browser(&url);
+                    url_opened = true;
+                }
+            }
+            // Relay original output (with ANSI codes) to terminal
+            let _ = std::io::stdout().write_all(line.as_bytes());
+            let _ = std::io::stdout().write_all(b"\n");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    let status = child.wait()?;
+    if !status.success() {
+        Command::new("docker")
+            .args(["rm", "-f", &container_name])
+            .output()
+            .ok();
+        anyhow::bail!("setup-token に失敗しました");
+    }
+
+    // Extract credentials from container
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            &container_name,
+            "cat",
+            "/home/vibepod/.claude/.credentials.json",
+        ])
+        .output()
+        .context("Failed to read credentials from container")?;
 
     // Remove container
     Command::new("docker")
@@ -296,41 +169,48 @@ pub fn run_login_flow(image: &str) -> Result<Credentials> {
         .output()
         .ok();
 
-    match cp_result {
-        Ok(output) if output.status.success() => {
-            let json = fs::read_to_string(&temp_creds)?;
-            let creds: Credentials = serde_json::from_str(&json)?;
-            fs::remove_file(&temp_creds).ok();
-            Ok(creds)
-        }
-        _ => {
-            if !status.success() {
-                anyhow::bail!("ログインに失敗しました");
-            }
-            anyhow::bail!("コンテナからクレデンシャルを取得できませんでした")
-        }
+    if !output.status.success() {
+        anyhow::bail!("コンテナからトークンを取得できませんでした");
     }
+
+    // Parse the token from credentials
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let creds: serde_json::Value =
+        serde_json::from_str(&json_str).context("credentials.json のパースに失敗しました")?;
+
+    let token = creds
+        .get("claudeAiOauth")
+        .and_then(|o| o.get("accessToken"))
+        .and_then(|t| t.as_str())
+        .context("accessToken が見つかりません")?
+        .to_string();
+
+    Ok(token)
 }
 
-pub fn open_browser(url: &str) -> bool {
+fn detect_oauth_url(text: &str) -> Option<String> {
+    let re =
+        Regex::new(r#"https://[a-zA-Z0-9._-]*claude[a-zA-Z0-9._-]*/oauth/authorize[^\s)"'>]*"#)
+            .unwrap();
+    re.find(text).map(|m| m.as_str().to_string())
+}
+
+fn strip_ansi_codes(text: &str) -> String {
+    let re =
+        Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[0-9;]*[mGJKHfsu]").unwrap();
+    re.replace_all(text, "").to_string()
+}
+
+fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(url)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        std::process::Command::new("open").arg(url).output().ok();
     }
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("xdg-open")
             .arg(url)
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        false
+            .ok();
     }
 }
