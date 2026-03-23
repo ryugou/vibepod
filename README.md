@@ -14,6 +14,9 @@ brew install vibepod
 # Build the Docker image (one-time setup)
 vibepod init
 
+# Authenticate for container use (one-time)
+vibepod login
+
 # Run interactively inside a safe container
 cd your-project
 vibepod run
@@ -27,6 +30,23 @@ vibepod run --prompt "Implement the login page"
 ### `vibepod init`
 
 Builds the Docker image and creates global configuration. Detects your host UID/GID automatically for seamless file permissions.
+
+### `vibepod login`
+
+Authenticates for container use. Creates a dedicated OAuth session stored in `~/.config/vibepod/auth/credentials.json`. This session is separate from your host's Claude credentials and is used when running containers.
+
+```bash
+vibepod login
+```
+
+### `vibepod logout`
+
+Removes the shared authentication session. Use `--all` to also remove all isolated container sessions.
+
+```bash
+vibepod logout
+vibepod logout --all
+```
 
 ### `vibepod restore`
 
@@ -53,6 +73,8 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
+| `--isolated` | Use an isolated auth session for this container (allows multiple containers simultaneously) |
+| `--name <name>` | Name for the isolated session (default: `vibepod-<project>-isolated`) |
 
 #### When to use which?
 
