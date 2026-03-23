@@ -108,7 +108,7 @@ pub fn run_setup_token(image: &str) -> Result<String> {
             "--network",
             "host",
             "-v",
-            &format!("{}:/usr/local/bin/xdg-open:ro", fake_open_path.display()),
+            &format!("{}:/usr/bin/xdg-open:ro", fake_open_path.display()),
             image,
             "sleep",
             "300",
