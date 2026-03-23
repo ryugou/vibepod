@@ -18,6 +18,7 @@ pub struct ContainerConfig {
     pub container_name: String,
     pub workspace_path: String,
     pub claude_json: Option<String>,
+    pub gitconfig: Option<String>,
     pub args: Vec<String>,
     pub env_vars: Vec<String>,
     pub network_disabled: bool,
@@ -131,6 +132,16 @@ impl DockerRuntime {
                 source: Some(claude_json_path.clone()),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(false),
+                ..Default::default()
+            });
+        }
+
+        if let Some(ref gitconfig_path) = config.gitconfig {
+            mounts.push(Mount {
+                target: Some("/home/vibepod/.gitconfig".to_string()),
+                source: Some(gitconfig_path.clone()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
                 ..Default::default()
             });
         }

@@ -268,6 +268,15 @@ pub async fn execute(
             "-v".to_string(),
             format!("{}:/workspace", cwd_str),
         ];
+        // Mount host gitconfig for user identity
+        let gitconfig = home.join(".gitconfig");
+        if gitconfig.exists() {
+            docker_args.push("-v".to_string());
+            docker_args.push(format!(
+                "{}:/home/vibepod/.gitconfig:ro",
+                gitconfig.display()
+            ));
+        }
         if claude_json.exists() {
             docker_args.push("-v".to_string());
             docker_args.push(format!(
@@ -307,6 +316,7 @@ pub async fn execute(
         println!("  Container stopped and removed.");
     } else {
         // Fire-and-forget mode: use bollard API
+        let gitconfig = home.join(".gitconfig");
         let container_config = ContainerConfig {
             image: global_config.image,
             container_name: container_name.clone(),
@@ -320,6 +330,11 @@ pub async fn execute(
                 let mut full = vec!["claude".to_string()];
                 full.extend(claude_args);
                 full
+            },
+            gitconfig: if gitconfig.exists() {
+                Some(gitconfig.to_string_lossy().to_string())
+            } else {
+                None
             },
             env_vars: resolved_env_vars,
             network_disabled: no_network,
