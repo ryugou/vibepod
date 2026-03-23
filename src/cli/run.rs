@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::process::Command;
 
 use crate::config::{self, ProjectEntry};
+use crate::git;
 use crate::runtime::{ContainerConfig, DockerRuntime};
 use crate::ui::prompts;
 
@@ -17,12 +18,7 @@ pub async fn execute(
 
     // 1. Check git repo
     let cwd = std::env::current_dir()?;
-    let git_check = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(&cwd)
-        .output();
-
-    if git_check.is_err() || !git_check.unwrap().status.success() {
+    if !git::is_git_repo(&cwd) {
         bail!("Not a git repository. Run this command inside a git-initialized directory.");
     }
 
@@ -33,33 +29,10 @@ pub async fn execute(
         .to_string();
 
     // Get remote URL (optional)
-    let remote = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&cwd)
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
+    let remote = git::get_remote_url(&cwd);
 
     // Get branch
-    let branch = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(&cwd)
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".to_string());
+    let branch = git::get_current_branch(&cwd).unwrap_or_else(|_| "unknown".to_string());
 
     println!("\n  ┌  VibePod");
     println!("  │");
