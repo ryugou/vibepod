@@ -82,13 +82,30 @@ pub fn run_setup_token(image: &str) -> Result<String> {
 
     let container_name = format!("vibepod-login-{}", chrono::Utc::now().timestamp_millis());
 
-    // Start container in background
+    // Create a fake xdg-open script that writes URL to a file for host to pick up
+    let url_file = "/tmp/vibepod-oauth-url";
+    let fake_open_script = format!("#!/bin/sh\necho \"$1\" > {}\n", url_file);
+
+    // Create temp file for fake xdg-open
+    let temp_dir = std::env::temp_dir().join("vibepod-login");
+    fs::create_dir_all(&temp_dir)?;
+    let fake_open_path = temp_dir.join("xdg-open");
+    fs::write(&fake_open_path, &fake_open_script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_open_path, fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Start container in background with fake xdg-open mounted
     let run_result = Command::new("docker")
         .args([
             "run",
             "-d",
             "--name",
             &container_name,
+            "-v",
+            &format!("{}:/usr/local/bin/xdg-open:ro", fake_open_path.display()),
             image,
             "sleep",
             "300",
@@ -103,6 +120,35 @@ pub fn run_setup_token(image: &str) -> Result<String> {
         );
     }
 
+    // Start background thread to poll for OAuth URL and open browser on host
+    let cn = container_name.clone();
+    let url_watcher = std::thread::spawn(move || {
+        let poll_file = url_file;
+        for _ in 0..120 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if let Ok(output) = Command::new("docker")
+                .args(["exec", &cn, "cat", poll_file])
+                .output()
+            {
+                if output.status.success() {
+                    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !url.is_empty() {
+                        // Open browser on host
+                        #[cfg(target_os = "macos")]
+                        {
+                            Command::new("open").arg(&url).output().ok();
+                        }
+                        #[cfg(target_os = "linux")]
+                        {
+                            Command::new("xdg-open").arg(&url).output().ok();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     // Run claude setup-token via docker exec -it (fully interactive)
     let status = Command::new("docker")
         .args(["exec", "-it", &container_name, "claude", "setup-token"])
@@ -111,6 +157,9 @@ pub fn run_setup_token(image: &str) -> Result<String> {
         .stderr(std::process::Stdio::inherit())
         .status()
         .context("Failed to run claude setup-token")?;
+
+    // Wait for URL watcher to finish (it will timeout if no URL found)
+    url_watcher.join().ok();
     if !status.success() {
         Command::new("docker")
             .args(["rm", "-f", &container_name])
