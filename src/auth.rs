@@ -245,11 +245,13 @@ pub fn run_login_flow(image: &str) -> Result<Credentials> {
     eprintln!("  │  表示される URL を手動でブラウザにコピペしてください。");
     eprintln!("  │");
 
-    // Start container in background with a long-running process
+    // Start container in background with --network host for OAuth callback
     let run_result = Command::new("docker")
         .args([
             "run",
             "-d",
+            "--network",
+            "host",
             "--name",
             &container_name,
             image,
