@@ -83,3 +83,9 @@ fn test_parse_restore_command() {
     let cli = Cli::parse_from(["vibepod", "restore"]);
     assert!(matches!(cli.command, vibepod::cli::Commands::Restore {}));
 }
+
+#[test]
+fn test_parse_login_command() {
+    let cli = Cli::parse_from(["vibepod", "login"]);
+    assert!(matches!(cli.command, vibepod::cli::Commands::Login {}));
+}

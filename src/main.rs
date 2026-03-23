@@ -12,14 +12,23 @@ async fn main() -> Result<()> {
         Commands::Init {} => {
             vibepod::cli::init::execute().await?;
         }
+        Commands::Login {} => {
+            vibepod::cli::login::execute().await?;
+        }
+        Commands::Logout { all } => {
+            vibepod::cli::logout::execute(all)?;
+        }
         Commands::Run {
             resume,
             prompt,
             no_network,
             env,
             env_file,
+            isolated,
+            name,
         } => {
-            vibepod::cli::run::execute(resume, prompt, no_network, env, env_file).await?;
+            vibepod::cli::run::execute(resume, prompt, no_network, env, env_file, isolated, name)
+                .await?;
         }
         Commands::Restore {} => {
             vibepod::cli::restore::execute()?;

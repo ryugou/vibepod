@@ -234,6 +234,84 @@ pub fn detect_oauth_url(text: &str) -> Option<String> {
     re.find(text).map(|m| m.as_str().to_string())
 }
 
+/// コンテナ内で claude /login を実行し、credentials を取得する共通フロー。
+/// `-i`（TTY なし）で起動し、stdout をパイプで監視して URL をキャプチャする。
+pub fn run_login_flow(image: &str) -> Result<Credentials> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let container_name = format!("vibepod-login-{}", chrono::Utc::now().timestamp_millis());
+
+    // -i (no TTY) so stdout can be piped for URL capture
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "-i",
+            "--network",
+            "host",
+            "--name",
+            &container_name,
+            image,
+            "claude",
+            "/login",
+        ])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("Failed to start login container")?;
+
+    // Monitor stdout for OAuth URL and pass through
+    if let Some(stdout) = child.stdout.take() {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if let Some(url) = detect_oauth_url(&line) {
+                if !open_browser(&url) {
+                    eprintln!("  │  以下の URL をブラウザで開いてください:");
+                    eprintln!("  │  {}", url);
+                }
+            }
+            println!("{}", line);
+        }
+    }
+
+    let status = child.wait()?;
+
+    // Extract credentials via docker cp
+    let temp_dir = std::env::temp_dir().join("vibepod-login");
+    fs::create_dir_all(&temp_dir)?;
+    let temp_creds = temp_dir.join("credentials.json");
+
+    let cp_result = Command::new("docker")
+        .args([
+            "cp",
+            &format!("{}:/home/vibepod/.claude/.credentials.json", container_name),
+            &temp_creds.to_string_lossy(),
+        ])
+        .output();
+
+    // Remove container
+    Command::new("docker")
+        .args(["rm", "-f", &container_name])
+        .output()
+        .ok();
+
+    match cp_result {
+        Ok(output) if output.status.success() => {
+            let json = fs::read_to_string(&temp_creds)?;
+            let creds: Credentials = serde_json::from_str(&json)?;
+            fs::remove_file(&temp_creds).ok();
+            Ok(creds)
+        }
+        _ => {
+            if !status.success() {
+                anyhow::bail!("ログインに失敗しました");
+            }
+            anyhow::bail!("コンテナからクレデンシャルを取得できませんでした")
+        }
+    }
+}
+
 pub fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
