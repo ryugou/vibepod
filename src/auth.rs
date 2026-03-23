@@ -202,8 +202,14 @@ fn detect_oauth_url(text: &str) -> Option<String> {
 }
 
 fn strip_ansi_codes(text: &str) -> String {
-    let re =
-        Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[0-9;]*[mGJKHfsu]").unwrap();
+    let re = Regex::new(concat!(
+        r"\x1b\[[0-9;?]*[a-zA-Z]",        // CSI sequences
+        r"|\x1b\][^\x07]*\x07",           // OSC sequences (BEL terminated)
+        r"|\x1bP[^\x1b]*\x1b\\",          // DCS sequences
+        r"|\x1b[a-zA-Z]",                 // Two-char ESC sequences
+        r"|[\x00-\x08\x0b\x0c\x0e-\x1f]", // Other control chars (except \t \n \r)
+    ))
+    .unwrap();
     re.replace_all(text, "").to_string()
 }
 
