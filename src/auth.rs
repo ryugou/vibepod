@@ -151,9 +151,18 @@ pub fn run_setup_token(image: &str) -> Result<String> {
         }
     });
 
-    // Run claude setup-token via docker exec -it (fully interactive)
+    // Run claude setup-token via docker exec -it, using script to tee output
+    // to a file so we can extract the token afterward
+    let token_capture_path = "/tmp/vibepod-setup-token-output";
     let status = Command::new("docker")
-        .args(["exec", "-it", &container_name, "claude", "setup-token"])
+        .args([
+            "exec",
+            "-it",
+            &container_name,
+            "bash",
+            "-c",
+            &format!("script -q {} -c 'claude setup-token'", token_capture_path),
+        ])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -162,24 +171,12 @@ pub fn run_setup_token(image: &str) -> Result<String> {
 
     // Wait for URL watcher to finish (it will timeout if no URL found)
     url_watcher.join().ok();
-    if !status.success() {
-        Command::new("docker")
-            .args(["rm", "-f", &container_name])
-            .output()
-            .ok();
-        anyhow::bail!("setup-token に失敗しました");
-    }
 
-    // Extract credentials from container
+    // Extract token from captured output
     let output = Command::new("docker")
-        .args([
-            "exec",
-            &container_name,
-            "cat",
-            "/home/vibepod/.claude/.credentials.json",
-        ])
+        .args(["exec", &container_name, "cat", token_capture_path])
         .output()
-        .context("Failed to read credentials from container")?;
+        .context("Failed to read setup-token output")?;
 
     // Remove container
     Command::new("docker")
@@ -187,20 +184,19 @@ pub fn run_setup_token(image: &str) -> Result<String> {
         .output()
         .ok();
 
-    if !output.status.success() {
-        anyhow::bail!("コンテナからトークンを取得できませんでした");
+    // Clean up temp files
+    fs::remove_file(&fake_open_path).ok();
+
+    if !status.success() {
+        anyhow::bail!("setup-token に失敗しました");
     }
 
-    // Parse the token from credentials
-    let json_str = String::from_utf8_lossy(&output.stdout);
-    let creds: serde_json::Value =
-        serde_json::from_str(&json_str).context("credentials.json のパースに失敗しました")?;
-
-    let token = creds
-        .get("claudeAiOauth")
-        .and_then(|o| o.get("accessToken"))
-        .and_then(|t| t.as_str())
-        .context("accessToken が見つかりません")?
+    // Parse token from output (look for sk-ant-oat01-...)
+    let raw_output = String::from_utf8_lossy(&output.stdout);
+    let token = raw_output
+        .split_whitespace()
+        .find(|s| s.starts_with("sk-ant-"))
+        .context("トークンが出力から見つかりませんでした")?
         .to_string();
 
     Ok(token)
