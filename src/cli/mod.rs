@@ -1,4 +1,5 @@
 pub mod init;
+pub mod restore;
 pub mod run;
 
 use clap::{Parser, Subcommand};
@@ -36,4 +37,6 @@ pub enum Commands {
         #[arg(long)]
         env_file: Option<String>,
     },
+    /// Restore workspace to a previous session state
+    Restore {},
 }

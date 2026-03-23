@@ -77,3 +77,9 @@ fn test_parse_run_with_env_file() {
         panic!("Expected Run command");
     }
 }
+
+#[test]
+fn test_parse_restore_command() {
+    let cli = Cli::parse_from(["vibepod", "restore"]);
+    assert!(matches!(cli.command, vibepod::cli::Commands::Restore {}));
+}

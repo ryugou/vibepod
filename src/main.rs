@@ -21,6 +21,9 @@ async fn main() -> Result<()> {
         } => {
             vibepod::cli::run::execute(resume, prompt, no_network, env, env_file).await?;
         }
+        Commands::Restore {} => {
+            vibepod::cli::restore::execute()?;
+        }
     }
 
     Ok(())
