@@ -28,6 +28,19 @@ vibepod run --prompt "Implement the login page"
 
 Builds the Docker image and creates global configuration. Detects your host UID/GID automatically for seamless file permissions.
 
+### `vibepod restore`
+
+Restores the workspace to a previous session's state. VibePod automatically records the git HEAD at the start of each `vibepod run` session. If the agent makes unwanted changes, you can revert them with a single command.
+
+```bash
+vibepod restore
+```
+
+This will:
+1. Show a list of restorable sessions
+2. Generate a Markdown report of all changes (saved to `.vibepod/reports/`)
+3. Run `git reset --hard` + `git clean -fd` to restore the workspace
+
 ### `vibepod run`
 
 Runs an AI coding agent inside a container, mounting your project directory.
@@ -102,7 +115,7 @@ cargo install vibepod
 |---------|----------|
 | **v1.0** | `init` + `run` (interactive / fire-and-forget), Claude Code support |
 | **v1.1** | Pre-installed plugins (superpowers, frontend-design), `--env-file` with 1Password integration |
-| **v1.2** | `vibepod restore` (git HEAD auto-recovery) |
+| **v1.2** ✅ | `vibepod restore` (git HEAD auto-recovery with session reports) |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
 | **v2.1+** | Gemini CLI / Codex support, multi-container execution |
 
