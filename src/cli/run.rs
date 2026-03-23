@@ -244,6 +244,17 @@ pub async fn execute(
     // Add token as environment variable
     resolved_env_vars.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", token_data.token));
 
+    // Copy .claude.json to temp file to protect host file from container writes
+    let temp_claude_json = if claude_json.exists() {
+        let temp_dir = std::env::temp_dir().join("vibepod-run");
+        std::fs::create_dir_all(&temp_dir)?;
+        let temp_path = temp_dir.join("claude.json");
+        std::fs::copy(&claude_json, &temp_path)?;
+        Some(temp_path)
+    } else {
+        None
+    };
+
     let mode_label = if interactive {
         "interactive"
     } else if resume {
@@ -277,12 +288,9 @@ pub async fn execute(
                 gitconfig.display()
             ));
         }
-        if claude_json.exists() {
+        if let Some(ref temp_cj) = temp_claude_json {
             docker_args.push("-v".to_string());
-            docker_args.push(format!(
-                "{}:/home/vibepod/.claude.json",
-                claude_json.display()
-            ));
+            docker_args.push(format!("{}:/home/vibepod/.claude.json", temp_cj.display()));
         }
         if no_network {
             docker_args.push("--network".to_string());
@@ -313,6 +321,11 @@ pub async fn execute(
             // Claude exited with non-zero, which is fine (e.g., user quit)
         }
 
+        // Clean up temp claude.json
+        if let Some(ref temp_cj) = temp_claude_json {
+            std::fs::remove_file(temp_cj).ok();
+        }
+
         println!("  Container stopped and removed.");
     } else {
         // Fire-and-forget mode: use bollard API
@@ -321,11 +334,9 @@ pub async fn execute(
             image: global_config.image,
             container_name: container_name.clone(),
             workspace_path: cwd_str,
-            claude_json: if claude_json.exists() {
-                Some(claude_json.to_string_lossy().to_string())
-            } else {
-                None
-            },
+            claude_json: temp_claude_json
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             args: {
                 let mut full = vec!["claude".to_string()];
                 full.extend(claude_args);
@@ -359,6 +370,11 @@ pub async fn execute(
 
         runtime.stop_container(&container_id, 10).await.ok();
         runtime.remove_container(&container_id).await.ok();
+
+        // Clean up temp claude.json
+        if let Some(ref temp_cj) = temp_claude_json {
+            std::fs::remove_file(temp_cj).ok();
+        }
 
         println!("  Container stopped and removed.");
     }
