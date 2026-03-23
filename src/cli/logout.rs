@@ -16,7 +16,7 @@ pub fn execute(all: bool) -> Result<()> {
 
     if all {
         auth_manager.delete_all_isolated()?;
-        println!("  ◇  全ての isolated セッションを削除しました");
+        println!("  ◇  全てのコンテナ専用セッションを削除しました");
     }
 
     println!("  └\n");

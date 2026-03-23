@@ -89,3 +89,22 @@ fn test_parse_login_command() {
     let cli = Cli::parse_from(["vibepod", "login"]);
     assert!(matches!(cli.command, vibepod::cli::Commands::Login {}));
 }
+
+#[test]
+fn test_parse_logout_command() {
+    let cli = Cli::parse_from(["vibepod", "logout"]);
+    assert!(matches!(
+        cli.command,
+        vibepod::cli::Commands::Logout { all: false }
+    ));
+}
+
+#[test]
+fn test_parse_logout_all_command() {
+    let cli = Cli::parse_from(["vibepod", "logout", "--all"]);
+    if let vibepod::cli::Commands::Logout { all } = cli.command {
+        assert!(all);
+    } else {
+        panic!("Expected Logout command");
+    }
+}
