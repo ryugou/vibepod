@@ -1,8 +1,10 @@
-# vibepod auth Implementation Plan
+# vibepod auth Implementation Plan (ARCHIVED)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **注意:** この実装計画は credentials マウント + ロック機構ベースの旧アーキテクチャに基づいています。
+> 実際の実装は `claude setup-token` + 環境変数方式に変更されました。
+> 正式な仕様は `docs/superpowers/specs/2026-03-23-vibepod-auth-design.md` を参照してください。
 
-**Goal:** `vibepod login` / `vibepod logout` コマンドを追加し、コンテナ内の Claude Code が独立した OAuth セッションで認証できるようにする。`--isolated` オプションで複数コンテナの同時実行も可能にする。
+**Goal:** `vibepod login` / `vibepod logout` コマンドを追加し、コンテナ内の Claude Code が独立した OAuth セッションで認証できるようにする。
 
 **Architecture:** `src/auth.rs` が認証セッション管理（保存・読み込み・ロック・有効期限チェック・一時コピー・書き戻し）を担当。`vibepod login` は `--network host` でコンテナを起動し、`claude /login` の出力から URL をキャプチャしてホスト側でブラウザを開く。`vibepod run` は共有セッションのコピーをコンテナにマウントする。
 

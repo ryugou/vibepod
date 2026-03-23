@@ -71,7 +71,9 @@ sessions.json は直近100件を保持する。100件を超えた古いレコー
 
 ### claude_session_path の取得
 
-Claude Code のセッションログは `~/.claude/projects/<project-path-hash>/` 配下に保存される。`vibepod run` 開始時にこのパスの特定を試みるが、取得できない場合は `null` とする（`Option<String>`）。
+> **現状:** 現在の実装では常に `null` を設定している。Claude Code のセッションログパス
+> (`~/.claude/projects/<project-path-hash>/`) の特定方法がバージョンによって変わる可能性があるため、
+> 将来のバージョンで対応予定。
 
 ## レポート
 
