@@ -18,6 +18,7 @@ pub struct ContainerConfig {
     pub container_name: String,
     pub workspace_path: String,
     pub claude_credentials: String,
+    pub credentials_readonly: bool,
     pub claude_json: Option<String>,
     pub args: Vec<String>,
     pub env_vars: Vec<String>,
@@ -130,7 +131,7 @@ impl DockerRuntime {
                 target: Some("/home/vibepod/.claude/.credentials.json".to_string()),
                 source: Some(config.claude_credentials.clone()),
                 typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
+                read_only: Some(config.credentials_readonly),
                 ..Default::default()
             },
         ];

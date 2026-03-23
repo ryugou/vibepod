@@ -108,3 +108,25 @@ fn test_parse_logout_all_command() {
         panic!("Expected Logout command");
     }
 }
+
+#[test]
+fn test_parse_run_with_isolated() {
+    let cli = Cli::parse_from(["vibepod", "run", "--isolated"]);
+    if let vibepod::cli::Commands::Run { isolated, name, .. } = cli.command {
+        assert!(isolated);
+        assert!(name.is_none());
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_with_isolated_name() {
+    let cli = Cli::parse_from(["vibepod", "run", "--isolated", "--name", "my-session"]);
+    if let vibepod::cli::Commands::Run { isolated, name, .. } = cli.command {
+        assert!(isolated);
+        assert_eq!(name, Some("my-session".to_string()));
+    } else {
+        panic!("Expected Run command");
+    }
+}
