@@ -49,5 +49,5 @@ fn test_generate_report_no_session_log() {
         "M\tfile.rs",
         "1 file changed",
     );
-    assert!(report.contains("なし"));
+    assert!(report.contains("N/A"));
 }

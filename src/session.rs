@@ -42,7 +42,7 @@ impl SessionStore {
         let json = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
         let data: SessionsData =
-            serde_json::from_str(&json).context("セッション履歴ファイルが破損しています")?;
+            serde_json::from_str(&json).context("Session history file is corrupted")?;
         Ok(data)
     }
 
@@ -57,7 +57,7 @@ impl SessionStore {
     pub fn add(&self, session: Session) -> Result<()> {
         let mut data = self.load()?;
         data.sessions.push(session);
-        // 上限を超えたら古いものから削除
+        // Remove oldest entries if over limit
         if data.sessions.len() > MAX_SESSIONS {
             let remove_count = data.sessions.len() - MAX_SESSIONS;
             data.sessions.drain(..remove_count);
@@ -73,7 +73,7 @@ impl SessionStore {
         self.save(&data)
     }
 
-    /// 指定セッション以降の全セッションを restored: true にする
+    /// Mark the specified session and all subsequent sessions as restored
     pub fn mark_restored_since(&self, session_id: &str) -> Result<()> {
         let mut data = self.load()?;
         let mut found = false;

@@ -7,27 +7,27 @@ pub fn generate_report(
     changed_files: &str,
     diff_stat: &str,
 ) -> String {
-    let session_log = session.claude_session_path.as_deref().unwrap_or("なし");
+    let session_log = session.claude_session_path.as_deref().unwrap_or("N/A");
 
     format!(
         r#"# VibePod Session Report
 
-- **実行日時:** {}
-- **ブランチ:** {}
-- **モード:** {}
-- **開始HEAD:** {}
-- **終了HEAD:** {}
-- **Claude セッションログ:** {}
+- **Started at:** {}
+- **Branch:** {}
+- **Mode:** {}
+- **HEAD before:** {}
+- **HEAD after:** {}
+- **Claude session log:** {}
 
-## コミット一覧
-
-{}
-
-## 変更ファイル一覧
+## Commits
 
 {}
 
-## 変更統計
+## Changed files
+
+{}
+
+## Diff stats
 
 {}
 "#,

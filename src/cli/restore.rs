@@ -8,39 +8,39 @@ use crate::session::SessionStore;
 pub fn execute() -> Result<()> {
     let cwd = std::env::current_dir()?;
 
-    // 1. git リポジトリチェック
+    // 1. Git repo check
     if !git::is_git_repo(&cwd) {
-        bail!("git リポジトリ内で実行してください");
+        bail!("Not a git repository. Run this command inside a git-initialized directory.");
     }
 
-    // 2. .vibepod/ が git にトラッキングされていないことを確認
+    // 2. Ensure .vibepod/ is not tracked by git
     let tracking_check = std::process::Command::new("git")
         .args(["ls-files", ".vibepod"])
         .current_dir(&cwd)
         .output()?;
     if !tracking_check.stdout.is_empty() {
-        bail!(".vibepod/ が git 管理下にあります。.gitignore に追加してください");
+        bail!(".vibepod/ is tracked by git. Add it to .gitignore.");
     }
 
-    // 3. セッション読み込み
+    // 3. Load sessions
     let vibepod_dir = cwd.join(".vibepod");
     let store = SessionStore::new(vibepod_dir);
 
     let restorable = store.restorable_sessions()?;
     if restorable.is_empty() {
         if store.load()?.sessions.is_empty() {
-            bail!("セッション履歴がありません。`vibepod run` を実行してください");
+            bail!("No session history found. Run `vibepod run` first.");
         } else {
-            bail!("復元可能なセッションがありません");
+            bail!("No restorable sessions available.");
         }
     }
 
-    // 4. 未コミット変更チェック
+    // 4. Check for uncommitted changes
     if git::has_uncommitted_changes(&cwd) {
-        bail!("未コミットの変更があります。先にコミットするか stash してください");
+        bail!("Uncommitted changes detected. Please commit or stash them first.");
     }
 
-    // 5. セッション選択
+    // 5. Select session
     println!("\n  ┌  VibePod Restore");
     println!("  │");
 
@@ -59,24 +59,23 @@ pub fn execute() -> Result<()> {
         .collect();
 
     let selection = Select::new()
-        .with_prompt("  ◆  どのセッションに戻しますか？")
+        .with_prompt("  ◆  Select session to restore")
         .items(&items)
         .default(0)
         .interact()?;
 
-    // 逆順で表示しているので、インデックスを逆算
     let selected = &restorable[restorable.len() - 1 - selection];
 
-    // 6. HEAD チェック
+    // 6. HEAD check
     let current_head = git::get_head_hash(&cwd)?;
 
     if current_head == selected.head_before {
-        bail!("変更がありません。復元の必要はありません");
+        bail!("No changes to restore.");
     }
 
     if !git::commit_exists(&cwd, &selected.head_before) {
         bail!(
-            "コミット {} が見つかりません。手動で git 操作された可能性があります",
+            "Commit {} not found. The repository may have been modified manually.",
             selected
                 .head_before
                 .get(..7)
@@ -84,44 +83,44 @@ pub fn execute() -> Result<()> {
         );
     }
 
-    // 7. ブランチチェック
+    // 7. Branch check
     let current_branch = git::get_current_branch(&cwd).unwrap_or_default();
     if current_branch != selected.branch {
         println!(
-            "  ⚠  セッション時のブランチ（{}）と現在のブランチ（{}）が異なります。",
-            selected.branch, current_branch
+            "  ⚠  Current branch ({}) differs from session branch ({}).",
+            current_branch, selected.branch
         );
         if !Confirm::new()
-            .with_prompt("  続行しますか？")
+            .with_prompt("  Continue?")
             .default(false)
             .interact()?
         {
-            println!("  中止しました。");
+            println!("  Aborted.");
             return Ok(());
         }
     }
 
-    // 8. 祖先チェック
+    // 8. Ancestor check
     if !git::is_ancestor(&cwd, &selected.head_before, &current_head) {
-        println!("  ⚠  セッション開始時点のコミットが現在のブランチ履歴上にありません。");
+        println!("  ⚠  Session start commit is not in the current branch history.");
         if !Confirm::new()
-            .with_prompt("  強制的に戻しますか？")
+            .with_prompt("  Force restore?")
             .default(false)
             .interact()?
         {
-            println!("  中止しました。");
+            println!("  Aborted.");
             return Ok(());
         }
     }
 
-    // 9. 削除対象ファイル表示 + 確認
+    // 9. Show files to be removed + confirm
     println!("  │");
-    println!("  ⚠  このセッション以降の全ての変更が巻き戻されます。");
+    println!("  ⚠  All changes after this session will be reverted.");
 
     let untracked = git::get_untracked_files(&cwd)?;
     if !untracked.is_empty() {
         println!("  │");
-        println!("  │  以下の未追跡ファイルも削除されます:");
+        println!("  │  The following untracked files will be deleted:");
         for f in &untracked {
             println!("  │    {}", f);
         }
@@ -129,15 +128,15 @@ pub fn execute() -> Result<()> {
 
     println!("  │");
     if !Confirm::new()
-        .with_prompt("  ◆  続行しますか？")
+        .with_prompt("  ◆  Continue?")
         .default(false)
         .interact()?
     {
-        println!("  中止しました。");
+        println!("  Aborted.");
         return Ok(());
     }
 
-    // 10. レポート生成
+    // 10. Generate report
     let commit_log = git::get_commit_log(&cwd, &selected.head_before, &current_head)?;
     let changed_files = git::get_changed_files(&cwd, &selected.head_before, &current_head)?;
     let diff_stat = git::get_diff_stat(&cwd, &selected.head_before, &current_head)?;
@@ -156,9 +155,9 @@ pub fn execute() -> Result<()> {
     std::fs::write(&report_path, &report_content)?;
 
     println!("  │");
-    println!("  ◇  レポートを保存しました: {}", report_path.display());
+    println!("  ◇  Report saved: {}", report_path.display());
 
-    // 11. リセット
+    // 11. Reset
     println!("  │");
     println!(
         "  ◇  git reset --hard {}",
@@ -172,11 +171,11 @@ pub fn execute() -> Result<()> {
     println!("  │  git clean -fd");
     git::clean_fd(&cwd)?;
 
-    // 12. 選択セッション以降の全セッションに restored マーク
+    // 12. Mark selected and subsequent sessions as restored
     store.mark_restored_since(&selected.id)?;
 
     println!("  │");
-    println!("  ◇  復元完了！");
+    println!("  ◇  Restore complete!");
     println!("  └\n");
 
     Ok(())

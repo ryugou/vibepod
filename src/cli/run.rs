@@ -235,10 +235,10 @@ pub async fn execute(
 
     let token_data = auth_manager
         .load_token()?
-        .context("`vibepod login` を先に実行してください")?;
+        .context("Not authenticated. Run `vibepod login` first.")?;
 
     if token_data.needs_renewal() {
-        bail!("トークンの有効期限が近づいています。`vibepod login` を再実行してください");
+        bail!("Token expires soon. Please run `vibepod login` to renew.");
     }
 
     // Add token as environment variable

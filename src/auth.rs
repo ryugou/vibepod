@@ -77,7 +77,7 @@ impl AuthManager {
     }
 }
 
-/// コンテナ内で claude setup-token を実行し、長期トークンを取得する。
+/// Run `claude setup-token` inside a container to obtain a long-lived OAuth token.
 pub fn run_setup_token(image: &str) -> Result<String> {
     use std::process::Command;
 
@@ -189,7 +189,7 @@ pub fn run_setup_token(image: &str) -> Result<String> {
     fs::remove_file(&fake_open_path).ok();
 
     if !status.success() {
-        anyhow::bail!("setup-token に失敗しました");
+        anyhow::bail!("setup-token failed");
     }
 
     // Parse token from output (look for sk-ant-oat01-... pattern through ANSI codes)
@@ -197,7 +197,7 @@ pub fn run_setup_token(image: &str) -> Result<String> {
     let token_re = Regex::new(r"sk-ant-[a-zA-Z0-9_-]+").unwrap();
     let token = token_re
         .find(&raw_output)
-        .context("トークンが出力から見つかりませんでした")?
+        .context("Token not found in setup-token output")?
         .as_str()
         .to_string();
 

@@ -27,11 +27,13 @@ pub async fn execute() -> Result<()> {
     if let Some(existing) = auth_manager.load_token()? {
         if !existing.is_expired() {
             println!(
-                "  ⚠  既存のトークンがあります（有効期限: {}）。",
-                existing.expires_at
+                "  ⚠  Existing token found (valid until {}).",
+                chrono::DateTime::parse_from_rfc3339(&existing.expires_at)
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|_| existing.expires_at.clone())
             );
             if !dialoguer::Confirm::new()
-                .with_prompt("  上書きしますか？")
+                .with_prompt("  Overwrite?")
                 .default(false)
                 .interact()?
             {
@@ -41,7 +43,7 @@ pub async fn execute() -> Result<()> {
         }
     }
 
-    println!("  ◇  コンテナ用の長期トークンを作成します");
+    println!("  ◇  Creating long-lived token for container use...");
     println!("  │");
 
     let token = auth::run_setup_token(&global_config.image)?;
@@ -56,7 +58,9 @@ pub async fn execute() -> Result<()> {
     auth_manager.save_token(&token_data)?;
 
     println!("  │");
-    println!("  ◇  認証完了！");
+    println!("  ◇  Login successful! Token saved.");
+    println!("  │");
+    println!("  │  Run `vibepod run` in any git repo to start.");
     println!("  └\n");
 
     Ok(())

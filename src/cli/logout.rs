@@ -11,7 +11,7 @@ pub fn execute() -> Result<()> {
     let auth_manager = AuthManager::new(config_dir);
 
     auth_manager.delete_token()?;
-    println!("  ◇  トークンを削除しました");
+    println!("  ◇  Token removed. Run `vibepod login` to authenticate again.");
 
     println!("  └\n");
     Ok(())
