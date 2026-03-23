@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -104,50 +103,14 @@ pub fn run_setup_token(image: &str) -> Result<String> {
         );
     }
 
-    // Run claude setup-token via docker exec with script for PTY + stdout capture
-    let mut child = Command::new("docker")
-        .args([
-            "exec",
-            "-i",
-            &container_name,
-            "script",
-            "-q",
-            "/dev/null",
-            "-c",
-            "COLUMNS=10000 claude setup-token",
-        ])
+    // Run claude setup-token via docker exec -it (fully interactive)
+    let status = Command::new("docker")
+        .args(["exec", "-it", &container_name, "claude", "setup-token"])
         .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
-        .spawn()
+        .status()
         .context("Failed to run claude setup-token")?;
-
-    // Monitor stdout for OAuth URL, open browser, and relay output
-    // URL may be split across multiple lines due to terminal wrapping,
-    // so we accumulate cleaned text and check for URL across line boundaries.
-    let mut url_opened = false;
-    let mut accumulated_clean = String::new();
-    if let Some(stdout) = child.stdout.take() {
-        use std::io::{BufRead, BufReader, Write};
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            // Relay original output to terminal
-            let _ = std::io::stdout().write_all(line.as_bytes());
-            let _ = std::io::stdout().write_all(b"\n");
-            let _ = std::io::stdout().flush();
-
-            if !url_opened {
-                let clean = strip_ansi_codes(&line);
-                accumulated_clean.push_str(&clean);
-                if let Some(url) = detect_oauth_url(&accumulated_clean) {
-                    open_browser(&url);
-                    url_opened = true;
-                }
-            }
-        }
-    }
-
-    let status = child.wait()?;
     if !status.success() {
         Command::new("docker")
             .args(["rm", "-f", &container_name])
@@ -190,39 +153,4 @@ pub fn run_setup_token(image: &str) -> Result<String> {
         .to_string();
 
     Ok(token)
-}
-
-fn detect_oauth_url(text: &str) -> Option<String> {
-    // Require &state= parameter to ensure we have the complete URL
-    let re = Regex::new(
-        r#"https://[a-zA-Z0-9._-]*claude[a-zA-Z0-9._-]*/oauth/authorize[^\s)"'>]*&state=[a-zA-Z0-9_-]+"#,
-    )
-    .unwrap();
-    re.find(text).map(|m| m.as_str().to_string())
-}
-
-fn strip_ansi_codes(text: &str) -> String {
-    let re = Regex::new(concat!(
-        r"\x1b\[[0-9;?]*[a-zA-Z]",        // CSI sequences
-        r"|\x1b\][^\x07]*\x07",           // OSC sequences (BEL terminated)
-        r"|\x1bP[^\x1b]*\x1b\\",          // DCS sequences
-        r"|\x1b[a-zA-Z]",                 // Two-char ESC sequences
-        r"|[\x00-\x08\x0b\x0c\x0e-\x1f]", // Other control chars (except \t \n \r)
-    ))
-    .unwrap();
-    re.replace_all(text, "").to_string()
-}
-
-fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).output().ok();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .output()
-            .ok();
-    }
 }
