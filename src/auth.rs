@@ -235,20 +235,16 @@ pub fn detect_oauth_url(text: &str) -> Option<String> {
 }
 
 /// コンテナ内で claude auth login を実行し、credentials を取得する共通フロー。
-/// `-i`（TTY なし）で起動し、stdout をパイプで監視して URL をキャプチャする。
+/// `-it` で全 stdio を継承し、ユーザーがインタラクティブにログインできるようにする。
 pub fn run_login_flow(image: &str) -> Result<Credentials> {
-    use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     let container_name = format!("vibepod-login-{}", chrono::Utc::now().timestamp_millis());
 
-    // -i (no TTY) so stdout can be piped for URL capture
-    let mut child = Command::new("docker")
+    let status = Command::new("docker")
         .args([
             "run",
-            "-i",
-            "--network",
-            "host",
+            "-it",
             "--name",
             &container_name,
             image,
@@ -256,27 +252,11 @@ pub fn run_login_flow(image: &str) -> Result<Credentials> {
             "auth",
             "login",
         ])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
         .context("Failed to start login container")?;
-
-    // Monitor stdout for OAuth URL and pass through
-    if let Some(stdout) = child.stdout.take() {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if let Some(url) = detect_oauth_url(&line) {
-                if !open_browser(&url) {
-                    eprintln!("  │  以下の URL をブラウザで開いてください:");
-                    eprintln!("  │  {}", url);
-                }
-            }
-            println!("{}", line);
-        }
-    }
-
-    let status = child.wait()?;
 
     // Extract credentials via docker cp
     let temp_dir = std::env::temp_dir().join("vibepod-login");
