@@ -234,7 +234,7 @@ pub fn detect_oauth_url(text: &str) -> Option<String> {
     re.find(text).map(|m| m.as_str().to_string())
 }
 
-/// コンテナ内で claude /login を実行し、credentials を取得する共通フロー。
+/// コンテナ内で claude auth login を実行し、credentials を取得する共通フロー。
 /// `-i`（TTY なし）で起動し、stdout をパイプで監視して URL をキャプチャする。
 pub fn run_login_flow(image: &str) -> Result<Credentials> {
     use std::io::{BufRead, BufReader};
@@ -253,7 +253,8 @@ pub fn run_login_flow(image: &str) -> Result<Credentials> {
             &container_name,
             image,
             "claude",
-            "/login",
+            "auth",
+            "login",
         ])
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
