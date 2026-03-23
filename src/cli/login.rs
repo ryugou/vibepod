@@ -57,8 +57,6 @@ pub async fn execute() -> Result<()> {
 
     println!("  │");
     println!("  ◇  認証完了！");
-    println!("  │  トークンを保存しました: ~/.config/vibepod/auth/token.json");
-    println!("  │  有効期限: {}", expires_at.format("%Y-%m-%d"));
     println!("  └\n");
 
     Ok(())
