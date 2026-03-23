@@ -3,6 +3,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::LazyLock;
+
+static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"sk-ant-[a-zA-Z0-9_-]+").unwrap());
 
 const EXPIRY_THRESHOLD_DAYS: i64 = 7;
 
@@ -194,8 +197,7 @@ pub fn run_setup_token(image: &str) -> Result<String> {
 
     // Parse token from output (look for sk-ant-oat01-... pattern through ANSI codes)
     let raw_output = String::from_utf8_lossy(&output.stdout);
-    let token_re = Regex::new(r"sk-ant-[a-zA-Z0-9_-]+").unwrap();
-    let token = token_re
+    let token = TOKEN_RE
         .find(&raw_output)
         .context("Token not found in setup-token output")?
         .as_str()

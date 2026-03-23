@@ -101,7 +101,7 @@ impl SessionStore {
 pub fn generate_session_id() -> String {
     let now = chrono::Local::now();
     let suffix: String = (0..4)
-        .map(|_| format!("{:x}", rand::random::<u8>() % 16))
+        .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
         .collect();
     format!("{}-{}", now.format("%Y%m%d-%H%M%S"), suffix)
 }

@@ -86,6 +86,12 @@ pub fn get_commit_log(path: &Path, from: &str, to: &str) -> Result<String> {
         .current_dir(path)
         .output()
         .context("Failed to get commit log")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git log failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
@@ -95,6 +101,12 @@ pub fn get_diff_stat(path: &Path, from: &str, to: &str) -> Result<String> {
         .current_dir(path)
         .output()
         .context("Failed to get diff stat")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff --stat failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
@@ -104,6 +116,12 @@ pub fn get_changed_files(path: &Path, from: &str, to: &str) -> Result<String> {
         .current_dir(path)
         .output()
         .context("Failed to get changed files")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff --name-status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
