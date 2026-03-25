@@ -242,7 +242,7 @@ impl SlackClient {
                                         }
                                     }
                                     "message" => {
-                                        if let Some(response) = self.handle_thread_reply(event) {
+                                        if let Some(response) = self.handle_message(event) {
                                             let _ = response_tx.send(response).await;
                                         }
                                     }
@@ -313,19 +313,32 @@ impl SlackClient {
         })
     }
 
-    fn handle_thread_reply(&self, event: &Value) -> Option<SlackResponse> {
-        // Only handle threaded replies (must have thread_ts)
-        let thread_ts = event["thread_ts"].as_str()?;
+    fn handle_message(&self, event: &Value) -> Option<SlackResponse> {
         // Ignore bot's own messages
         if event.get("bot_id").is_some() {
             return None;
         }
+        // Ignore message subtypes (edits, deletes, etc.)
+        if event.get("subtype").is_some() {
+            return None;
+        }
+
         let user_text = event["text"].as_str()?;
+        let thread_ts = event["thread_ts"].as_str();
+
+        let (source, message_ts) = if let Some(ts) = thread_ts {
+            // スレッド返信
+            ("slack_thread", ts.to_string())
+        } else {
+            // DM 直接返信
+            let ts = event["ts"].as_str().unwrap_or("").to_string();
+            ("slack_dm", ts)
+        };
 
         Some(SlackResponse {
             text: format!("{}\r", user_text),
-            source: "slack_thread".to_string(),
-            message_ts: thread_ts.to_string(),
+            source: source.to_string(),
+            message_ts,
         })
     }
 

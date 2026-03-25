@@ -2,6 +2,30 @@ use std::time::{Duration, Instant};
 
 const MAX_LINES: usize = 40;
 const MAX_CHARS: usize = 2500;
+/// 意味のあるテキスト（装飾文字・空白以外）の最小文字数
+const MIN_MEANINGFUL_CHARS: usize = 5;
+
+/// バッファの内容が通知に値するかを判定する。
+/// 罫線文字・空白・記号だけの出力（UI バナー等）はノイズなのでスキップ。
+fn has_meaningful_content(text: &str) -> bool {
+    let meaningful: usize = text
+        .chars()
+        .filter(|c| {
+            // 罫線・ボックス描画文字 (U+2500-U+257F), 装飾記号, 空白, 制御文字を除外
+            !c.is_whitespace()
+                && !matches!(*c,
+                    '\u{2500}'..='\u{257F}' | // Box Drawing
+                    '\u{2580}'..='\u{259F}' | // Block Elements
+                    '\u{2800}'..='\u{28FF}' | // Braille Patterns
+                    '│' | '┃' | '╭' | '╮' | '╰' | '╯' | '║' | '═' |
+                    '◇' | '◆' | '◐' | '◑' | '▐' | '▛' | '▜' | '▝' | '▘' |
+                    '·' | '─' | '━' | '┄' | '┅' | '┈' | '┉' |
+                    '.' | '*' | '-' | '=' | '|' | '+' | '>' | '<' | '`'
+                )
+        })
+        .count();
+    meaningful >= MIN_MEANINGFUL_CHARS
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DetectorState {
@@ -62,8 +86,16 @@ impl IdleDetector {
             return None;
         }
 
-        self.state = DetectorState::Idle;
         let content = self.buffer_for_slack();
+
+        // 意味のあるテキストがなければ通知しない（UI 装飾のみの場合をスキップ）
+        if !has_meaningful_content(&content) {
+            // バッファをクリアして再検知に備える
+            self.buffer.clear();
+            self.last_output_at = None;
+            return None;
+        }
+
         self.state = DetectorState::WaitingResponse;
         Some(DetectorEvent::Notify(content))
     }
