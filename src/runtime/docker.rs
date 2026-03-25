@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use bollard::container::{
-    Config, CreateContainerOptions, ListContainersOptions, LogsOptions, RemoveContainerOptions,
-    StartContainerOptions, StopContainerOptions,
+    AttachContainerOptions, AttachContainerResults, Config, CreateContainerOptions,
+    ListContainersOptions, LogsOptions, RemoveContainerOptions, ResizeContainerTtyOptions,
+    StartContainerOptions, StopContainerOptions, WaitContainerOptions,
 };
 use bollard::image::BuildImageOptions;
 use bollard::models::{HostConfig, Mount, MountTypeEnum};
@@ -233,5 +234,51 @@ impl DockerRuntime {
             .await
             .context("Failed to remove container")?;
         Ok(())
+    }
+
+    pub async fn attach_container(
+        &self,
+        container_id: &str,
+    ) -> Result<AttachContainerResults> {
+        let options = AttachContainerOptions::<String> {
+            stdin: Some(true),
+            stdout: Some(true),
+            stderr: Some(true),
+            stream: Some(true),
+            ..Default::default()
+        };
+        let results = self
+            .docker
+            .attach_container(container_id, Some(options))
+            .await
+            .context("Failed to attach to container")?;
+        Ok(results)
+    }
+
+    pub async fn resize_container_tty(
+        &self,
+        container_id: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<()> {
+        let options = ResizeContainerTtyOptions { width, height };
+        self.docker
+            .resize_container_tty(container_id, options)
+            .await
+            .context("Failed to resize container TTY")?;
+        Ok(())
+    }
+
+    pub async fn wait_container(&self, container_id: &str) -> Result<i64> {
+        let options = WaitContainerOptions {
+            condition: "not-running",
+        };
+        let mut stream = self.docker.wait_container(container_id, Some(options));
+        if let Some(result) = stream.next().await {
+            let response = result.context("Failed to wait for container")?;
+            Ok(response.status_code)
+        } else {
+            Ok(0)
+        }
     }
 }
