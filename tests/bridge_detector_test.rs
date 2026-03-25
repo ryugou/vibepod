@@ -25,7 +25,7 @@ async fn test_terminal_input_clears_buffer() {
 #[tokio::test]
 async fn test_terminal_input_only_clears_in_buffering() {
     let mut detector = IdleDetector::new(Duration::from_millis(1));
-    detector.on_output(b"output\n");
+    detector.on_output(b"Some output text here\n");
     // Wait for idle
     tokio::time::sleep(Duration::from_millis(10)).await;
     let event = detector.check_idle();
@@ -64,7 +64,7 @@ fn test_check_idle_no_output_returns_none() {
 #[tokio::test]
 async fn test_on_response_transitions_to_buffering() {
     let mut detector = IdleDetector::new(Duration::from_millis(1));
-    detector.on_output(b"prompt\n");
+    detector.on_output(b"Do you want to proceed? (y/n)\n");
     tokio::time::sleep(Duration::from_millis(10)).await;
     detector.check_idle();
     assert!(matches!(detector.state(), DetectorState::WaitingResponse));
@@ -77,7 +77,7 @@ async fn test_on_response_transitions_to_buffering() {
 #[tokio::test]
 async fn test_on_output_resumed_transitions_to_buffering() {
     let mut detector = IdleDetector::new(Duration::from_millis(1));
-    detector.on_output(b"prompt\n");
+    detector.on_output(b"Do you want to proceed? (y/n)\n");
     tokio::time::sleep(Duration::from_millis(10)).await;
     detector.check_idle();
     assert!(matches!(detector.state(), DetectorState::WaitingResponse));

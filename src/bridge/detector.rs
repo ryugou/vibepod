@@ -6,22 +6,42 @@ const MAX_CHARS: usize = 2500;
 const MIN_MEANINGFUL_CHARS: usize = 5;
 
 /// 行が意味のあるテキストを含むかを判定する。
-/// 罫線・空行・短すぎる行を除外して、TUI の装飾ノイズを取り除く。
+/// Claude Code の TUI は ANSI ストリップ後にゴミ行を大量に生成するため、厳しくフィルタする。
 fn is_meaningful_line(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return false;
     }
-    // 英数字・日本語等の「テキスト」文字の数をカウント
-    let text_chars: usize = trimmed
-        .chars()
-        .filter(|c| {
-            c.is_alphanumeric()
-                || matches!(*c, '?' | '!' | '(' | ')' | ':' | ',' | '。' | '、' | '？' | '！')
-        })
-        .count();
-    // テキスト文字が2文字未満の行は装飾とみなす
-    text_chars >= 2
+
+    // 既知の TUI ノイズパターンを除外
+    let lower = trimmed.to_lowercase();
+    if lower.contains("esctointerrupt")
+        || lower.contains("esc to interrupt")
+        || lower.contains("? for shortcuts")
+        || lower.contains("forshortcuts")
+        || lower.starts_with("* ")  // spinner ("* Pouncing…", "* Whisking…")
+        || lower == "❯"
+        || lower == "(thinking)"
+    {
+        return false;
+    }
+
+    // 判定: 「スペースを含む5文字以上」または「CJK文字を3文字以上含む」
+    let has_spaces_and_length = trimmed.contains(' ') && trimmed.len() >= 5;
+    let cjk_count = trimmed.chars().filter(|c| is_cjk(*c)).count();
+
+    has_spaces_and_length || cjk_count >= 3
+}
+
+/// CJK（日本語・中国語・韓国語）文字かどうか
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{3000}'..='\u{303F}' |  // CJK Symbols and Punctuation
+        '\u{3040}'..='\u{309F}' |  // Hiragana
+        '\u{30A0}'..='\u{30FF}' |  // Katakana
+        '\u{4E00}'..='\u{9FFF}' |  // CJK Unified Ideographs
+        '\u{FF00}'..='\u{FFEF}'    // Fullwidth Forms
+    )
 }
 
 /// バッファの内容が通知に値するかを判定する。
