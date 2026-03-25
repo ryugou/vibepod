@@ -59,8 +59,9 @@ pub async fn execute(
         prompt.as_deref().unwrap_or("").to_string()
     };
 
+    let session_id = session::generate_session_id();
     let session_record = session::Session {
-        id: session::generate_session_id(),
+        id: session_id.clone(),
         started_at: chrono::Local::now().to_rfc3339(),
         head_before,
         branch: current_branch.clone(),
@@ -142,7 +143,140 @@ pub async fn execute(
         config::save_projects(&projects, &config_dir)?;
     }
 
-    // 6. Build claude args
+    // 6. Bridge env validation (before Docker startup)
+    let bridge_config = if bridge {
+        let config_dir_path = config::default_config_dir()?;
+        let default_bridge_env = config_dir_path.join("bridge.env");
+        let bridge_env_path = env_file
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or(default_bridge_env);
+
+        if !bridge_env_path.exists() {
+            bail!(
+                "Bridge env file not found: {}\n  \
+                 Create it with SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and SLACK_CHANNEL_ID.\n  \
+                 Default location: {}/bridge.env",
+                bridge_env_path.display(),
+                config_dir_path.display()
+            );
+        }
+
+        let content = std::fs::read_to_string(&bridge_env_path)
+            .with_context(|| format!("Failed to read bridge env file: {}", bridge_env_path.display()))?;
+
+        let parsed: Vec<(String, String)> = content
+            .lines()
+            .filter(|line| {
+                let t = line.trim();
+                !t.is_empty() && !t.starts_with('#')
+            })
+            .filter_map(|line| {
+                let t = line.trim();
+                let (key, value) = t.split_once('=')?;
+                let value = value.trim_matches('"').trim_matches('\'');
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect();
+
+        let has_op_refs = parsed.iter().any(|(_, v)| v.starts_with("op://"));
+
+        let resolved: std::collections::HashMap<String, String> = if has_op_refs {
+            let op_available = Command::new("op")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !op_available {
+                bail!(
+                    "bridge.env contains op:// references but 1Password CLI (op) is not installed.\n  \
+                     Install it: https://developer.1password.com/docs/cli/"
+                );
+            }
+
+            println!("  ◇  Resolving op:// references in bridge.env...");
+
+            let output = Command::new("op")
+                .args([
+                    "run",
+                    &format!("--env-file={}", bridge_env_path.display()),
+                    "--no-masking",
+                    "--",
+                    "env",
+                ])
+                .output()
+                .context("Failed to run `op run` to resolve bridge secrets")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("1Password CLI failed to resolve bridge secrets: {}", stderr);
+            }
+
+            let env_keys: std::collections::HashSet<String> =
+                parsed.iter().map(|(k, _)| k.clone()).collect();
+            let resolved_output = String::from_utf8_lossy(&output.stdout);
+            resolved_output
+                .lines()
+                .filter_map(|line| {
+                    let (key, value) = line.split_once('=')?;
+                    if env_keys.contains(key) {
+                        Some((key.to_string(), value.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            parsed.into_iter().collect()
+        };
+
+        let slack_bot_token = resolved.get("SLACK_BOT_TOKEN").cloned().unwrap_or_default();
+        let slack_app_token = resolved.get("SLACK_APP_TOKEN").cloned().unwrap_or_default();
+
+        // SLACK_CHANNEL_ID: CLI option > env file
+        let slack_channel_id = slack_channel
+            .clone()
+            .or_else(|| resolved.get("SLACK_CHANNEL_ID").cloned())
+            .unwrap_or_default();
+
+        // Validation
+        let mut missing = Vec::new();
+        if slack_bot_token.is_empty() {
+            missing.push("SLACK_BOT_TOKEN");
+        }
+        if slack_app_token.is_empty() {
+            missing.push("SLACK_APP_TOKEN");
+        }
+        if slack_channel_id.is_empty() {
+            missing.push("SLACK_CHANNEL_ID (set via --slack-channel or in bridge.env)");
+        }
+        if !missing.is_empty() {
+            bail!(
+                "Bridge mode requires the following configuration:\n  - {}\n  \
+                 Set them in {} or use CLI options.",
+                missing.join("\n  - "),
+                bridge_env_path.display()
+            );
+        }
+
+        println!("  ◇  Bridge mode enabled (notify delay: {}s)", notify_delay);
+
+        Some(crate::bridge::BridgeConfig {
+            slack_bot_token,
+            slack_app_token,
+            slack_channel_id,
+            notify_delay_secs: notify_delay,
+            session_id: session_id.clone(),
+            project_name: project_name.clone(),
+        })
+    } else {
+        None
+    };
+
+    // Suppress unused variable warnings for bridge_config until Task 9 integration
+    let _ = &bridge_config;
+
+    // 7. Build claude args
     let mut claude_args: Vec<String> = Vec::new();
     if !interactive {
         claude_args.push("--dangerously-skip-permissions".to_string());
