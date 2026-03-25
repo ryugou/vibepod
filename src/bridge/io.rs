@@ -104,7 +104,8 @@ pub async fn run_io_loop(
                         let bytes = log_output.into_bytes();
                         stdout.write_all(&bytes).await?;
                         stdout.flush().await?;
-                        output_tx.send(bytes.to_vec()).await.ok();
+                        let vec: Vec<u8> = bytes.to_vec();
+                        output_tx.send(vec).await.ok();
                     }
                     Some(Err(e)) => {
                         // ストリームエラー — コンテナが終了した可能性
