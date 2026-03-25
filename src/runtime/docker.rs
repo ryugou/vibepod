@@ -10,6 +10,7 @@ use bollard::Docker;
 use futures_util::StreamExt;
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub struct DockerRuntime {
     docker: Docker,
 }
