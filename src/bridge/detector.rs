@@ -5,6 +5,25 @@ const MAX_CHARS: usize = 2500;
 /// 意味のあるテキスト（装飾文字・空白以外）の最小文字数
 const MIN_MEANINGFUL_CHARS: usize = 5;
 
+/// 行が意味のあるテキストを含むかを判定する。
+/// 罫線・空行・短すぎる行を除外して、TUI の装飾ノイズを取り除く。
+fn is_meaningful_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // 英数字・日本語等の「テキスト」文字の数をカウント
+    let text_chars: usize = trimmed
+        .chars()
+        .filter(|c| {
+            c.is_alphanumeric()
+                || matches!(*c, '?' | '!' | '(' | ')' | ':' | ',' | '。' | '、' | '？' | '！')
+        })
+        .count();
+    // テキスト文字が2文字未満の行は装飾とみなす
+    text_chars >= 2
+}
+
 /// バッファの内容が通知に値するかを判定する。
 /// 罫線文字・空白・記号だけの出力（UI バナー等）はノイズなのでスキップ。
 fn has_meaningful_content(text: &str) -> bool {
@@ -14,12 +33,10 @@ fn has_meaningful_content(text: &str) -> bool {
             // 罫線・ボックス描画文字 (U+2500-U+257F), 装飾記号, 空白, 制御文字を除外
             !c.is_whitespace()
                 && !matches!(*c,
-                    '\u{2500}'..='\u{257F}' | // Box Drawing
-                    '\u{2580}'..='\u{259F}' | // Block Elements
+                    '\u{2500}'..='\u{257F}' | // Box Drawing (includes ─ ━ │ ┃ ╭ ╮ ╰ ╯ ║ ═ etc.)
+                    '\u{2580}'..='\u{259F}' | // Block Elements (includes ▐ ▛ ▜ ▝ ▘ etc.)
                     '\u{2800}'..='\u{28FF}' | // Braille Patterns
-                    '│' | '┃' | '╭' | '╮' | '╰' | '╯' | '║' | '═' |
-                    '◇' | '◆' | '◐' | '◑' | '▐' | '▛' | '▜' | '▝' | '▘' |
-                    '·' | '─' | '━' | '┄' | '┅' | '┈' | '┉' |
+                    '◇' | '◆' | '◐' | '◑' | '·' |
                     '.' | '*' | '-' | '=' | '|' | '+' | '>' | '<' | '`'
                 )
         })
@@ -124,19 +141,24 @@ impl IdleDetector {
         let stripped = strip_ansi_escapes::strip(&self.buffer);
         let text = String::from_utf8_lossy(&stripped);
 
-        let lines: Vec<&str> = text.lines().collect();
-        let total_lines = lines.len();
+        // TUI 出力から装飾行を除去し、意味のあるテキスト行だけを残す
+        let meaningful_lines: Vec<&str> = text
+            .lines()
+            .filter(|line| is_meaningful_line(line))
+            .collect();
 
-        // Keep the last MAX_LINES lines (tail)
-        let (selected_lines, truncated_count) = if total_lines > MAX_LINES {
-            (&lines[total_lines - MAX_LINES..], total_lines - MAX_LINES)
+        let total = meaningful_lines.len();
+
+        // 末尾 MAX_LINES 行を取得
+        let (selected, truncated_count) = if total > MAX_LINES {
+            (&meaningful_lines[total - MAX_LINES..], total - MAX_LINES)
         } else {
-            (lines.as_slice(), 0)
+            (meaningful_lines.as_slice(), 0)
         };
 
-        let mut result = selected_lines.join("\n");
+        let mut result = selected.join("\n");
 
-        // Truncate by character count (char boundary safe)
+        // 文字数上限（char boundary safe）
         let char_count: usize = result.chars().count();
         if char_count > MAX_CHARS {
             let skip = char_count - MAX_CHARS;
