@@ -93,6 +93,11 @@ impl SessionStore {
         Ok(data.sessions.into_iter().filter(|s| !s.restored).collect())
     }
 
+    pub fn last_session_id(&self) -> Option<String> {
+        let data = self.load().ok()?;
+        data.sessions.last().map(|s| s.id.clone())
+    }
+
     pub fn reports_dir(&self) -> PathBuf {
         self.dir.join("reports")
     }
