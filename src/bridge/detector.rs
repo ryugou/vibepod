@@ -5,30 +5,56 @@ const MAX_CHARS: usize = 2500;
 /// 意味のあるテキスト（装飾文字・空白以外）の最小文字数
 const MIN_MEANINGFUL_CHARS: usize = 5;
 
+/// TUI 出力行をクリーニングする。
+/// ANSI ストリップ後の行から装飾文字・プロンプト記号・余白を取り除く。
+fn clean_line(line: &str) -> String {
+    let mut s = line.to_string();
+    // TUI プロンプト・装飾文字を除去
+    for ch in &['❯', '●', '✶', '✢'] {
+        s = s.replace(*ch, "");
+    }
+    // 連続空白を1つのスペースに圧縮
+    let mut result = String::new();
+    let mut prev_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                result.push(' ');
+            }
+            prev_space = true;
+        } else {
+            result.push(c);
+            prev_space = false;
+        }
+    }
+    result.trim().to_string()
+}
+
 /// 行が意味のあるテキストを含むかを判定する。
-/// Claude Code の TUI は ANSI ストリップ後にゴミ行を大量に生成するため、厳しくフィルタする。
 fn is_meaningful_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
+    let cleaned = clean_line(line);
+    if cleaned.is_empty() {
         return false;
     }
 
     // 既知の TUI ノイズパターンを除外
-    let lower = trimmed.to_lowercase();
-    if lower.contains("esctointerrupt")
-        || lower.contains("esc to interrupt")
+    let lower = cleaned.to_lowercase();
+    if lower.contains("esc to interrupt")
+        || lower.contains("esctointerrupt")
         || lower.contains("? for shortcuts")
         || lower.contains("forshortcuts")
-        || lower.starts_with("* ")  // spinner ("* Pouncing…", "* Whisking…")
-        || lower == "❯"
+        || lower.contains("for shortcuts")
+        || lower.starts_with("* ")  // spinner ("* Pouncing…")
+        || lower.starts_with("· ")  // spinner ("· Transfiguring…")
         || lower == "(thinking)"
+        || lower.ends_with("(thinking)")
     {
         return false;
     }
 
     // 判定: 「スペースを含む5文字以上」または「CJK文字を3文字以上含む」
-    let has_spaces_and_length = trimmed.contains(' ') && trimmed.len() >= 5;
-    let cjk_count = trimmed.chars().filter(|c| is_cjk(*c)).count();
+    let has_spaces_and_length = cleaned.contains(' ') && cleaned.len() >= 5;
+    let cjk_count = cleaned.chars().filter(|c| is_cjk(*c)).count();
 
     has_spaces_and_length || cjk_count >= 3
 }
@@ -161,10 +187,14 @@ impl IdleDetector {
         let stripped = strip_ansi_escapes::strip(&self.buffer);
         let text = String::from_utf8_lossy(&stripped);
 
-        // TUI 出力から装飾行を除去し、意味のあるテキスト行だけを残す
-        let meaningful_lines: Vec<&str> = text
+        // TUI 出力から装飾行を除去、クリーニングして意味のあるテキスト行だけを残す
+        // 重複行も除去（TUI は同じテキストを何度も再描画する）
+        let mut seen = std::collections::HashSet::new();
+        let meaningful_lines: Vec<String> = text
             .lines()
             .filter(|line| is_meaningful_line(line))
+            .map(|line| clean_line(line))
+            .filter(|line| !line.is_empty() && seen.insert(line.clone()))
             .collect();
 
         let total = meaningful_lines.len();
