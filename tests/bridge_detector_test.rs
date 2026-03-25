@@ -88,40 +88,15 @@ async fn test_on_output_resumed_transitions_to_buffering() {
 }
 
 #[test]
-fn test_buffer_truncation_by_lines() {
+fn test_buffer_for_slack_returns_all_content() {
     let mut detector = IdleDetector::new(Duration::from_secs(5));
-    // 50行の出力を追加（上限40行）
     for i in 0..50 {
         detector.on_output(format!("line {}\n", i).as_bytes());
     }
     let content = detector.buffer_for_slack();
-    let lines: Vec<&str> = content.lines().collect();
-    // 先頭に truncated メッセージ + 40行
-    assert!(lines[0].contains("truncated"));
-    assert_eq!(lines.len(), 41);
-}
-
-#[test]
-fn test_buffer_truncation_by_chars() {
-    let mut detector = IdleDetector::new(Duration::from_secs(5));
-    // 2500文字を超える長い行を追加
-    let long_line = "x".repeat(3000) + "\n";
-    detector.on_output(long_line.as_bytes());
-    let content = detector.buffer_for_slack();
-    assert!(content.chars().count() <= 2500 + 50); // truncation message margin
-}
-
-#[test]
-fn test_buffer_truncation_multibyte_chars() {
-    let mut detector = IdleDetector::new(Duration::from_secs(5));
-    // マルチバイト文字（3バイト/文字）で2500文字超えの出力
-    let multibyte_line = "─".repeat(1000) + "\n";
-    detector.on_output(multibyte_line.as_bytes());
-    detector.on_output(multibyte_line.as_bytes());
-    detector.on_output(multibyte_line.as_bytes());
-    // パニックせずに切り詰められること
-    let content = detector.buffer_for_slack();
-    assert!(content.chars().count() <= 2500 + 50);
+    // フィルタリング・切り詰めなし（formatter に委譲）
+    assert!(content.contains("line 0"));
+    assert!(content.contains("line 49"));
 }
 
 #[test]

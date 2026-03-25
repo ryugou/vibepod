@@ -1,4 +1,5 @@
 pub mod detector;
+pub mod formatter;
 pub mod io;
 pub mod logger;
 pub mod slack;
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use self::detector::{DetectorState, IdleDetector};
+use self::formatter::{Formatter, LlmProvider};
 use self::logger::BridgeLogger;
 use self::slack::{SlackClient, SlackResponse};
 
@@ -20,6 +22,8 @@ pub struct BridgeConfig {
     pub notify_delay_secs: u64,
     pub session_id: String,
     pub project_name: String,
+    pub llm_provider: LlmProvider,
+    pub llm_api_key: String,
 }
 
 pub async fn run(
@@ -34,7 +38,10 @@ pub async fn run(
         .join(format!("{}.jsonl", config.session_id));
     let mut logger = BridgeLogger::new(&log_path)?;
 
-    // 2. SlackClient 初期化・接続
+    // 2. LLM Formatter 初期化
+    let text_formatter = Formatter::new(config.llm_provider, config.llm_api_key);
+
+    // 3. SlackClient 初期化・接続
     // notify_slack 用にトークンを先にクローン（slack は event_loop で move される）
     let bot_token = config.slack_bot_token;
     let app_token = config.slack_app_token;
@@ -189,7 +196,15 @@ pub async fn run(
 
             // 定期的に無音検知チェック
             _ = check_interval.tick() => {
-                if let Some(detector::DetectorEvent::Notify(content)) = detector.check_idle() {
+                if let Some(detector::DetectorEvent::Notify(raw_content)) = detector.check_idle() {
+                    // LLM で TUI 出力を整形
+                    let content = text_formatter.format(&raw_content).await;
+                    if content.is_empty() {
+                        // LLM が意味のあるコンテンツなしと判断 → スキップ
+                        detector.on_response();
+                        continue;
+                    }
+
                     logger.log_notified(&content).ok();
 
                     if slack_active.load(Ordering::SeqCst) {

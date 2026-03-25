@@ -48,6 +48,7 @@ pub async fn execute(
     bridge: bool,
     notify_delay: u64,
     slack_channel: Option<String>,
+    llm_provider: String,
 ) -> Result<()> {
     // Determine mode: interactive (default), prompt, or resume
     let interactive = !resume && prompt.is_none();
@@ -275,6 +276,13 @@ pub async fn execute(
             .or_else(|| resolved.get("SLACK_CHANNEL_ID").cloned())
             .unwrap_or_default();
 
+        // LLM provider & API key
+        let provider = crate::bridge::formatter::LlmProvider::from_str(&llm_provider)?;
+        let llm_api_key = resolved
+            .get(provider.env_key_name())
+            .cloned()
+            .unwrap_or_default();
+
         // Validation
         let mut missing = Vec::new();
         if slack_bot_token.is_empty() {
@@ -286,6 +294,9 @@ pub async fn execute(
         if slack_channel_id.is_empty() {
             missing.push("SLACK_CHANNEL_ID (set via --slack-channel or in bridge.env)");
         }
+        if llm_api_key.is_empty() {
+            missing.push(provider.env_key_name());
+        }
         if !missing.is_empty() {
             bail!(
                 "Bridge mode requires the following configuration:\n  - {}\n  \
@@ -295,7 +306,7 @@ pub async fn execute(
             );
         }
 
-        println!("  ◇  Bridge mode enabled (notify delay: {}s)", notify_delay);
+        println!("  ◇  Bridge mode enabled (notify delay: {}s, llm: {:?})", notify_delay, provider);
 
         Some(crate::bridge::BridgeConfig {
             slack_bot_token,
@@ -304,6 +315,8 @@ pub async fn execute(
             notify_delay_secs: notify_delay,
             session_id: session_id.clone(),
             project_name: project_name.clone(),
+            llm_provider: provider,
+            llm_api_key,
         })
     } else {
         None
