@@ -176,13 +176,10 @@ pub async fn execute(
     }
 
     // 6. Bridge env validation (before Docker startup)
+    // bridge.env は常に config_dir/bridge.env から読む（--env-file はコンテナ用で独立）
     let bridge_config = if bridge {
         let config_dir_path = config::default_config_dir()?;
-        let default_bridge_env = config_dir_path.join("bridge.env");
-        let bridge_env_path = env_file
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or(default_bridge_env);
+        let bridge_env_path = config_dir_path.join("bridge.env");
 
         if !bridge_env_path.exists() {
             bail!(

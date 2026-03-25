@@ -49,6 +49,7 @@ pub async fn run(
     );
 
     // Slack 接続失敗時はターミナル専用モードにフォールバック
+    let slack_active = Arc::new(AtomicBool::new(false));
     let slack_available = match slack.connect().await {
         Ok(_) => {
             // 3. セッション開始通知
@@ -65,6 +66,7 @@ pub async fn run(
             false
         }
     };
+    slack_active.store(slack_available, Ordering::SeqCst);
 
     // 4. TerminalGuard で raw mode 設定
     let _terminal_guard = io::TerminalGuard::new()
@@ -96,9 +98,11 @@ pub async fn run(
 
     let slack_handle = if slack_available {
         let tx = slack_response_tx.clone();
+        let slack_active_flag = slack_active.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = slack.event_loop(tx).await {
-                eprintln!("Slack event loop ended: {}", e);
+                eprintln!("Warning: Slack event loop ended, Slack input disabled: {}", e);
+                slack_active_flag.store(false, Ordering::SeqCst);
             }
         }))
     } else {
@@ -136,14 +140,18 @@ pub async fn run(
 
             // ターミナル入力検知
             Some(()) = terminal_input_rx.recv() => {
-                detector.on_terminal_input();
                 if detector.state() == DetectorState::WaitingResponse {
-                    // ターミナル入力による応答 — Slack のみブロック
+                    // ターミナル入力による応答 — ログ記録 + Slack のみブロック
+                    let response_time = notification_sent_at
+                        .map(|t| t.elapsed().as_secs())
+                        .unwrap_or(0);
+                    logger.log_responded("terminal", "(terminal input)", response_time).ok();
                     slack_blocked.store(true, Ordering::SeqCst);
                     detector.on_response();
                     _current_message_ts = None;
                     notification_sent_at = None;
                 }
+                detector.on_terminal_input();
             }
 
             // Slack 応答受信
@@ -165,7 +173,7 @@ pub async fn run(
                     logger.log_responded(&response.source, &response.text, response_time).ok();
 
                     // Slack メッセージを応答済みに更新
-                    if slack_available {
+                    if slack_active.load(Ordering::SeqCst) {
                         notify_slack
                             .update_responded(&response.message_ts, &response.text.trim_end())
                             .await
@@ -184,7 +192,7 @@ pub async fn run(
                 if let Some(detector::DetectorEvent::Notify(content)) = detector.check_idle() {
                     logger.log_notified(&content).ok();
 
-                    if slack_available {
+                    if slack_active.load(Ordering::SeqCst) {
                         match notify_slack.notify_idle(&content).await {
                             Ok(ts) => {
                                 _current_message_ts = Some(ts);
@@ -193,8 +201,13 @@ pub async fn run(
                             }
                             Err(e) => {
                                 eprintln!("Warning: Failed to send Slack notification: {}", e);
+                                // 送信失敗時は Buffering に戻して再検知を可能にする
+                                detector.on_response();
                             }
                         }
+                    } else {
+                        // Slack 未接続時も Buffering に戻す
+                        detector.on_response();
                     }
                 }
             }
@@ -213,7 +226,7 @@ pub async fn run(
     let exit_code = runtime.wait_container(container_id).await.unwrap_or(0);
 
     // 10. セッション終了通知
-    if slack_available {
+    if slack_active.load(Ordering::SeqCst) {
         notify_slack.notify_session_end(exit_code).await.ok();
     }
 
