@@ -64,7 +64,7 @@ pub fn terminal_size() -> Option<(u16, u16)> {
 /// メインの I/O ループ。コンテナの attach ストリームとターミナルの間をブリッジする。
 ///
 /// - attach stdout → ターミナル stdout + output_tx（detector 向け）
-/// - ターミナル stdin → attach stdin
+/// - ターミナル stdin → attach stdin（専用スレッドで raw read）
 /// - stdin_rx（Slack 応答）→ attach stdin
 /// - SIGWINCH → resize_container_tty
 /// - コンテナ終了で終了
@@ -80,8 +80,28 @@ pub async fn run_io_loop(
     let mut container_stdin = input;
 
     let mut stdout = tokio::io::stdout();
-    let mut stdin = tokio::io::stdin();
-    let mut stdin_buf = [0u8; 4096];
+
+    // stdin を専用のブロッキングスレッドで読み取る
+    // tokio::io::stdin() は raw mode ターミナルと相性が悪い場合があるため、
+    // std::io::Read を直接使う
+    let (raw_stdin_tx, mut raw_stdin_rx) = mpsc::channel::<Vec<u8>>(256);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let stdin = std::io::stdin();
+        let mut handle = stdin.lock();
+        let mut buf = [0u8; 4096];
+        loop {
+            match handle.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if raw_stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 
     // SIGWINCH シグナル監視（Unix のみ）
     let mut sigwinch =
@@ -108,7 +128,6 @@ pub async fn run_io_loop(
                         output_tx.send(vec).await.ok();
                     }
                     Some(Err(e)) => {
-                        // ストリームエラー — コンテナが終了した可能性
                         eprintln!("attach output error: {}", e);
                         break;
                     }
@@ -119,20 +138,11 @@ pub async fn run_io_loop(
                 }
             }
 
-            // ターミナル stdin → コンテナ stdin
-            n = stdin.read(&mut stdin_buf) => {
-                match n {
-                    Ok(0) => break, // EOF
-                    Ok(n) => {
-                        container_stdin.write_all(&stdin_buf[..n]).await?;
-                        container_stdin.flush().await?;
-                        terminal_input_tx.send(()).await.ok();
-                    }
-                    Err(e) => {
-                        eprintln!("stdin read error: {}", e);
-                        break;
-                    }
-                }
+            // ターミナル stdin → コンテナ stdin（専用スレッドから受信）
+            Some(data) = raw_stdin_rx.recv() => {
+                container_stdin.write_all(&data).await?;
+                container_stdin.flush().await?;
+                terminal_input_tx.send(()).await.ok();
             }
 
             // Slack 応答 → コンテナ stdin
