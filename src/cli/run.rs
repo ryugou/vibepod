@@ -144,15 +144,22 @@ pub async fn execute(
     let name_prefix = format!("vibepod-{}", project_name);
     if let Some((existing_id, existing_name)) = runtime.find_running_container(&name_prefix).await?
     {
-        match prompts::handle_existing_container(&existing_name)? {
-            prompts::ExistingContainerAction::Attach => {
-                println!("  ◇  Attaching to {}...", existing_name);
-                runtime.stream_logs(&existing_id).await?;
-                return Ok(());
-            }
-            prompts::ExistingContainerAction::Replace => {
-                runtime.stop_container(&existing_id, 10).await?;
-                runtime.remove_container(&existing_id).await?;
+        if bridge {
+            // bridge モードでは既存コンテナを置き換える（bridge は新規コンテナの attach が必要）
+            println!("  ◇  Replacing existing container for bridge mode...");
+            runtime.stop_container(&existing_id, 10).await?;
+            runtime.remove_container(&existing_id).await?;
+        } else {
+            match prompts::handle_existing_container(&existing_name)? {
+                prompts::ExistingContainerAction::Attach => {
+                    println!("  ◇  Attaching to {}...", existing_name);
+                    runtime.stream_logs(&existing_id).await?;
+                    return Ok(());
+                }
+                prompts::ExistingContainerAction::Replace => {
+                    runtime.stop_container(&existing_id, 10).await?;
+                    runtime.remove_container(&existing_id).await?;
+                }
             }
         }
     }

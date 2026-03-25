@@ -323,7 +323,7 @@ impl SlackClient {
         let user_text = event["text"].as_str()?;
 
         Some(SlackResponse {
-            text: format!("{}\n", user_text),
+            text: format!("{}\r", user_text),
             source: "slack_thread".to_string(),
             message_ts: thread_ts.to_string(),
         })
@@ -419,11 +419,12 @@ pub fn build_idle_notification_blocks(
 }
 
 /// ボタン action_id → stdin テキストのマッピング
+/// pty raw mode では Enter は \r（キャリッジリターン）
 pub fn map_action_to_stdin(action_id: &str) -> Option<String> {
     match action_id {
-        "respond_yes" => Some("y\n".to_string()),
-        "respond_no" => Some("n\n".to_string()),
-        "respond_skip" => Some("\n".to_string()),
+        "respond_yes" => Some("y\r".to_string()),
+        "respond_no" => Some("n\r".to_string()),
+        "respond_skip" => Some("\r".to_string()),
         _ => None,
     }
 }
@@ -431,10 +432,10 @@ pub fn map_action_to_stdin(action_id: &str) -> Option<String> {
 /// リアクション名 → stdin テキストのマッピング
 pub fn map_reaction_to_stdin(reaction: &str) -> Option<String> {
     match reaction {
-        "+1" | "thumbsup" => Some("y\n".to_string()),
-        "-1" | "thumbsdown" => Some("n\n".to_string()),
+        "+1" | "thumbsup" => Some("y\r".to_string()),
+        "-1" | "thumbsdown" => Some("n\r".to_string()),
         "fast_forward" | "black_right_pointing_double_triangle_with_vertical_bar" => {
-            Some("\n".to_string())
+            Some("\r".to_string())
         }
         _ => None,
     }

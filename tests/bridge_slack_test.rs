@@ -49,17 +49,17 @@ fn test_block_kit_contains_project_and_session() {
 
 #[test]
 fn test_response_mapping_yes() {
-    assert_eq!(map_action_to_stdin("respond_yes"), Some("y\n".to_string()));
+    assert_eq!(map_action_to_stdin("respond_yes"), Some("y\r".to_string()));
 }
 
 #[test]
 fn test_response_mapping_no() {
-    assert_eq!(map_action_to_stdin("respond_no"), Some("n\n".to_string()));
+    assert_eq!(map_action_to_stdin("respond_no"), Some("n\r".to_string()));
 }
 
 #[test]
 fn test_response_mapping_skip() {
-    assert_eq!(map_action_to_stdin("respond_skip"), Some("\n".to_string()));
+    assert_eq!(map_action_to_stdin("respond_skip"), Some("\r".to_string()));
 }
 
 #[test]
@@ -69,20 +69,20 @@ fn test_response_mapping_unknown() {
 
 #[test]
 fn test_reaction_mapping_thumbsup() {
-    assert_eq!(map_reaction_to_stdin("+1"), Some("y\n".to_string()));
-    assert_eq!(map_reaction_to_stdin("thumbsup"), Some("y\n".to_string()));
+    assert_eq!(map_reaction_to_stdin("+1"), Some("y\r".to_string()));
+    assert_eq!(map_reaction_to_stdin("thumbsup"), Some("y\r".to_string()));
 }
 
 #[test]
 fn test_reaction_mapping_thumbsdown() {
-    assert_eq!(map_reaction_to_stdin("-1"), Some("n\n".to_string()));
-    assert_eq!(map_reaction_to_stdin("thumbsdown"), Some("n\n".to_string()));
+    assert_eq!(map_reaction_to_stdin("-1"), Some("n\r".to_string()));
+    assert_eq!(map_reaction_to_stdin("thumbsdown"), Some("n\r".to_string()));
 }
 
 #[test]
 fn test_reaction_mapping_skip_emoji() {
-    assert_eq!(map_reaction_to_stdin("fast_forward"), Some("\n".to_string()));
-    assert_eq!(map_reaction_to_stdin("black_right_pointing_double_triangle_with_vertical_bar"), Some("\n".to_string()));
+    assert_eq!(map_reaction_to_stdin("fast_forward"), Some("\r".to_string()));
+    assert_eq!(map_reaction_to_stdin("black_right_pointing_double_triangle_with_vertical_bar"), Some("\r".to_string()));
 }
 
 #[test]
