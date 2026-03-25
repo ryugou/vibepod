@@ -108,7 +108,20 @@ fn test_buffer_truncation_by_chars() {
     let long_line = "x".repeat(3000) + "\n";
     detector.on_output(long_line.as_bytes());
     let content = detector.buffer_for_slack();
-    assert!(content.len() <= 2500 + 50); // truncation message margin
+    assert!(content.chars().count() <= 2500 + 50); // truncation message margin
+}
+
+#[test]
+fn test_buffer_truncation_multibyte_chars() {
+    let mut detector = IdleDetector::new(Duration::from_secs(5));
+    // マルチバイト文字（3バイト/文字）で2500文字超えの出力
+    let multibyte_line = "─".repeat(1000) + "\n";
+    detector.on_output(multibyte_line.as_bytes());
+    detector.on_output(multibyte_line.as_bytes());
+    detector.on_output(multibyte_line.as_bytes());
+    // パニックせずに切り詰められること
+    let content = detector.buffer_for_slack();
+    assert!(content.chars().count() <= 2500 + 50);
 }
 
 #[test]

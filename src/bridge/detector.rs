@@ -104,11 +104,12 @@ impl IdleDetector {
 
         let mut result = selected_lines.join("\n");
 
-        // Truncate by character count
-        if result.len() > MAX_CHARS {
-            // Find a safe truncation point
-            let truncated = &result[result.len() - MAX_CHARS..];
-            result = format!("...{}", truncated);
+        // Truncate by character count (char boundary safe)
+        let char_count: usize = result.chars().count();
+        if char_count > MAX_CHARS {
+            let skip = char_count - MAX_CHARS;
+            let byte_offset = result.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
+            result = format!("...{}", &result[byte_offset..]);
         }
 
         if truncated_count > 0 {
