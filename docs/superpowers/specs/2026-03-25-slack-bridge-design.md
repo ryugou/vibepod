@@ -2,98 +2,106 @@
 
 ## Overview
 
-VibePod の `run` コマンドに `--bridge` フラグを追加し、pty 出力の無音検知 → Slack 通知 → Slack/ターミナルからの応答 → pty stdin 送信 を実現する。ターミナルでの透過表示を維持しつつ、離席時は Slack がバックアップとなるハイブリッド型。
+VibePod の `run` コマンドに `--bridge` フラグを追加し、コンテナ出力の無音検知 → Slack 通知 → Slack/ターミナルからの応答 → コンテナ stdin 送信 を実現する。ターミナルでの透過表示を維持しつつ、離席時は Slack がバックアップとなるハイブリッド型。
+
+`--bridge` は interactive モード（引数なし起動）でも fire-and-forget モード（`--prompt`）でも使用可能。どちらでも Claude Code が確認待ちになる可能性があり、またタスク完了通知としても有用。
 
 Phase 0 の目的は、入力待ちパターンの知見蓄積と離席時の簡易応答の実用化。
 
 ## Architecture
 
 ```
-vibepod run --bridge --env-file .env.slack
+vibepod run --bridge
 │
 ├── DockerRuntime (既存)
-│     └── コンテナ起動（tty=true, open_stdin=true）
+│     └── コンテナ起動（tty=true, open_stdin=true, attach_stdin=true）
 │
-├── PtyBridge (新規: src/bridge/)
-│     ├── portable-pty で Master/Slave ペア作成
-│     ├── Docker プロセスの stdin/stdout を Slave 側に接続
-│     └── Master 側を VibePod が制御
+├── Bridge (新規: src/bridge/)
+│     ├── bollard attach_container で stdin/stdout ストリーム取得
+│     ├── ホスト側ターミナルを raw mode に設定
+│     └── バイト列を透過転送（ANSI エスケープ含む完全透過）
 │
 ├── tokio runtime
-│     ├── pty_read  : Master → stdout 転送（透過）+ バッファ蓄積
-│     ├── pty_write : ターミナル stdin → Master 転送
-│     ├── idle_watch: 無音 N 秒検知 → Slack 通知トリガー
-│     ├── slack_out : Slack Socket Mode → 通知送信
-│     ├── slack_in  : Slack 応答受信 → Master に stdin 書き込み
-│     └── signal    : Ctrl+C / プロセス終了検知
+│     ├── container_read  : attach stdout → ターミナル stdout 転送 + バッファ蓄積
+│     ├── terminal_write  : ターミナル stdin → attach stdin 転送
+│     ├── idle_watch      : 無音 N 秒検知 → Slack 通知トリガー
+│     ├── slack_out       : Slack Socket Mode → 通知送信
+│     ├── slack_in        : Slack 応答受信 → attach stdin 書き込み
+│     ├── resize          : SIGWINCH → resize_container_tty API
+│     └── signal          : Ctrl+C / コンテナ終了検知
 │
 └── --bridge なしの場合
-      └── 既存の docker run -it パス（変更なし）
+      └── 既存の docker run -it / bollard stream_logs パス（変更なし）
 ```
 
 ### Design Decisions
 
 - **VibePod サブコマンドとして統合** — 別バイナリや別クレートにせず、`vibepod run --bridge` として実装。コード共有が容易。
-- **シングルプロセス・マルチタスク** — tokio タスクで pty 読み書き、無音検知、Slack 通信を並行処理。IPC 不要でシンプル。
+- **bollard attach_container** — コンテナ側に pty を割り当て（tty=true）、bollard の attach API で stdin/stdout ストリームを取得。`portable-pty` + `docker run -it` の二重 pty 問題を回避。既存の bollard 依存を活用。
+- **シングルプロセス・マルチタスク** — tokio タスクで読み書き、無音検知、Slack 通信を並行処理。IPC 不要でシンプル。
+- **全モード対応** — `--bridge` は interactive / `--prompt` / `--resume` のいずれでも使用可能。
 - **後付け bridge attach は Phase 0 スコープ外** — daemon 化（v2）で対応予定。docs/proposal-v2-dashboard.md に将来課題として記録済み。
 
-## PTY Management
+## Container I/O Management
 
 ```
 ┌─ VibePod プロセス ───────────────────┐
 │                                      │
-│  portable-pty::PtyPair               │
-│    master ←→ slave                   │
-│      │          │                    │
-│      │          └── docker run -it   │
-│      │              の stdin/stdout   │
-│      │              に接続            │
+│  bollard attach_container            │
+│    stdout stream ←── コンテナ pty     │
+│    stdin stream  ──→ コンテナ pty     │
 │      │                               │
 │      ├── read → ターミナル stdout     │
 │      ├── read → バッファ蓄積          │
 │      └── write ← ターミナル stdin     │
 │               ← Slack 応答           │
+│                                      │
+│  ターミナル: raw mode                 │
+│  リサイズ: SIGWINCH → bollard         │
+│            resize_container_tty()    │
 └──────────────────────────────────────┘
 ```
 
-- `portable-pty` で pty ペアを作成し、`CommandBuilder` で `docker run -it ...` を子プロセスとして起動
-- master の read 側を `tokio::io::AsyncRead` でラップして非同期読み取り
-- 読み取ったバイト列はそのまま stdout に書き出し（ANSI 完全透過）、同時にバッファにもコピー
-- ターミナルの stdin は raw mode に設定し、キー入力をそのまま master の write 側に転送
-- Slack からの応答も同じ master write に書き込む（channel 経由）
+- 既存の `DockerRuntime` でコンテナを起動（`tty: true`, `open_stdin: true`, `attach_stdin: true`）
+- bollard の `attach_container` で stdin/stdout の非同期ストリームを取得
+- ホスト側ターミナルを raw mode に設定し、バイト列をそのまま透過転送（ANSI 完全透過）
+- 読み取ったバイト列は stdout への書き出しと同時にバッファにもコピー
+- ターミナル stdin からの入力と Slack からの応答は同じ attach stdin に書き込む（tokio mpsc channel 経由）
+- `SIGWINCH` シグナルを監視し、bollard の `resize_container_tty` API でコンテナ側 pty のウィンドウサイズを同期
 
 ### Existing Code Integration
 
 - `src/cli/run.rs` の `execute()` 内で `--bridge` 判定
-- bridge あり → `bridge::run()` に委譲（Docker 起動引数の構築は共有）
-- bridge なし → 既存の `Command::new("docker").exec()` パス（変更なし）
+- bridge あり → `bridge::run()` に委譲（Docker 起動引数の構築は既存コードと共有）
+  - interactive モードでも bollard attach を使用（既存の `docker` CLI サブプロセスパスとは異なる実行パス）
+- bridge なし → 既存の実行パス（変更なし）
 
 ## Idle Detection & Notification Flow
 
 ### State Machine
 
 ```
-pty 出力あり → バッファ蓄積 + タイマーリセット
-                    │
-              N秒間出力なし
-                    │
-                    ▼
-              バッファ内容を取得
-              （最大40行、超過は末尾切り詰め）
-                    │
-              ターミナルから入力あり？
-              ├── はい → バッファクリア、通知キャンセル
-              └── いいえ → Slack に通知送信
-                            │
-                            ▼
-                    応答待ち状態
-                    ├── ターミナル stdin → pty に転送、通知を「応答済み」に更新
-                    ├── Slack ボタン/リアクション/スレッド返信 → pty に転送、同上
-                    │
-                    先着1つを採用、以降は無視
-                    │
-                    ▼
-                    バッファクリア、次の無音検知へ
+コンテナ出力あり → バッファ蓄積 + タイマーリセット
+                       │
+                 N秒間出力なし
+                       │
+                       ▼
+                 バッファ内容を取得
+                 （最大40行、超過は末尾切り詰め）
+                       │
+                 ターミナルから入力あり？
+                 ├── はい → バッファクリア、通知キャンセル
+                 └── いいえ → Slack に通知送信
+                               │
+                               ▼
+                       応答待ち状態
+                       ├── ターミナル stdin → コンテナに転送、通知を「応答済み」に更新
+                       ├── Slack ボタン/リアクション/スレッド返信 → コンテナに転送、同上
+                       │
+                       先着1つを採用（AtomicBool ガードで即ロック、以降の書き込みは drop）
+                       │
+                       ▼
+                       バッファクリア、次の無音検知へ
 ```
 
 ### States
@@ -111,12 +119,15 @@ pty 出力あり → バッファ蓄積 + タイマーリセット
 - 無音期間で区切る（前回の無音から今回の無音までが1ブロック）
 - 最大40行（Slack Block Kit の 3,000 文字制限に収まる範囲）
 - 超過時は末尾40行に切り詰め、先頭に `... (N lines truncated)` を表示
+- Slack 送信時は ANSI エスケープシーケンスをストリップする（`strip-ansi-escapes` クレート使用）
 
 ## Slack Communication
 
 ### Connection
 
 Socket Mode（WebSocket）で接続。HTTP エンドポイント不要。
+
+接続断時は exponential backoff で再接続を試みる。再接続不可の場合は stderr に警告を出し、ターミナル専用モードにフォールバック（bridge なしと同等の動作を継続）。
 
 ### Notification Message Format
 
@@ -159,9 +170,15 @@ Socket Mode（WebSocket）で接続。HTTP エンドポイント不要。
 - Start: `🟢 VibePod セッション開始 (project-name)`
 - End: `🔴 VibePod セッション終了 (project-name, exit code: N)`
 
+exit code はコンテナの終了コード（bollard `wait_container` API で取得）。
+
 ### Slack Crate Selection
 
-`slack-morphism` のメンテナンス状況を実装時に確認。メンテされていれば採用、されていなければ `reqwest` + `tokio-tungstenite` で Slack Web API / Socket Mode を薄くラップする自前実装。
+`slack-morphism` のメンテナンス状況を実装時に確認。判断基準：
+- crates.io での最終リリースが6ヶ月以内か
+- 現行の Slack API バージョンに対応しているか
+
+メンテされていれば採用、されていなければ `reqwest` + `tokio-tungstenite` で Slack Web API / Socket Mode を薄くラップする自前実装。
 
 ## Logging
 
@@ -169,7 +186,9 @@ Socket Mode（WebSocket）で接続。HTTP エンドポイント不要。
 
 ### Output Path
 
-`~/.vibepod/bridge-logs/{session-id}.jsonl`
+`{config_dir}/vibepod/bridge-logs/{session-id}.jsonl`
+
+（`config_dir` は `dirs::config_dir()` で決定。macOS: `~/Library/Application Support/vibepod/bridge-logs/`）
 
 ### Events
 
@@ -191,20 +210,24 @@ Socket Mode（WebSocket）で接続。HTTP エンドポイント不要。
 --slack-channel <ID>  通知先チャンネルを上書き
 ```
 
+`--bridge` は既存のオプション（`--prompt`, `--resume`, `--no-network`, `--env`, `--env-file`）と併用可能。
+
 ### Usage Example
 
 ```bash
-vibepod run --bridge --notify-delay 30
+vibepod run --bridge
+vibepod run --bridge --notify-delay 10
 vibepod run --bridge --slack-channel C0AJHQRE23Z
-vibepod run --bridge --env-file ./custom.env --notify-delay 10
+vibepod run --bridge --prompt "fix the login bug"
+vibepod run --bridge --env-file ./custom.env
 ```
 
 ### Configuration
 
-Bridge 用の環境変数はデフォルトで `~/.config/vibepod/bridge.env` から読み込む。`op://` 参照にも対応（既存の 1Password CLI 連携を流用）。
+Bridge 用の環境変数はデフォルトで `{config_dir}/vibepod/bridge.env` から読み込む。`op://` 参照にも対応（既存の 1Password CLI 連携を流用）。
 
 ```bash
-# ~/.config/vibepod/bridge.env
+# {config_dir}/vibepod/bridge.env
 SLACK_BOT_TOKEN="op://ai-agents/slack-bridge/bot-token"
 SLACK_APP_TOKEN="op://ai-agents/slack-bridge/app-token"
 SLACK_CHANNEL_ID=C0AJHQRE23Z
@@ -213,7 +236,7 @@ SLACK_CHANNEL_ID=C0AJHQRE23Z
 優先順位:
 1. `--slack-channel` CLI オプション（最優先）
 2. `--env-file` で指定したファイル内の `SLACK_CHANNEL_ID`
-3. `~/.config/vibepod/bridge.env` 内の `SLACK_CHANNEL_ID`
+3. `{config_dir}/vibepod/bridge.env` 内の `SLACK_CHANNEL_ID`
 
 ### Validation
 
@@ -228,9 +251,9 @@ SLACK_CHANNEL_ID=C0AJHQRE23Z
 src/
 ├── bridge/
 │   ├── mod.rs        # pub fn run() — bridge モードのエントリポイント
-│   ├── pty.rs        # pty ペア作成、Docker プロセス起動、read/write 管理
-│   ├── detector.rs   # 無音検知、バッファ管理、状態遷移
-│   ├── slack.rs      # Socket Mode 接続、通知送信、応答受信
+│   ├── io.rs         # bollard attach、ターミナル raw mode（RAII ガード + panic hook で復元保証）、stdin/stdout 転送、リサイズ
+│   ├── detector.rs   # 無音検知、バッファ管理、状態遷移、ANSI ストリップ
+│   ├── slack.rs      # Socket Mode 接続、通知送信、応答受信、再接続
 │   └── logger.rs     # JSON Lines ログ記録
 ├── cli/
 │   ├── mod.rs        # --bridge, --notify-delay, --slack-channel 追加
@@ -240,9 +263,20 @@ src/
 
 モジュール間は tokio の channel (`mpsc`) で疎結合に接続：
 ```
-pty.rs → (出力バイト列) → detector.rs → (通知トリガー) → slack.rs
-slack.rs → (応答テキスト) → pty.rs
+io.rs → (出力バイト列) → detector.rs → (通知トリガー) → slack.rs
+slack.rs → (応答テキスト) → io.rs
 ```
+
+## Additional Dependencies
+
+```toml
+# Cargo.toml に追加
+strip-ansi-escapes = "0.2"    # Slack 送信時の ANSI ストリップ
+
+# tokio features 追加: "io-util", "time", "sync"
+```
+
+Slack クレートは実装時に選定（slack-morphism or reqwest + tokio-tungstenite）。
 
 ## Slack App Setup Requirements
 
