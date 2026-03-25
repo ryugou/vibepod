@@ -13,6 +13,9 @@ pub async fn execute(
     no_network: bool,
     env_vars: Vec<String>,
     env_file: Option<String>,
+    bridge: bool,
+    notify_delay: u64,
+    slack_channel: Option<String>,
 ) -> Result<()> {
     // Determine mode: interactive (default), prompt, or resume
     let interactive = !resume && prompt.is_none();

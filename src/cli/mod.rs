@@ -42,6 +42,15 @@ pub enum Commands {
         /// Environment file (supports op:// references via 1Password CLI)
         #[arg(long)]
         env_file: Option<String>,
+        /// Enable Slack Bridge mode for remote notifications
+        #[arg(long)]
+        bridge: bool,
+        /// Idle detection delay in seconds before Slack notification (default: 30)
+        #[arg(long, default_value = "30")]
+        notify_delay: u64,
+        /// Override Slack channel ID for notifications
+        #[arg(long)]
+        slack_channel: Option<String>,
     },
     /// Restore workspace to a previous session state
     Restore {},
