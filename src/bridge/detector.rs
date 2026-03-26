@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq)]
 pub enum DetectorState {
     Buffering,
-    Idle,
     WaitingResponse,
 }
 
