@@ -309,6 +309,11 @@ pub async fn execute(
         }
 
         println!("  ◇  Bridge mode enabled (notify delay: {}s, llm: {:?})", notify_delay, provider);
+        if provider != crate::bridge::formatter::LlmProvider::None {
+            println!("  │  ⚠ Terminal output excerpts will be sent to {:?} API and Slack for formatting.", provider);
+        } else {
+            println!("  │  Terminal output will be sent to Slack (local formatting, no LLM API calls).");
+        }
 
         Some(crate::bridge::BridgeConfig {
             slack_bot_token,
