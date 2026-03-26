@@ -96,11 +96,12 @@ impl SlackClient {
 
     /// 無音検知通知を送信（Block Kit: コードブロック + Yes/No/Skip ボタン）
     /// 戻り値: メッセージの ts（更新用）
-    pub async fn notify_idle(&self, buffer_content: &str) -> Result<String> {
+    pub async fn notify_idle(&self, buffer_content: &str, choices: &[String]) -> Result<String> {
         let blocks = build_idle_notification_blocks(
             buffer_content,
             &self.project_name,
             &self.session_id,
+            choices,
         );
 
         let text = format!(
@@ -389,63 +390,94 @@ pub struct WebSocketConnection {
 }
 
 /// Block Kit メッセージ構造を構築（無音検知通知用）
+/// choices が空の場合はボタンなし、ありの場合は選択肢 + Skip ボタン
 pub fn build_idle_notification_blocks(
     buffer_content: &str,
     project_name: &str,
     session_id: &str,
+    choices: &[String],
 ) -> Value {
-    json!([
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": format!(
-                    "\u{1f514} *VibePod* [{}] (session: `{}`)\nセッション出力が停止しました\n```\n{}\n```",
-                    project_name, session_id, buffer_content
-                )
-            }
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": "Yes" },
-                    "action_id": "respond_yes",
-                    "style": "primary"
-                },
-                {
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": "No" },
-                    "action_id": "respond_no",
-                    "style": "danger"
-                },
-                {
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": "Skip" },
-                    "action_id": "respond_skip"
-                }
-            ]
-        },
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "スレッドに返信でテキスト入力も可能"
-                }
-            ]
+    let section = json!({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": format!(
+                "\u{1f514} *VibePod* [{}] (session: `{}`)\nセッション出力が停止しました\n```\n{}\n```",
+                project_name, session_id, buffer_content
+            )
         }
-    ])
+    });
+
+    let context = json!({
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": "スレッドに返信でテキスト入力も可能"
+        }]
+    });
+
+    if choices.is_empty() {
+        return json!([section, context]);
+    }
+
+    // 選択肢ボタン生成
+    let mut elements: Vec<Value> = choices
+        .iter()
+        .enumerate()
+        .map(|(i, choice)| {
+            let mut btn = json!({
+                "type": "button",
+                "text": { "type": "plain_text", "text": choice_display_text(choice) },
+                "action_id": format!("respond_choice_{}", choice),
+            });
+            if i == 0 {
+                btn["style"] = json!("primary");
+            }
+            if choice.to_lowercase() == "no" {
+                btn["style"] = json!("danger");
+            }
+            btn
+        })
+        .collect();
+
+    // Skip ボタンを末尾に追加
+    elements.push(json!({
+        "type": "button",
+        "text": { "type": "plain_text", "text": "Skip" },
+        "action_id": "respond_skip",
+    }));
+
+    let actions = json!({
+        "type": "actions",
+        "elements": elements,
+    });
+
+    json!([section, actions, context])
+}
+
+/// 選択肢の表示テキスト（yes → Yes, A → A）
+fn choice_display_text(choice: &str) -> String {
+    match choice {
+        "yes" => "Yes".to_string(),
+        "no" => "No".to_string(),
+        _ => choice.to_string(),
+    }
 }
 
 /// ボタン action_id → stdin テキストのマッピング
 /// pty raw mode では Enter は \r（キャリッジリターン）
+/// 動的ボタン: "respond_choice_X" → "X\r"
 pub fn map_action_to_stdin(action_id: &str) -> Option<String> {
+    if action_id == "respond_skip" {
+        return Some("\r".to_string());
+    }
+    if let Some(choice) = action_id.strip_prefix("respond_choice_") {
+        return Some(format!("{}\r", choice));
+    }
+    // レガシー互換（旧ボタンが残っている場合。Claude Code は y/n 単文字を期待）
     match action_id {
         "respond_yes" => Some("y\r".to_string()),
         "respond_no" => Some("n\r".to_string()),
-        "respond_skip" => Some("\r".to_string()),
         _ => None,
     }
 }
