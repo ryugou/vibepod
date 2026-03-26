@@ -153,6 +153,14 @@ pub async fn run(
                         .map(|t| t.elapsed().as_secs())
                         .unwrap_or(0);
                     logger.log_responded("terminal", "(terminal input)", response_time).ok();
+
+                    // Slack 通知メッセージを応答済みに更新（ボタン無効化）
+                    if let Some(ref ts) = _current_message_ts {
+                        if slack_active.load(Ordering::SeqCst) {
+                            notify_slack.update_responded(ts, "(terminal input)").await.ok();
+                        }
+                    }
+
                     slack_blocked.store(true, Ordering::SeqCst);
                     detector.on_response();
                     _current_message_ts = None;
@@ -198,17 +206,17 @@ pub async fn run(
             _ = check_interval.tick() => {
                 if let Some(detector::DetectorEvent::Notify(raw_content)) = detector.check_idle() {
                     // LLM で TUI 出力を整形
-                    let content = text_formatter.format(&raw_content).await;
-                    if content.is_empty() {
+                    let format_result = text_formatter.format(&raw_content).await;
+                    if format_result.text.is_empty() {
                         // LLM が意味のあるコンテンツなしと判断 → スキップ
                         detector.on_response();
                         continue;
                     }
 
-                    logger.log_notified(&content).ok();
+                    logger.log_notified(&format_result.text).ok();
 
                     if slack_active.load(Ordering::SeqCst) {
-                        match notify_slack.notify_idle(&content).await {
+                        match notify_slack.notify_idle(&format_result.text, &format_result.choices).await {
                             Ok(ts) => {
                                 _current_message_ts = Some(ts);
                                 notification_sent_at = Some(Instant::now());
