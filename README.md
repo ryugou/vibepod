@@ -8,8 +8,7 @@ VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/
 
 ```bash
 # Install (see below for other methods)
-brew tap ryugou/tap
-brew install vibepod
+brew install ryugou/tap/vibepod
 
 # Build the Docker image (one-time setup)
 vibepod init
@@ -158,8 +157,7 @@ Note: Homebrew and the install script create this symlink automatically.
 
 ```bash
 # macOS (Homebrew)
-brew tap ryugou/tap
-brew install vibepod
+brew install ryugou/tap/vibepod
 
 # Linux / macOS (install script)
 curl -fsSL https://raw.githubusercontent.com/ryugou/vibepod/main/install.sh | sh
