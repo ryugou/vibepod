@@ -4,7 +4,7 @@ use anyhow::Result;
 use bollard::container::AttachContainerResults;
 use futures_util::StreamExt;
 use std::os::unix::io::AsRawFd;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 /// ターミナルを raw mode に設定し、Drop で自動復元する RAII ガード。

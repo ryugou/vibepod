@@ -190,7 +190,7 @@ pub async fn run(
                     // Slack メッセージを応答済みに更新
                     if slack_active.load(Ordering::SeqCst) {
                         notify_slack
-                            .update_responded(&response.message_ts, &response.text.trim_end())
+                            .update_responded(&response.message_ts, response.text.trim_end())
                             .await
                             .ok();
                     }

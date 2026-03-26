@@ -8,6 +8,7 @@ use crate::session::{self, SessionStore};
 use crate::ui::prompts;
 
 /// ContainerConfig を構築するヘルパー関数（bridge / fire-and-forget で共有）
+#[allow(clippy::too_many_arguments)]
 fn build_container_config(
     image: String,
     container_name: String,
@@ -39,6 +40,7 @@ fn build_container_config(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     resume: bool,
     prompt: Option<String>,
@@ -277,7 +279,7 @@ pub async fn execute(
             .unwrap_or_default();
 
         // LLM provider & API key
-        let provider = crate::bridge::formatter::LlmProvider::from_str(&llm_provider)?;
+        let provider: crate::bridge::formatter::LlmProvider = llm_provider.parse()?;
         let llm_api_key = provider
             .env_key_name()
             .and_then(|key| resolved.get(key).cloned())

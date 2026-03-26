@@ -1,8 +1,9 @@
+use std::str::FromStr;
 use vibepod::bridge::formatter::{FormatResult, LlmProvider, detect_choices};
 
 #[test]
 fn test_llm_provider_none_from_str() {
-    let provider = LlmProvider::from_str("none").unwrap();
+    let provider: LlmProvider = "none".parse().unwrap();
     assert_eq!(provider, LlmProvider::None);
 }
 

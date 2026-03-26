@@ -11,8 +11,10 @@ pub enum LlmProvider {
     None,
 }
 
-impl LlmProvider {
-    pub fn from_str(s: &str) -> Result<Self> {
+impl std::str::FromStr for LlmProvider {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "gemini" | "google" => Ok(Self::Gemini),
@@ -21,7 +23,9 @@ impl LlmProvider {
             _ => bail!("Unknown LLM provider: '{}'. Use: anthropic, gemini, openai, or none", s),
         }
     }
+}
 
+impl LlmProvider {
     pub fn env_key_name(&self) -> Option<&'static str> {
         match self {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
