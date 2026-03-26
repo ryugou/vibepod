@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use vibepod::bridge::formatter::{FormatResult, LlmProvider, detect_choices};
+use vibepod::bridge::formatter::{detect_choices, FormatResult, LlmProvider};
 
 #[test]
 fn test_llm_provider_none_from_str() {
@@ -47,19 +47,28 @@ fn test_detect_choices_yes_no_full() {
 #[test]
 fn test_detect_choices_abc_paren() {
     let choices = detect_choices("Choose:\nA) Apple\nB) Banana\nC) Cherry");
-    assert_eq!(choices, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+    assert_eq!(
+        choices,
+        vec!["A".to_string(), "B".to_string(), "C".to_string()]
+    );
 }
 
 #[test]
 fn test_detect_choices_abc_dash() {
     let choices = detect_choices("- A: Apple\n- B: Banana\n- C: Cherry");
-    assert_eq!(choices, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+    assert_eq!(
+        choices,
+        vec!["A".to_string(), "B".to_string(), "C".to_string()]
+    );
 }
 
 #[test]
 fn test_detect_choices_abc_hyphen() {
     let choices = detect_choices("A - Apple\nB - Banana\nC - Cherry");
-    assert_eq!(choices, vec!["A".to_string(), "B".to_string(), "C".to_string()]);
+    assert_eq!(
+        choices,
+        vec!["A".to_string(), "B".to_string(), "C".to_string()]
+    );
 }
 
 #[test]
@@ -71,7 +80,10 @@ fn test_detect_choices_none() {
 #[test]
 fn test_detect_choices_numbered() {
     let choices = detect_choices("Options:\n1. First\n2. Second\n3. Third");
-    assert_eq!(choices, vec!["1".to_string(), "2".to_string(), "3".to_string()]);
+    assert_eq!(
+        choices,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()]
+    );
 }
 
 #[tokio::test]

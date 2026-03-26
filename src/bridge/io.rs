@@ -109,10 +109,7 @@ pub async fn run_io_loop(
 
     // 初期ウィンドウサイズを同期
     if let Some((w, h)) = terminal_size() {
-        runtime
-            .resize_container_tty(container_id, w, h)
-            .await
-            .ok();
+        runtime.resize_container_tty(container_id, w, h).await.ok();
     }
 
     loop {

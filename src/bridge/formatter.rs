@@ -20,7 +20,10 @@ impl std::str::FromStr for LlmProvider {
             "gemini" | "google" => Ok(Self::Gemini),
             "openai" | "gpt" => Ok(Self::OpenAi),
             "none" | "local" => Ok(Self::None),
-            _ => bail!("Unknown LLM provider: '{}'. Use: anthropic, gemini, openai, or none", s),
+            _ => bail!(
+                "Unknown LLM provider: '{}'. Use: anthropic, gemini, openai, or none",
+                s
+            ),
         }
     }
 }
@@ -179,7 +182,8 @@ impl Formatter {
             "messages": [{"role": "user", "content": text}]
         });
 
-        let http_resp = self.http
+        let http_resp = self
+            .http
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -213,7 +217,8 @@ impl Formatter {
             self.api_key
         );
 
-        let http_resp = self.http
+        let http_resp = self
+            .http
             .post(&url)
             .json(&body)
             .send()
@@ -244,7 +249,8 @@ impl Formatter {
             ]
         });
 
-        let http_resp = self.http
+        let http_resp = self
+            .http
             .post("https://api.openai.com/v1/chat/completions")
             .bearer_auth(&self.api_key)
             .json(&body)
@@ -273,7 +279,11 @@ fn local_format(text: &str) -> String {
     let char_count = stripped.chars().count();
     if char_count > 2000 {
         let skip = char_count - 2000;
-        let offset = stripped.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
+        let offset = stripped
+            .char_indices()
+            .nth(skip)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         format!("...\n{}", &stripped[offset..])
     } else {
         stripped

@@ -1,5 +1,5 @@
-use vibepod::bridge::detector::{DetectorEvent, DetectorState, IdleDetector};
 use std::time::Duration;
+use vibepod::bridge::detector::{DetectorEvent, DetectorState, IdleDetector};
 
 #[tokio::test]
 async fn test_initial_state_is_buffering() {

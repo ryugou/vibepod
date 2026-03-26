@@ -76,8 +76,7 @@ pub async fn run(
     slack_active.store(slack_available, Ordering::SeqCst);
 
     // 4. TerminalGuard で raw mode 設定
-    let _terminal_guard = io::TerminalGuard::new()
-        .context("Failed to set terminal to raw mode")?;
+    let _terminal_guard = io::TerminalGuard::new().context("Failed to set terminal to raw mode")?;
 
     // 5. attach_container でストリーム取得
     let attach_result = runtime.attach_container(container_id).await?;
@@ -108,7 +107,10 @@ pub async fn run(
         let slack_active_flag = slack_active.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = slack.event_loop(tx).await {
-                eprintln!("Warning: Slack event loop ended, Slack input disabled: {}", e);
+                eprintln!(
+                    "Warning: Slack event loop ended, Slack input disabled: {}",
+                    e
+                );
                 slack_active_flag.store(false, Ordering::SeqCst);
             }
         }))

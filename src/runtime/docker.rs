@@ -237,10 +237,7 @@ impl DockerRuntime {
         Ok(())
     }
 
-    pub async fn attach_container(
-        &self,
-        container_id: &str,
-    ) -> Result<AttachContainerResults> {
+    pub async fn attach_container(&self, container_id: &str) -> Result<AttachContainerResults> {
         let options = AttachContainerOptions::<String> {
             stdin: Some(true),
             stdout: Some(true),

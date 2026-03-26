@@ -201,8 +201,12 @@ pub async fn execute(
             );
         }
 
-        let content = std::fs::read_to_string(&bridge_env_path)
-            .with_context(|| format!("Failed to read bridge env file: {}", bridge_env_path.display()))?;
+        let content = std::fs::read_to_string(&bridge_env_path).with_context(|| {
+            format!(
+                "Failed to read bridge env file: {}",
+                bridge_env_path.display()
+            )
+        })?;
 
         let parsed: Vec<(String, String)> = content
             .lines()
@@ -310,11 +314,16 @@ pub async fn execute(
             );
         }
 
-        println!("  ◇  Bridge mode enabled (notify delay: {}s, llm: {:?})", notify_delay, provider);
+        println!(
+            "  ◇  Bridge mode enabled (notify delay: {}s, llm: {:?})",
+            notify_delay, provider
+        );
         if provider != crate::bridge::formatter::LlmProvider::None {
             println!("  │  ⚠ Terminal output excerpts will be sent to {:?} API and Slack for formatting.", provider);
         } else {
-            println!("  │  Terminal output will be sent to Slack (local formatting, no LLM API calls).");
+            println!(
+                "  │  Terminal output will be sent to Slack (local formatting, no LLM API calls)."
+            );
         }
 
         Some(crate::bridge::BridgeConfig {
@@ -495,7 +504,10 @@ pub async fn execute(
             std::fs::remove_file(temp_cj).ok();
         }
 
-        println!("  Container stopped and removed. (exit code: {})", exit_code);
+        println!(
+            "  Container stopped and removed. (exit code: {})",
+            exit_code
+        );
         return Ok(());
     }
 

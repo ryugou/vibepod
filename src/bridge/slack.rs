@@ -191,7 +191,11 @@ impl SlackClient {
                 Err(e) => {
                     retry_count += 1;
                     if retry_count > MAX_RETRIES {
-                        bail!("Slack Socket Mode: failed to connect after {} retries: {}", MAX_RETRIES, e);
+                        bail!(
+                            "Slack Socket Mode: failed to connect after {} retries: {}",
+                            MAX_RETRIES,
+                            e
+                        );
                     }
                     eprintln!(
                         "Slack Socket Mode: connection failed (attempt {}/{}), retrying in {:?}: {}",
@@ -216,7 +220,8 @@ impl SlackClient {
                         // Socket Mode: acknowledge envelope
                         if let Some(envelope_id) = envelope["envelope_id"].as_str() {
                             let ack = json!({"envelope_id": envelope_id});
-                            if let Err(e) = write.send(Message::Text(ack.to_string().into())).await {
+                            if let Err(e) = write.send(Message::Text(ack.to_string().into())).await
+                            {
                                 eprintln!("Failed to send envelope ack: {}", e);
                                 break;
                             }
@@ -274,7 +279,10 @@ impl SlackClient {
             // Connection lost, attempt reconnect with backoff
             retry_count += 1;
             if retry_count > MAX_RETRIES {
-                bail!("Slack Socket Mode: lost connection after {} retries", MAX_RETRIES);
+                bail!(
+                    "Slack Socket Mode: lost connection after {} retries",
+                    MAX_RETRIES
+                );
             }
             eprintln!(
                 "Slack Socket Mode: connection lost, reconnecting (attempt {}/{}) in {:?}",

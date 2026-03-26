@@ -1,6 +1,6 @@
-use vibepod::bridge::logger::BridgeLogger;
 use std::fs;
 use tempfile::TempDir;
+use vibepod::bridge::logger::BridgeLogger;
 
 #[test]
 fn test_log_notified_event() {
@@ -8,7 +8,9 @@ fn test_log_notified_event() {
     let log_path = tmp.path().join("test-session.jsonl");
     let mut logger = BridgeLogger::new(&log_path).unwrap();
 
-    logger.log_notified("Do you want to proceed? (y/n)").unwrap();
+    logger
+        .log_notified("Do you want to proceed? (y/n)")
+        .unwrap();
 
     let content = fs::read_to_string(&log_path).unwrap();
     let line: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
