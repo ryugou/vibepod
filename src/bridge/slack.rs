@@ -289,6 +289,8 @@ impl SlackClient {
         let actions = payload["actions"].as_array()?;
         let action = actions.first()?;
         let action_id = action["action_id"].as_str()?;
+        // message.ts identifies the notification message this button belongs to.
+        // Used by update_responded() to replace the notification with "responded" status.
         let message_ts = payload["message"]["ts"].as_str()?;
 
         let text = map_action_to_stdin(action_id)?;
@@ -302,6 +304,9 @@ impl SlackClient {
 
     fn handle_reaction(&self, event: &Value) -> Option<SlackResponse> {
         let reaction = event["reaction"].as_str()?;
+        // item.ts is the message the reaction was added to.
+        // This should match a notification we sent; unrelated reactions are harmless
+        // (they produce a SlackResponse but update_responded will target our message).
         let message_ts = event["item"]["ts"].as_str()?;
 
         let text = map_reaction_to_stdin(reaction)?;
@@ -327,10 +332,13 @@ impl SlackClient {
         let thread_ts = event["thread_ts"].as_str();
 
         let (source, message_ts) = if let Some(ts) = thread_ts {
-            // スレッド返信
+            // Thread reply: thread_ts is the parent notification message.
+            // Used by update_responded() to mark the original notification as handled.
             ("slack_thread", ts.to_string())
         } else {
-            // DM 直接返信
+            // Direct message (not in a thread): ts is the message itself.
+            // update_responded() targets this message — which is the DM, not a notification.
+            // This is acceptable for DM-only flows.
             let ts = event["ts"].as_str().unwrap_or("").to_string();
             ("slack_dm", ts)
         };
