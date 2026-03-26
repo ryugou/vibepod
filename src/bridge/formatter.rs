@@ -32,14 +32,62 @@ impl LlmProvider {
     }
 }
 
+/// LLM 整形結果: テキスト + 検出した選択肢
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormatResult {
+    pub text: String,
+    pub choices: Vec<String>,
+}
+
+/// テキストから選択肢パターンを検出する
+pub fn detect_choices(text: &str) -> Vec<String> {
+    // 1. yes/no パターン: (y/n), (yes/no)
+    if regex::Regex::new(r"(?i)\(y(?:es)?/n(?:o)?\)")
+        .unwrap()
+        .is_match(text)
+    {
+        return vec!["yes".to_string(), "no".to_string()];
+    }
+
+    // 2. アルファベット選択肢: "A) ...", "A: ...", "A - ...", "- A: ...", "- A) ..."
+    let alpha_re = regex::Regex::new(r"(?m)^[\s\-*]*([A-Z])\s*[):\-]").unwrap();
+    let alpha_choices: Vec<String> = alpha_re
+        .captures_iter(text)
+        .map(|cap| cap[1].to_string())
+        .collect();
+    if alpha_choices.len() >= 2 {
+        return alpha_choices;
+    }
+
+    // 3. 数字選択肢: "1. ...", "1) ..."
+    let num_re = regex::Regex::new(r"(?m)^[\s\-*]*(\d+)\s*[).\-]").unwrap();
+    let num_choices: Vec<String> = num_re
+        .captures_iter(text)
+        .map(|cap| cap[1].to_string())
+        .collect();
+    if num_choices.len() >= 2 {
+        return num_choices;
+    }
+
+    vec![]
+}
+
 const SYSTEM_PROMPT: &str = "\
 You are a text extraction tool. Given raw terminal output from a TUI application (Claude Code), \
-extract ONLY the meaningful text content. \
+extract the meaningful text content and detect any choices being presented to the user.\n\
 Remove all UI decorations: box-drawing characters, spinner text, prompt symbols (❯ ● ✶), \
-status indicators, shortcut hints, and any other TUI artifacts. \
-Preserve the actual content structure: questions, options (a/b/c), messages, code snippets. \
-Return ONLY the cleaned text, no explanations. Keep it concise. \
-If the input is just UI noise with no meaningful content, return exactly: [no content]";
+status indicators, shortcut hints, and any other TUI artifacts.\n\
+\n\
+Return a JSON object with exactly two fields:\n\
+- \"text\": the cleaned text content (string)\n\
+- \"choices\": detected choices as an array of strings. Examples:\n\
+  - Yes/No prompt (y/n): [\"yes\", \"no\"]\n\
+  - Letter options A/B/C: [\"A\", \"B\", \"C\"]\n\
+  - Numbered options 1/2/3: [\"1\", \"2\", \"3\"]\n\
+  - No choices detected: []\n\
+\n\
+If the input is just UI noise with no meaningful content, return: {\"text\": \"[no content]\", \"choices\": []}\n\
+Return ONLY the JSON object, no markdown fences or explanations.";
 
 pub struct Formatter {
     provider: LlmProvider,
@@ -57,27 +105,24 @@ impl Formatter {
     }
 
     /// TUI 出力を LLM で整形する。失敗時は ANSI ストリップ済みの生テキストを返す。
-    pub async fn format(&self, raw_text: &str) -> String {
+    pub async fn format(&self, raw_text: &str) -> FormatResult {
         if self.provider == LlmProvider::None {
-            return local_format(raw_text);
+            let text = local_format(raw_text);
+            let choices = detect_choices(&text);
+            return FormatResult { text, choices };
         }
         match self.call_llm(raw_text).await {
-            Ok(cleaned) => {
-                if cleaned.trim() == "[no content]" {
-                    String::new()
-                } else {
-                    cleaned
-                }
-            }
+            Ok(result) => result,
             Err(e) => {
                 eprintln!("Warning: LLM formatting failed, using raw text: {}", e);
-                local_format(raw_text)
+                let text = local_format(raw_text);
+                let choices = detect_choices(&text);
+                FormatResult { text, choices }
             }
         }
     }
 
-    async fn call_llm(&self, text: &str) -> Result<String> {
-        // 入力をトークン節約のため切り詰め（末尾 3000 文字）
+    async fn call_llm(&self, text: &str) -> Result<FormatResult> {
         let input = if text.chars().count() > 3000 {
             let skip = text.chars().count() - 3000;
             let offset = text.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
@@ -86,11 +131,39 @@ impl Formatter {
             text
         };
 
-        match self.provider {
-            LlmProvider::Anthropic => self.call_anthropic(input).await,
-            LlmProvider::Gemini => self.call_gemini(input).await,
-            LlmProvider::OpenAi => self.call_openai(input).await,
+        let raw = match self.provider {
+            LlmProvider::Anthropic => self.call_anthropic(input).await?,
+            LlmProvider::Gemini => self.call_gemini(input).await?,
+            LlmProvider::OpenAi => self.call_openai(input).await?,
             LlmProvider::None => unreachable!("None provider handled in format()"),
+        };
+
+        // LLM レスポンスを JSON としてパース。失敗時は旧形式（プレーンテキスト）としてフォールバック
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(val) => {
+                let mut text = val["text"].as_str().unwrap_or(&raw).to_string();
+                if text.trim() == "[no content]" {
+                    text = String::new();
+                }
+                let choices = val["choices"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(FormatResult { text, choices })
+            }
+            Err(_) => {
+                // LLM がプレーンテキストを返した場合のフォールバック
+                let mut text = raw;
+                if text.trim() == "[no content]" {
+                    text = String::new();
+                }
+                let choices = detect_choices(&text);
+                Ok(FormatResult { text, choices })
+            }
         }
     }
 
