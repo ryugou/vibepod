@@ -122,7 +122,7 @@ impl Formatter {
         resp["content"][0]["text"]
             .as_str()
             .map(|s| s.to_string())
-            .context(format!("Unexpected Anthropic API response: {}", resp))
+            .context("Unexpected Anthropic API response: missing content[0].text")
     }
 
     async fn call_gemini(&self, text: &str) -> Result<String> {
@@ -154,7 +154,7 @@ impl Formatter {
         resp["candidates"][0]["content"]["parts"][0]["text"]
             .as_str()
             .map(|s| s.to_string())
-            .context(format!("Unexpected Gemini API response: {}", resp))
+            .context("Unexpected Gemini API response: missing candidates[0].content.parts[0].text")
     }
 
     async fn call_openai(&self, text: &str) -> Result<String> {
@@ -186,7 +186,7 @@ impl Formatter {
         resp["choices"][0]["message"]["content"]
             .as_str()
             .map(|s| s.to_string())
-            .context(format!("Unexpected OpenAI API response: {}", resp))
+            .context("Unexpected OpenAI API response: missing choices[0].message.content")
     }
 }
 
