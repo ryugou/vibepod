@@ -278,24 +278,26 @@ pub async fn execute(
 
         // LLM provider & API key
         let provider = crate::bridge::formatter::LlmProvider::from_str(&llm_provider)?;
-        let llm_api_key = resolved
-            .get(provider.env_key_name())
-            .cloned()
+        let llm_api_key = provider
+            .env_key_name()
+            .and_then(|key| resolved.get(key).cloned())
             .unwrap_or_default();
 
         // Validation
         let mut missing = Vec::new();
         if slack_bot_token.is_empty() {
-            missing.push("SLACK_BOT_TOKEN");
+            missing.push("SLACK_BOT_TOKEN".to_string());
         }
         if slack_app_token.is_empty() {
-            missing.push("SLACK_APP_TOKEN");
+            missing.push("SLACK_APP_TOKEN".to_string());
         }
         if slack_channel_id.is_empty() {
-            missing.push("SLACK_CHANNEL_ID (set via --slack-channel or in bridge.env)");
+            missing.push("SLACK_CHANNEL_ID (set via --slack-channel or in bridge.env)".to_string());
         }
-        if llm_api_key.is_empty() {
-            missing.push(provider.env_key_name());
+        if let Some(key_name) = provider.env_key_name() {
+            if llm_api_key.is_empty() {
+                missing.push(key_name.to_string());
+            }
         }
         if !missing.is_empty() {
             bail!(
@@ -416,7 +418,7 @@ pub async fn execute(
 
     // 10. Auth: load token
     let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
-    let home = dirs::home_dir().context("Cannot determine home directory")?;
+    let home = crate::config::home_dir()?;
     let claude_json = home.join(".claude.json");
 
     let token_data = auth_manager

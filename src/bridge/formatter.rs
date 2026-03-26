@@ -8,6 +8,7 @@ pub enum LlmProvider {
     Anthropic,
     Gemini,
     OpenAi,
+    None,
 }
 
 impl LlmProvider {
@@ -16,15 +17,17 @@ impl LlmProvider {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "gemini" | "google" => Ok(Self::Gemini),
             "openai" | "gpt" => Ok(Self::OpenAi),
-            _ => bail!("Unknown LLM provider: '{}'. Use: anthropic, gemini, or openai", s),
+            "none" | "local" => Ok(Self::None),
+            _ => bail!("Unknown LLM provider: '{}'. Use: anthropic, gemini, openai, or none", s),
         }
     }
 
-    pub fn env_key_name(&self) -> &'static str {
+    pub fn env_key_name(&self) -> Option<&'static str> {
         match self {
-            Self::Anthropic => "ANTHROPIC_API_KEY",
-            Self::Gemini => "GEMINI_API_KEY",
-            Self::OpenAi => "OPENAI_API_KEY",
+            Self::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Self::Gemini => Some("GEMINI_API_KEY"),
+            Self::OpenAi => Some("OPENAI_API_KEY"),
+            Self::None => None,
         }
     }
 }
@@ -55,6 +58,9 @@ impl Formatter {
 
     /// TUI 出力を LLM で整形する。失敗時は ANSI ストリップ済みの生テキストを返す。
     pub async fn format(&self, raw_text: &str) -> String {
+        if self.provider == LlmProvider::None {
+            return local_format(raw_text);
+        }
         match self.call_llm(raw_text).await {
             Ok(cleaned) => {
                 if cleaned.trim() == "[no content]" {
@@ -65,7 +71,7 @@ impl Formatter {
             }
             Err(e) => {
                 eprintln!("Warning: LLM formatting failed, using raw text: {}", e);
-                truncate_raw(raw_text)
+                local_format(raw_text)
             }
         }
     }
@@ -84,6 +90,7 @@ impl Formatter {
             LlmProvider::Anthropic => self.call_anthropic(input).await,
             LlmProvider::Gemini => self.call_gemini(input).await,
             LlmProvider::OpenAi => self.call_openai(input).await,
+            LlmProvider::None => unreachable!("None provider handled in format()"),
         }
     }
 
@@ -95,21 +102,27 @@ impl Formatter {
             "messages": [{"role": "user", "content": text}]
         });
 
-        let resp: serde_json::Value = self.http
+        let http_resp = self.http
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .json(&body)
             .send()
             .await
-            .context("Anthropic API request failed")?
-            .json()
-            .await?;
+            .context("Anthropic API request failed")?;
+
+        let status = http_resp.status();
+        let resp: serde_json::Value = http_resp.json().await?;
+
+        if !status.is_success() {
+            let msg = resp["error"]["message"].as_str().unwrap_or("unknown error");
+            bail!("Anthropic API error ({}): {}", status, msg);
+        }
 
         resp["content"][0]["text"]
             .as_str()
             .map(|s| s.to_string())
-            .context("Unexpected Anthropic API response format")
+            .context(format!("Unexpected Anthropic API response: {}", resp))
     }
 
     async fn call_gemini(&self, text: &str) -> Result<String> {
@@ -119,23 +132,29 @@ impl Formatter {
         });
 
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
             self.api_key
         );
 
-        let resp: serde_json::Value = self.http
+        let http_resp = self.http
             .post(&url)
             .json(&body)
             .send()
             .await
-            .context("Gemini API request failed")?
-            .json()
-            .await?;
+            .context("Gemini API request failed")?;
+
+        let status = http_resp.status();
+        let resp: serde_json::Value = http_resp.json().await?;
+
+        if !status.is_success() {
+            let msg = resp["error"]["message"].as_str().unwrap_or("unknown error");
+            bail!("Gemini API error ({}): {}", status, msg);
+        }
 
         resp["candidates"][0]["content"]["parts"][0]["text"]
             .as_str()
             .map(|s| s.to_string())
-            .context("Unexpected Gemini API response format")
+            .context(format!("Unexpected Gemini API response: {}", resp))
     }
 
     async fn call_openai(&self, text: &str) -> Result<String> {
@@ -148,31 +167,38 @@ impl Formatter {
             ]
         });
 
-        let resp: serde_json::Value = self.http
+        let http_resp = self.http
             .post("https://api.openai.com/v1/chat/completions")
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()
             .await
-            .context("OpenAI API request failed")?
-            .json()
-            .await?;
+            .context("OpenAI API request failed")?;
+
+        let status = http_resp.status();
+        let resp: serde_json::Value = http_resp.json().await?;
+
+        if !status.is_success() {
+            let msg = resp["error"]["message"].as_str().unwrap_or("unknown error");
+            bail!("OpenAI API error ({}): {}", status, msg);
+        }
 
         resp["choices"][0]["message"]["content"]
             .as_str()
             .map(|s| s.to_string())
-            .context("Unexpected OpenAI API response format")
+            .context(format!("Unexpected OpenAI API response: {}", resp))
     }
 }
 
-/// LLM 失敗時のフォールバック: 末尾 2000 文字に切り詰め
-fn truncate_raw(text: &str) -> String {
-    let char_count = text.chars().count();
+/// ローカル整形: ANSI ストリップ + 末尾 2000 文字に切り詰め
+fn local_format(text: &str) -> String {
+    let stripped = String::from_utf8_lossy(&strip_ansi_escapes::strip(text.as_bytes())).to_string();
+    let char_count = stripped.chars().count();
     if char_count > 2000 {
         let skip = char_count - 2000;
-        let offset = text.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
-        format!("...\n{}", &text[offset..])
+        let offset = stripped.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
+        format!("...\n{}", &stripped[offset..])
     } else {
-        text.to_string()
+        stripped
     }
 }
