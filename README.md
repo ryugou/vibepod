@@ -33,7 +33,7 @@ Builds the Docker image and creates global configuration. Detects your host UID/
 
 ### `vibepod login`
 
-Authenticates for container use. Creates a dedicated OAuth session stored in `~/.config/vibepod/auth/credentials.json`. This session is separate from your host's Claude credentials and is used when running containers.
+Authenticates for container use. Creates a dedicated OAuth session stored in `~/.config/vibepod/auth/token.json`. This session is separate from your host's Claude credentials and is used when running containers.
 
 ```bash
 vibepod login
@@ -41,11 +41,10 @@ vibepod login
 
 ### `vibepod logout`
 
-Removes the shared authentication session. Use `--all` to also remove all isolated container sessions.
+Removes the shared authentication session.
 
 ```bash
 vibepod logout
-vibepod logout --all
 ```
 
 ### `vibepod restore`
@@ -73,8 +72,10 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
-| `--isolated` | Use an isolated auth session for this container (allows multiple containers simultaneously) |
-| `--name <name>` | Name for the isolated session (default: `vibepod-<project>-isolated`) |
+| `--bridge` | Enable Slack bridge mode (see below) |
+| `--notify-delay <secs>` | Idle detection delay in seconds (default: 30, requires `--bridge`) |
+| `--slack-channel <id>` | Override Slack channel ID from bridge.env |
+| `--llm-provider <name>` | LLM for TUI output formatting: `anthropic` (default), `gemini`, `openai`, or `none` |
 
 #### When to use which?
 
@@ -96,6 +97,40 @@ VibePod resolves them via 1Password CLI before passing to the container:
 vibepod run --env-file .env.template
 ```
 
+### Bridge Mode (Slack notifications)
+
+Bridge mode monitors the container's terminal output and sends Slack notifications when the agent is waiting for input. You can respond directly from Slack.
+
+```bash
+vibepod run --bridge --llm-provider gemini
+```
+
+**Setup:**
+
+1. Create a Slack app with Socket Mode, Bot Token Scopes (`chat:write`, `reactions:read`), and Event Subscriptions (`message.im`, `reaction_added`)
+2. Configure `~/.config/vibepod/bridge.env`:
+
+```
+SLACK_BOT_TOKEN="xoxb-..."
+SLACK_APP_TOKEN="xapp-..."
+SLACK_CHANNEL_ID="C0123456789"
+ANTHROPIC_API_KEY="sk-..."
+GEMINI_API_KEY="AIza..."
+OPENAI_API_KEY="sk-..."
+```
+
+Values can use `op://` references for 1Password integration.
+
+3. Run with `--bridge`:
+
+```bash
+vibepod run --bridge                          # default: anthropic
+vibepod run --bridge --llm-provider none      # no LLM, local ANSI stripping only
+vibepod run --bridge --notify-delay 10        # 10s idle threshold
+```
+
+**Privacy:** Bridge mode sends terminal output to the selected LLM API and Slack. See [SECURITY.md](SECURITY.md) for details.
+
 ## Security Model
 
 VibePod provides 3-layer isolation:
@@ -105,6 +140,8 @@ VibePod provides 3-layer isolation:
 3. **Git safety net** — your project is git-managed, so any unwanted changes can be reverted with `git reset --hard`
 
 This follows [Anthropic's official recommendation](https://docs.anthropic.com/en/docs/claude-code/security) to use `--dangerously-skip-permissions` only inside containers.
+
+**Bridge mode** adds external data transmission to Slack and an LLM API. See [SECURITY.md](SECURITY.md) for the full data flow and trust model.
 
 ## Alias
 
@@ -137,7 +174,8 @@ cargo install vibepod
 |---------|----------|
 | **v1.0** | `init` + `run` (interactive / fire-and-forget), Claude Code support |
 | **v1.1** | Pre-installed plugins (superpowers, frontend-design), `--env-file` with 1Password integration |
-| **v1.2** ✅ | `vibepod restore` (git HEAD auto-recovery with session reports) |
+| **v1.2** | `vibepod restore` (git HEAD auto-recovery with session reports) |
+| **v1.3** | Slack bridge mode (`--bridge`), multi-provider LLM formatting |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
 | **v2.1+** | Gemini CLI / Codex support, multi-container execution |
 

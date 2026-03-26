@@ -7,6 +7,38 @@ use crate::runtime::{ContainerConfig, DockerRuntime};
 use crate::session::{self, SessionStore};
 use crate::ui::prompts;
 
+/// ContainerConfig を構築するヘルパー関数（bridge / fire-and-forget で共有）
+fn build_container_config(
+    image: String,
+    container_name: String,
+    workspace_path: String,
+    claude_json: Option<String>,
+    claude_args: Vec<String>,
+    home: &std::path::Path,
+    env_vars: Vec<String>,
+    network_disabled: bool,
+) -> ContainerConfig {
+    let gitconfig = home.join(".gitconfig");
+    ContainerConfig {
+        image,
+        container_name,
+        workspace_path,
+        claude_json,
+        args: {
+            let mut full = vec!["claude".to_string()];
+            full.extend(claude_args);
+            full
+        },
+        gitconfig: if gitconfig.exists() {
+            Some(gitconfig.to_string_lossy().to_string())
+        } else {
+            None
+        },
+        env_vars,
+        network_disabled,
+    }
+}
+
 pub async fn execute(
     resume: bool,
     prompt: Option<String>,
@@ -16,6 +48,7 @@ pub async fn execute(
     bridge: bool,
     notify_delay: u64,
     slack_channel: Option<String>,
+    llm_provider: String,
 ) -> Result<()> {
     // Determine mode: interactive (default), prompt, or resume
     let interactive = !resume && prompt.is_none();
@@ -59,8 +92,9 @@ pub async fn execute(
         prompt.as_deref().unwrap_or("").to_string()
     };
 
+    let session_id = session::generate_session_id();
     let session_record = session::Session {
-        id: session::generate_session_id(),
+        id: session_id.clone(),
         started_at: chrono::Local::now().to_rfc3339(),
         head_before,
         branch: current_branch.clone(),
@@ -111,15 +145,22 @@ pub async fn execute(
     let name_prefix = format!("vibepod-{}", project_name);
     if let Some((existing_id, existing_name)) = runtime.find_running_container(&name_prefix).await?
     {
-        match prompts::handle_existing_container(&existing_name)? {
-            prompts::ExistingContainerAction::Attach => {
-                println!("  ◇  Attaching to {}...", existing_name);
-                runtime.stream_logs(&existing_id).await?;
-                return Ok(());
-            }
-            prompts::ExistingContainerAction::Replace => {
-                runtime.stop_container(&existing_id, 10).await?;
-                runtime.remove_container(&existing_id).await?;
+        if bridge {
+            // bridge モードでは既存コンテナを置き換える（bridge は新規コンテナの attach が必要）
+            println!("  ◇  Replacing existing container for bridge mode...");
+            runtime.stop_container(&existing_id, 10).await?;
+            runtime.remove_container(&existing_id).await?;
+        } else {
+            match prompts::handle_existing_container(&existing_name)? {
+                prompts::ExistingContainerAction::Attach => {
+                    println!("  ◇  Attaching to {}...", existing_name);
+                    runtime.stream_logs(&existing_id).await?;
+                    return Ok(());
+                }
+                prompts::ExistingContainerAction::Replace => {
+                    runtime.stop_container(&existing_id, 10).await?;
+                    runtime.remove_container(&existing_id).await?;
+                }
             }
         }
     }
@@ -142,7 +183,153 @@ pub async fn execute(
         config::save_projects(&projects, &config_dir)?;
     }
 
-    // 6. Build claude args
+    // 6. Bridge env validation (before Docker startup)
+    // bridge.env は常に config_dir/bridge.env から読む（--env-file はコンテナ用で独立）
+    let bridge_config = if bridge {
+        let config_dir_path = config::default_config_dir()?;
+        let bridge_env_path = config_dir_path.join("bridge.env");
+
+        if !bridge_env_path.exists() {
+            bail!(
+                "Bridge env file not found: {}\n  \
+                 Create it with SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and SLACK_CHANNEL_ID.\n  \
+                 Default location: {}/bridge.env",
+                bridge_env_path.display(),
+                config_dir_path.display()
+            );
+        }
+
+        let content = std::fs::read_to_string(&bridge_env_path)
+            .with_context(|| format!("Failed to read bridge env file: {}", bridge_env_path.display()))?;
+
+        let parsed: Vec<(String, String)> = content
+            .lines()
+            .filter(|line| {
+                let t = line.trim();
+                !t.is_empty() && !t.starts_with('#')
+            })
+            .filter_map(|line| {
+                let t = line.trim();
+                let (key, value) = t.split_once('=')?;
+                let value = value.trim_matches('"').trim_matches('\'');
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect();
+
+        let has_op_refs = parsed.iter().any(|(_, v)| v.starts_with("op://"));
+
+        let resolved: std::collections::HashMap<String, String> = if has_op_refs {
+            let op_available = Command::new("op")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !op_available {
+                bail!(
+                    "bridge.env contains op:// references but 1Password CLI (op) is not installed.\n  \
+                     Install it: https://developer.1password.com/docs/cli/"
+                );
+            }
+
+            println!("  ◇  Resolving op:// references in bridge.env...");
+
+            let output = Command::new("op")
+                .args([
+                    "run",
+                    &format!("--env-file={}", bridge_env_path.display()),
+                    "--no-masking",
+                    "--",
+                    "env",
+                ])
+                .output()
+                .context("Failed to run `op run` to resolve bridge secrets")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("1Password CLI failed to resolve bridge secrets: {}", stderr);
+            }
+
+            let env_keys: std::collections::HashSet<String> =
+                parsed.iter().map(|(k, _)| k.clone()).collect();
+            let resolved_output = String::from_utf8_lossy(&output.stdout);
+            resolved_output
+                .lines()
+                .filter_map(|line| {
+                    let (key, value) = line.split_once('=')?;
+                    if env_keys.contains(key) {
+                        Some((key.to_string(), value.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            parsed.into_iter().collect()
+        };
+
+        let slack_bot_token = resolved.get("SLACK_BOT_TOKEN").cloned().unwrap_or_default();
+        let slack_app_token = resolved.get("SLACK_APP_TOKEN").cloned().unwrap_or_default();
+
+        // SLACK_CHANNEL_ID: CLI option > env file
+        let slack_channel_id = slack_channel
+            .clone()
+            .or_else(|| resolved.get("SLACK_CHANNEL_ID").cloned())
+            .unwrap_or_default();
+
+        // LLM provider & API key
+        let provider = crate::bridge::formatter::LlmProvider::from_str(&llm_provider)?;
+        let llm_api_key = provider
+            .env_key_name()
+            .and_then(|key| resolved.get(key).cloned())
+            .unwrap_or_default();
+
+        // Validation
+        let mut missing = Vec::new();
+        if slack_bot_token.is_empty() {
+            missing.push("SLACK_BOT_TOKEN".to_string());
+        }
+        if slack_app_token.is_empty() {
+            missing.push("SLACK_APP_TOKEN".to_string());
+        }
+        if slack_channel_id.is_empty() {
+            missing.push("SLACK_CHANNEL_ID (set via --slack-channel or in bridge.env)".to_string());
+        }
+        if let Some(key_name) = provider.env_key_name() {
+            if llm_api_key.is_empty() {
+                missing.push(key_name.to_string());
+            }
+        }
+        if !missing.is_empty() {
+            bail!(
+                "Bridge mode requires the following configuration:\n  - {}\n  \
+                 Set them in {} or use CLI options.",
+                missing.join("\n  - "),
+                bridge_env_path.display()
+            );
+        }
+
+        println!("  ◇  Bridge mode enabled (notify delay: {}s, llm: {:?})", notify_delay, provider);
+        if provider != crate::bridge::formatter::LlmProvider::None {
+            println!("  │  ⚠ Terminal output excerpts will be sent to {:?} API and Slack for formatting.", provider);
+        } else {
+            println!("  │  Terminal output will be sent to Slack (local formatting, no LLM API calls).");
+        }
+
+        Some(crate::bridge::BridgeConfig {
+            slack_bot_token,
+            slack_app_token,
+            slack_channel_id,
+            notify_delay_secs: notify_delay,
+            session_id: session_id.clone(),
+            project_name: project_name.clone(),
+            llm_provider: provider,
+            llm_api_key,
+        })
+    } else {
+        None
+    };
+
+    // 7. Build claude args
     let mut claude_args: Vec<String> = Vec::new();
     if !interactive {
         claude_args.push("--dangerously-skip-permissions".to_string());
@@ -155,7 +342,7 @@ pub async fn execute(
         claude_args.push(p.clone());
     }
 
-    // 7. Resolve env file if provided
+    // 8. Resolve env file if provided
     let mut resolved_env_vars = env_vars.clone();
     if let Some(ref env_file_path) = env_file {
         let content = std::fs::read_to_string(env_file_path)
@@ -228,15 +415,15 @@ pub async fn execute(
         }
     }
 
-    // 8. Generate container name
+    // 9. Generate container name
     let short_hash: String = (0..6)
         .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
         .collect();
     let container_name = format!("vibepod-{}-{}", project_name, short_hash);
 
-    // 8. Auth: load token
+    // 10. Auth: load token
     let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
-    let home = dirs::home_dir().context("Cannot determine home directory")?;
+    let home = crate::config::home_dir()?;
     let claude_json = home.join(".claude.json");
 
     let token_data = auth_manager
@@ -261,6 +448,56 @@ pub async fn execute(
         None
     };
 
+    // === Bridge mode: early return ===
+    if let Some(bridge_cfg) = bridge_config {
+        let mode_label = if interactive {
+            "bridge (interactive)"
+        } else {
+            "bridge (fire-and-forget)"
+        };
+        println!("  ◇  Starting container...");
+        println!("  │  Agent: Claude Code");
+        println!("  │  Mode: {}", mode_label);
+        println!("  │  Mount: {} → /workspace", cwd.display());
+        println!("  │");
+
+        let container_config = build_container_config(
+            global_config.image,
+            container_name.clone(),
+            cwd_str,
+            temp_claude_json
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            claude_args,
+            &home,
+            resolved_env_vars,
+            no_network,
+        );
+
+        let container_id = runtime
+            .create_and_start_container(&container_config)
+            .await?;
+
+        println!("  ◇  Container started: {}", container_name);
+        println!("  │  Bridge mode active — Slack notifications enabled");
+        println!("  └\n");
+
+        let exit_code = crate::bridge::run(bridge_cfg, &runtime, &container_id).await?;
+
+        // クリーンアップ
+        runtime.stop_container(&container_id, 10).await.ok();
+        runtime.remove_container(&container_id).await.ok();
+
+        // temp .claude.json 削除
+        if let Some(ref temp_cj) = temp_claude_json {
+            std::fs::remove_file(temp_cj).ok();
+        }
+
+        println!("  Container stopped and removed. (exit code: {})", exit_code);
+        return Ok(());
+    }
+
+    // === Existing interactive / fire-and-forget paths ===
     let mode_label = if interactive {
         "interactive"
     } else if resume {
@@ -335,27 +572,18 @@ pub async fn execute(
         println!("  Container stopped and removed.");
     } else {
         // Fire-and-forget mode: use bollard API
-        let gitconfig = home.join(".gitconfig");
-        let container_config = ContainerConfig {
-            image: global_config.image,
-            container_name: container_name.clone(),
-            workspace_path: cwd_str,
-            claude_json: temp_claude_json
+        let container_config = build_container_config(
+            global_config.image,
+            container_name.clone(),
+            cwd_str,
+            temp_claude_json
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
-            args: {
-                let mut full = vec!["claude".to_string()];
-                full.extend(claude_args);
-                full
-            },
-            gitconfig: if gitconfig.exists() {
-                Some(gitconfig.to_string_lossy().to_string())
-            } else {
-                None
-            },
-            env_vars: resolved_env_vars,
-            network_disabled: no_network,
-        };
+            claude_args,
+            &home,
+            resolved_env_vars,
+            no_network,
+        );
 
         let container_id = runtime
             .create_and_start_container(&container_config)

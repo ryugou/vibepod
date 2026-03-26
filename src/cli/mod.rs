@@ -51,6 +51,9 @@ pub enum Commands {
         /// Override Slack channel ID for notifications
         #[arg(long)]
         slack_channel: Option<String>,
+        /// LLM provider for formatting notifications: anthropic (default), gemini, openai, none
+        #[arg(long, default_value = "anthropic")]
+        llm_provider: String,
     },
     /// Restore workspace to a previous session state
     Restore {},
