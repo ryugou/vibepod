@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalConfig {
@@ -40,7 +40,11 @@ pub fn load_global_config(config_dir: &Path) -> Result<GlobalConfig> {
     Ok(config)
 }
 
-pub fn default_config_dir() -> Result<std::path::PathBuf> {
-    let config = dirs::config_dir().context("Could not determine config directory")?;
-    Ok(config.join("vibepod"))
+pub fn home_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME").context("HOME environment variable not set")?;
+    Ok(PathBuf::from(home))
+}
+
+pub fn default_config_dir() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".config").join("vibepod"))
 }
