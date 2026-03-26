@@ -2,7 +2,7 @@
 
 ## Reporting Vulnerabilities
 
-Please report security vulnerabilities via GitHub Issues at <https://github.com/ryugou/vibepod/issues> with the `security` label, or email the maintainer directly.
+Please report security vulnerabilities via [GitHub Private Vulnerability Reporting](https://github.com/ryugou/vibepod/security/advisories/new). If that is unavailable, open a GitHub Issue with the `security` label at <https://github.com/ryugou/vibepod/issues>.
 
 ## Data Transmission
 
@@ -18,7 +18,7 @@ Bridge mode sends data to **three external services**:
 
 | Destination | What is sent | Why |
 |---|---|---|
-| **Slack** (via Bot/App tokens) | LLM-formatted terminal output excerpts, session start/end notifications | Remote notification when the agent is waiting for input |
+| **Slack** (via Bot/App tokens) | LLM or locally formatted terminal output excerpts, session start/end notifications | Remote notification when the agent is waiting for input |
 | **LLM API** (Anthropic, Google, or OpenAI — selected via `--llm-provider`) | Raw terminal output (ANSI-stripped, last ~3000 chars) + a fixed system prompt | Cleans TUI artifacts before Slack notification |
 | **Local disk** (`~/.config/vibepod/bridge-logs/`) | JSONL logs with terminal excerpts and stdin responses | Debugging and audit trail |
 
@@ -27,7 +27,7 @@ Bridge mode sends data to **three external services**:
 - Each LLM provider has its own data retention and training policy. Review their terms before use.
 - Use `--llm-provider none` to disable external LLM calls entirely (local ANSI stripping only).
 
-**Startup disclosure:** VibePod prints a notice at bridge startup listing the active LLM provider and Slack channel.
+**Startup disclosure:** VibePod prints a notice at bridge startup listing the active LLM provider and data flow.
 
 ### Gemini API key transport
 

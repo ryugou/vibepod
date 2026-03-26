@@ -41,11 +41,10 @@ vibepod login
 
 ### `vibepod logout`
 
-Removes the shared authentication session. Use `--all` to also remove all isolated container sessions.
+Removes the shared authentication session.
 
 ```bash
 vibepod logout
-vibepod logout --all
 ```
 
 ### `vibepod restore`
