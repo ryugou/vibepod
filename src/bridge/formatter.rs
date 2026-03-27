@@ -82,16 +82,25 @@ pub fn detect_choices(text: &str) -> Vec<String> {
 const SYSTEM_PROMPT: &str = "\
 You are a text extraction tool. Given raw terminal output from a TUI application (Claude Code), \
 extract the meaningful text content and detect any choices being presented to the user.\n\
-Remove all UI decorations: box-drawing characters, spinner text, prompt symbols (❯ ● ✶), \
-status indicators, shortcut hints, and any other TUI artifacts.\n\
 \n\
+## Rules\n\
+1. Remove ONLY UI decorations: box-drawing characters, spinner text, prompt symbols (❯ ● ✶), \
+status indicators, shortcut hints, progress bars, and TUI artifacts.\n\
+2. Preserve the COMPLETE text content — do NOT summarize, truncate, or omit any part. \
+Every sentence, every choice description, and every question must be included verbatim.\n\
+3. Preserve the ORIGINAL LANGUAGE of the text. If the text is in Japanese, the output must be in Japanese. \
+Never translate.\n\
+4. When multiple questions exist in the text, include ALL of them in the \"text\" field.\n\
+\n\
+## Output format\n\
 Return a JSON object with exactly two fields:\n\
-- \"text\": the cleaned text content (string)\n\
-- \"choices\": detected choices as an array of strings. Examples:\n\
+- \"text\": the cleaned text content (string). Must contain the full original text without omission.\n\
+- \"choices\": detected choice LABELS ONLY as short strings. Examples:\n\
   - Yes/No prompt (y/n): [\"yes\", \"no\"]\n\
-  - Letter options A/B/C: [\"A\", \"B\", \"C\"]\n\
-  - Numbered options 1/2/3: [\"1\", \"2\", \"3\"]\n\
+  - Letter options a)/b)/c) or A/B/C: [\"a\", \"b\", \"c\"]\n\
+  - Numbered options 1./2./3.: [\"1\", \"2\", \"3\"]\n\
   - No choices detected: []\n\
+  IMPORTANT: choices must contain ONLY the label (\"a\", \"b\", \"1\", \"yes\"), NOT the full description text.\n\
 \n\
 If the input is just UI noise with no meaningful content, return: {\"text\": \"[no content]\", \"choices\": []}\n\
 Return ONLY the JSON object, no markdown fences or explanations.";
@@ -130,6 +139,9 @@ impl Formatter {
     }
 
     async fn call_llm(&self, text: &str) -> Result<FormatResult> {
+        // NOTE: API コスト・レイテンシ抑制のため末尾 3000 文字に切り詰める。
+        // SYSTEM_PROMPT は「全文保持」を指示しているが、ここで既に先頭が落ちる場合がある。
+        // また max_tokens: 1024 のため、LLM の出力側でも長文は切り詰められる可能性がある。
         let input = if text.chars().count() > 3000 {
             let skip = text.chars().count() - 3000;
             let offset = text.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
@@ -273,7 +285,9 @@ impl Formatter {
     }
 }
 
-/// ローカル整形: ANSI ストリップ + 末尾 2000 文字に切り詰め
+/// ローカル整形: ANSI ストリップ + 末尾 2000 文字に切り詰め。
+/// LLM 経路（3000 文字 + LLM 要約）とは切り詰め基準が異なる。
+/// LLM 未使用時・フォールバック時のベストエフォート表示用。
 fn local_format(text: &str) -> String {
     let stripped = String::from_utf8_lossy(&strip_ansi_escapes::strip(text.as_bytes())).to_string();
     let char_count = stripped.chars().count();

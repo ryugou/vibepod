@@ -1,5 +1,4 @@
-use std::str::FromStr;
-use vibepod::bridge::formatter::{detect_choices, FormatResult, LlmProvider};
+use vibepod::bridge::formatter::{detect_choices, LlmProvider};
 
 #[test]
 fn test_llm_provider_none_from_str() {

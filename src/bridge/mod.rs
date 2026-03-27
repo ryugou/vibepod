@@ -156,10 +156,11 @@ pub async fn run(
                         .unwrap_or(0);
                     logger.log_responded("terminal", "(terminal input)", response_time).ok();
 
-                    // Slack 通知メッセージを応答済みに更新（ボタン無効化）
+                    // ターミナル入力時はSlack通知メッセージのボタンを無効化するだけ
+                    // （「応答済み」テキスト通知は不要）
                     if let Some(ref ts) = _current_message_ts {
                         if slack_active.load(Ordering::SeqCst) {
-                            notify_slack.update_responded(ts, "(terminal input)").await.ok();
+                            notify_slack.disable_buttons(ts).await.ok();
                         }
                     }
 

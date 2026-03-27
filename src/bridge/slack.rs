@@ -105,7 +105,7 @@ impl SlackClient {
         );
 
         let text = format!(
-            "\u{1f514} VibePod [{}] (session: {}): セッション出力が停止しました",
+            "\u{1f514} VibePod [{}] (session: {})",
             self.project_name, self.session_id
         );
 
@@ -139,7 +139,7 @@ impl SlackClient {
             .context("No ts in chat.postMessage response")
     }
 
-    /// 応答済みメッセージに更新（ボタン無効化）
+    /// 応答済みメッセージに更新（ボタン無効化 + 応答内容表示）
     pub async fn update_responded(&self, message_ts: &str, response_text: &str) -> Result<()> {
         let body = json!({
             "channel": self.channel_id,
@@ -162,6 +162,35 @@ impl SlackClient {
         if resp["ok"] != true {
             eprintln!(
                 "Warning: Slack chat.update failed: {}",
+                resp["error"].as_str().unwrap_or("unknown error")
+            );
+        }
+
+        Ok(())
+    }
+
+    /// ボタンのみ無効化（テキスト通知なし。ターミナル入力で応答した場合に使用）
+    pub async fn disable_buttons(&self, message_ts: &str) -> Result<()> {
+        let body = json!({
+            "channel": self.channel_id,
+            "ts": message_ts,
+            "blocks": [],
+        });
+
+        let resp: Value = self
+            .http
+            .post("https://slack.com/api/chat.update")
+            .bearer_auth(&self.bot_token)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to disable buttons")?
+            .json()
+            .await?;
+
+        if resp["ok"] != true {
+            eprintln!(
+                "Warning: Slack chat.update (disable_buttons) failed: {}",
                 resp["error"].as_str().unwrap_or("unknown error")
             );
         }
@@ -410,7 +439,7 @@ pub fn build_idle_notification_blocks(
         "text": {
             "type": "mrkdwn",
             "text": format!(
-                "\u{1f514} *VibePod* [{}] (session: `{}`)\nセッション出力が停止しました\n```\n{}\n```",
+                "\u{1f514} *VibePod* [{}] (session: `{}`)\n```\n{}\n```",
                 project_name, session_id, buffer_content
             )
         }
@@ -464,11 +493,24 @@ pub fn build_idle_notification_blocks(
 }
 
 /// 選択肢の表示テキスト（yes → Yes, A → A）
+/// 長い選択肢は20文字で切り詰めて「...」を付ける
 fn choice_display_text(choice: &str) -> String {
-    match choice {
+    let text = match choice {
         "yes" => "Yes".to_string(),
         "no" => "No".to_string(),
         _ => choice.to_string(),
+    };
+    truncate_display(&text, 20)
+}
+
+/// 表示用に文字列を max_chars 文字で切り詰める
+fn truncate_display(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = chars[..max_chars].iter().collect();
+        format!("{}...", truncated)
     }
 }
 
