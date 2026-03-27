@@ -448,6 +448,16 @@ pub async fn execute(
     // Add token as environment variable
     resolved_env_vars.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", token_data.token));
 
+    // GitHub token: gh auth token でホスト側のトークンを自動取得
+    if let Ok(output) = Command::new("gh").args(["auth", "token"]).output() {
+        if output.status.success() {
+            let gh_token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !gh_token.is_empty() {
+                resolved_env_vars.push(format!("GH_TOKEN={}", gh_token));
+            }
+        }
+    }
+
     // Copy .claude.json to temp file to protect host file from container writes
     let temp_claude_json = if claude_json.exists() {
         let temp_dir = std::env::temp_dir().join("vibepod-run");
