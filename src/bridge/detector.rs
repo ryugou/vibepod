@@ -90,9 +90,38 @@ impl IdleDetector {
         String::from_utf8_lossy(&self.buffer).to_string()
     }
 
-    /// ANSI エスケープをストリップして生テキストを返す。整形は formatter に委譲。
+    /// ANSI エスケープをストリップし、末尾 40 行 / 2500 文字に切り詰めて返す。
+    /// 整形は formatter に委譲。
     pub fn buffer_for_slack(&self) -> String {
         let stripped = strip_ansi_escapes::strip(&self.buffer);
-        String::from_utf8_lossy(&stripped).to_string()
+        let text = String::from_utf8_lossy(&stripped).to_string();
+        truncate_tail(&text, 40, 2500)
+    }
+}
+
+/// 末尾 max_lines 行 / max_chars 文字に切り詰める。超過時は先頭に省略表示を付ける。
+fn truncate_tail(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+
+    // 行数制限
+    let tail = if lines.len() > max_lines {
+        &lines[lines.len() - max_lines..]
+    } else {
+        &lines
+    };
+    let mut result = tail.join("\n");
+
+    // 文字数制限
+    let char_count = result.chars().count();
+    if char_count > max_chars {
+        let skip = char_count - max_chars;
+        let offset = result.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0);
+        result = result[offset..].to_string();
+    }
+
+    if lines.len() > max_lines || result.chars().count() < text.chars().count() {
+        format!("...\n{}", result)
+    } else {
+        result
     }
 }
