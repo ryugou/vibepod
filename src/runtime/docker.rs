@@ -24,6 +24,7 @@ pub struct ContainerConfig {
     pub args: Vec<String>,
     pub env_vars: Vec<String>,
     pub network_disabled: bool,
+    pub setup_cmd: Option<String>,
 }
 
 impl DockerRuntime {
@@ -161,9 +162,22 @@ impl DockerRuntime {
         let mut env = config.env_vars.clone();
         env.push("TERM=xterm-256color".to_string());
 
+        let cmd = if let Some(ref setup) = config.setup_cmd {
+            let mut result = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("{} && exec \"$@\"", setup),
+                "sh".to_string(),
+            ];
+            result.extend(config.args.clone());
+            result
+        } else {
+            config.args.clone()
+        };
+
         let container_config = Config {
             image: Some(config.image.clone()),
-            cmd: Some(config.args.clone()),
+            cmd: Some(cmd),
             host_config: Some(host_config),
             env: Some(env),
             tty: Some(true),
@@ -214,6 +228,103 @@ impl DockerRuntime {
         }
 
         Ok(())
+    }
+
+    pub async fn stream_logs_formatted(&self, container_id: &str) -> Result<Option<String>> {
+        let separator = "────────────────────────────────────────────────────────";
+        println!("{}", separator);
+
+        let options = LogsOptions::<String> {
+            follow: true,
+            stdout: true,
+            stderr: true,
+            ..Default::default()
+        };
+
+        let mut stream = self.docker.logs(container_id, Some(options));
+        let mut result_text: Option<String> = None;
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(output) => {
+                    let line = output.to_string();
+                    let line = line.trim_end_matches('\n');
+                    match serde_json::from_str::<serde_json::Value>(line) {
+                        Ok(json) => {
+                            let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            match event_type {
+                                "assistant" => {
+                                    if let Some(contents) = json.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+                                        for item in contents {
+                                            match item.get("type").and_then(|t| t.as_str()) {
+                                                Some("text") => {
+                                                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                                        println!("  │  [assistant] {}", text);
+                                                    }
+                                                }
+                                                Some("tool_use") => {
+                                                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                                                    let input = item.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                                                    let input_display = if let Some(obj) = input.as_object() {
+                                                        let pairs: Vec<String> = obj.iter()
+                                                            .map(|(k, v)| {
+                                                                let val = v.as_str()
+                                                                    .map(|s| {
+                                                                        if s.len() > 80 {
+                                                                            format!("\"{}...\"", &s[..77])
+                                                                        } else {
+                                                                            format!("\"{}\"", s)
+                                                                        }
+                                                                    })
+                                                                    .unwrap_or_else(|| v.to_string());
+                                                                format!("{}: {}", k, val)
+                                                            })
+                                                            .collect();
+                                                        format!("{{ {} }}", pairs.join(", "))
+                                                    } else {
+                                                        input.to_string()
+                                                    };
+                                                    println!("  │  [tool_use] {} {}", name, input_display);
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                                "result" => {
+                                    if let Some(result_val) = json.get("result").and_then(|r| r.as_str()) {
+                                        result_text = Some(result_val.to_string());
+                                    }
+                                }
+                                "rate_limit_event" => {
+                                    if let Some(info) = json.get("rate_limit_info") {
+                                        let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                                        if status != "allowed" {
+                                            let resets_at = info.get("resetsAt").and_then(|r| r.as_str()).unwrap_or("");
+                                            let limit_type = info.get("rateLimitType").and_then(|t| t.as_str()).unwrap_or("");
+                                            println!("  │  [rate_limit] status: {}, resets_at: {}, type: {}", status, resets_at, limit_type);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // system, hook_started, hook_response, etc. — silently ignored
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Not valid JSON — pass through as-is
+                            print!("{}", output);
+                        }
+                    }
+                }
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+
+        println!("{}", separator);
+        Ok(result_text)
     }
 
     pub async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> Result<()> {
