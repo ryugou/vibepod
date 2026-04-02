@@ -144,9 +144,9 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
     if has_codex {
         sections.push(
             "## Codex Review（ローカル、コミット前）\n\
-以下を指摘がなくなるまで繰り返す（最大 3 回）:\n\
-1. Bash ツールで `codex review --dangerously-bypass-approvals-and-sandbox` を実行する\n\
-   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内で実行するため sandbox は不要）\n\
+以下を指摘がなくなるまで繰り返す（最大 5 回）:\n\
+1. Bash ツールで `codex review` を実行する（timeout: 600000 を必ず指定すること。デフォルトの 120 秒ではタイムアウトする）\n\
+   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること）\n\
 2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
 3. 指摘があれば該当箇所を修正する\n\
 4. 手順 1 に戻る"
