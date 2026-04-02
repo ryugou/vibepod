@@ -124,10 +124,10 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
 
     // Codex review フェーズ（ローカル、コミット前）
     if has_codex {
-        steps.push("codex review を実行する".to_string());
-        steps.push("レビューで指摘された問題があれば修正する".to_string());
+        steps.push("シェルで `codex review` コマンドを実行する（Bash ツールで実行すること。Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI のコマンドを直接実行する）".to_string());
+        steps.push("Codex review で指摘された問題があれば修正する".to_string());
         steps.push(
-            "修正したら再度 codex review を実行する。指摘がなくなるまで最大 3 回繰り返す"
+            "修正したら再度 `codex review` コマンドを実行する。指摘がなくなるまで最大 3 回繰り返す"
                 .to_string(),
         );
     }
