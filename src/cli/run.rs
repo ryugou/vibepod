@@ -126,7 +126,10 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
     if has_codex {
         steps.push("codex review を実行する".to_string());
         steps.push("レビューで指摘された問題があれば修正する".to_string());
-        steps.push("修正したら再度 codex review を実行する。指摘がなくなるまで最大 3 回繰り返す".to_string());
+        steps.push(
+            "修正したら再度 codex review を実行する。指摘がなくなるまで最大 3 回繰り返す"
+                .to_string(),
+        );
     }
 
     // コミット + push + PR 作成（共通）
@@ -136,7 +139,10 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
 
     // Copilot review フェーズ（PR 上）
     if has_copilot {
-        steps.push("`gh pr edit <PR番号> --add-reviewer copilot` で Copilot レビューを依頼する".to_string());
+        steps.push(
+            "`gh pr edit <PR番号> --add-reviewer copilot` で Copilot レビューを依頼する"
+                .to_string(),
+        );
         steps.push("30 秒間隔で最大 10 回 `gh api repos/{owner}/{repo}/pulls/{number}/reviews` を実行して確認する。`gh pr review` や `gh pr comment` などの書き込み系コマンドは絶対に使わないこと".to_string());
         steps.push("レビューコメントがあれば修正する".to_string());
         steps.push("修正をコミットして `git push` で PR を更新する".to_string());
