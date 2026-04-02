@@ -1,4 +1,109 @@
 use anyhow::{Context, Result};
+
+#[derive(Debug)]
+pub enum StreamEvent {
+    Display(String),
+    Result(String),
+    Skip,
+    PassThrough(String),
+}
+
+pub fn format_stream_event(line: &str) -> StreamEvent {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(json) => {
+            let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match event_type {
+                "assistant" => {
+                    if let Some(contents) = json
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        for item in contents {
+                            match item.get("type").and_then(|t| t.as_str()) {
+                                Some("text") => {
+                                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                        return StreamEvent::Display(format!(
+                                            "  │  [assistant] {}",
+                                            text
+                                        ));
+                                    }
+                                }
+                                Some("tool_use") => {
+                                    let name = item
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("unknown");
+                                    let input = item
+                                        .get("input")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    let input_display = if let Some(obj) = input.as_object() {
+                                        let pairs: Vec<String> = obj
+                                            .iter()
+                                            .map(|(k, v)| {
+                                                let val = v
+                                                    .as_str()
+                                                    .map(|s| {
+                                                        if s.len() > 80 {
+                                                            format!("\"{}...\"", &s[..77])
+                                                        } else {
+                                                            format!("\"{}\"", s)
+                                                        }
+                                                    })
+                                                    .unwrap_or_else(|| v.to_string());
+                                                format!("{}: {}", k, val)
+                                            })
+                                            .collect();
+                                        format!("{{ {} }}", pairs.join(", "))
+                                    } else {
+                                        input.to_string()
+                                    };
+                                    return StreamEvent::Display(format!(
+                                        "  │  [tool_use] {} {}",
+                                        name, input_display
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    StreamEvent::Skip
+                }
+                "result" => {
+                    if let Some(result_val) = json.get("result").and_then(|r| r.as_str()) {
+                        StreamEvent::Result(result_val.to_string())
+                    } else {
+                        StreamEvent::Skip
+                    }
+                }
+                "rate_limit_event" => {
+                    if let Some(info) = json.get("rate_limit_info") {
+                        let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                        if status != "allowed" {
+                            let resets_at =
+                                info.get("resetsAt").and_then(|r| r.as_str()).unwrap_or("");
+                            let limit_type = info
+                                .get("rateLimitType")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("");
+                            StreamEvent::Display(format!(
+                                "  │  [rate_limit] status: {}, resets_at: {}, type: {}",
+                                status, resets_at, limit_type
+                            ))
+                        } else {
+                            StreamEvent::Skip
+                        }
+                    } else {
+                        StreamEvent::Skip
+                    }
+                }
+                _ => StreamEvent::Skip,
+            }
+        }
+        Err(_) => StreamEvent::PassThrough(line.to_string()),
+    }
+}
 use bollard::container::{
     AttachContainerOptions, AttachContainerResults, Config, CreateContainerOptions,
     ListContainersOptions, LogsOptions, RemoveContainerOptions, ResizeContainerTtyOptions,
@@ -248,108 +353,12 @@ impl DockerRuntime {
             match result {
                 Ok(output) => {
                     let line = output.to_string();
-                    let line = line.trim_end_matches('\n');
-                    match serde_json::from_str::<serde_json::Value>(line) {
-                        Ok(json) => {
-                            let event_type =
-                                json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            match event_type {
-                                "assistant" => {
-                                    if let Some(contents) = json
-                                        .get("message")
-                                        .and_then(|m| m.get("content"))
-                                        .and_then(|c| c.as_array())
-                                    {
-                                        for item in contents {
-                                            match item.get("type").and_then(|t| t.as_str()) {
-                                                Some("text") => {
-                                                    if let Some(text) =
-                                                        item.get("text").and_then(|t| t.as_str())
-                                                    {
-                                                        println!("  │  [assistant] {}", text);
-                                                    }
-                                                }
-                                                Some("tool_use") => {
-                                                    let name = item
-                                                        .get("name")
-                                                        .and_then(|n| n.as_str())
-                                                        .unwrap_or("unknown");
-                                                    let input = item
-                                                        .get("input")
-                                                        .cloned()
-                                                        .unwrap_or(serde_json::Value::Null);
-                                                    let input_display =
-                                                        if let Some(obj) = input.as_object() {
-                                                            let pairs: Vec<String> = obj
-                                                                .iter()
-                                                                .map(|(k, v)| {
-                                                                    let val = v
-                                                                        .as_str()
-                                                                        .map(|s| {
-                                                                            if s.len() > 80 {
-                                                                                format!(
-                                                                                    "\"{}...\"",
-                                                                                    &s[..77]
-                                                                                )
-                                                                            } else {
-                                                                                format!("\"{}\"", s)
-                                                                            }
-                                                                        })
-                                                                        .unwrap_or_else(|| {
-                                                                            v.to_string()
-                                                                        });
-                                                                    format!("{}: {}", k, val)
-                                                                })
-                                                                .collect();
-                                                            format!("{{ {} }}", pairs.join(", "))
-                                                        } else {
-                                                            input.to_string()
-                                                        };
-                                                    println!(
-                                                        "  │  [tool_use] {} {}",
-                                                        name, input_display
-                                                    );
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                }
-                                "result" => {
-                                    if let Some(result_val) =
-                                        json.get("result").and_then(|r| r.as_str())
-                                    {
-                                        result_text = Some(result_val.to_string());
-                                    }
-                                }
-                                "rate_limit_event" => {
-                                    if let Some(info) = json.get("rate_limit_info") {
-                                        let status = info
-                                            .get("status")
-                                            .and_then(|s| s.as_str())
-                                            .unwrap_or("");
-                                        if status != "allowed" {
-                                            let resets_at = info
-                                                .get("resetsAt")
-                                                .and_then(|r| r.as_str())
-                                                .unwrap_or("");
-                                            let limit_type = info
-                                                .get("rateLimitType")
-                                                .and_then(|t| t.as_str())
-                                                .unwrap_or("");
-                                            println!("  │  [rate_limit] status: {}, resets_at: {}, type: {}", status, resets_at, limit_type);
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // system, hook_started, hook_response, etc. — silently ignored
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Not valid JSON — pass through as-is
-                            print!("{}", output);
-                        }
+                    let trimmed = line.trim_end_matches('\n');
+                    match format_stream_event(trimmed) {
+                        StreamEvent::Display(s) => println!("{}", s),
+                        StreamEvent::Result(s) => result_text = Some(s),
+                        StreamEvent::Skip => {}
+                        StreamEvent::PassThrough(_) => print!("{}", output),
                     }
                 }
                 Err(_) => {

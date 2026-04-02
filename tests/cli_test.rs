@@ -94,3 +94,33 @@ fn test_parse_logout_command() {
     let cli = Cli::parse_from(["vibepod", "logout"]);
     assert!(matches!(cli.command, vibepod::cli::Commands::Logout {}));
 }
+
+#[test]
+fn test_parse_run_with_lang() {
+    let cli = Cli::parse_from(["vibepod", "run", "--lang", "rust"]);
+    if let vibepod::cli::Commands::Run { lang, .. } = cli.command {
+        assert_eq!(lang, Some("rust".to_string()));
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_with_worktree() {
+    let cli = Cli::parse_from(["vibepod", "run", "--prompt", "test", "--worktree"]);
+    if let vibepod::cli::Commands::Run { worktree, .. } = cli.command {
+        assert!(worktree);
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_with_review() {
+    let cli = Cli::parse_from(["vibepod", "run", "--prompt", "test", "--review"]);
+    if let vibepod::cli::Commands::Run { review, .. } = cli.command {
+        assert!(review);
+    } else {
+        panic!("Expected Run command");
+    }
+}

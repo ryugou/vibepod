@@ -40,7 +40,7 @@ struct RunContext {
     project_name: String,
 }
 
-fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static str)> {
+pub fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static str)> {
     let mut langs = Vec::new();
     if workspace.join("Cargo.toml").exists() {
         langs.push(("rust".to_string(), "Cargo.toml"));
@@ -66,14 +66,38 @@ fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static str)> 
     langs
 }
 
-fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
+pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
     match lang {
-        "rust" => Some("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && . $HOME/.cargo/env"),
+        "rust" => Some("apt-get update && apt-get install -y build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && . $HOME/.cargo/env"),
         "node" => Some("curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs"),
         "python" => Some("apt-get update && apt-get install -y python3 python3-pip python3-venv"),
         "go" => Some("ARCH=$(uname -m) && GOARCH=$([ \"$ARCH\" = \"aarch64\" ] && echo arm64 || echo amd64) && curl -fsSL https://go.dev/dl/go1.24.2.linux-${GOARCH}.tar.gz | tar -C /usr/local -xzf - && export PATH=$PATH:/usr/local/go/bin"),
         "java" => Some("apt-get update && apt-get install -y default-jdk"),
         _ => None,
+    }
+}
+
+pub fn validate_slack_channel_id(id: &str) -> bool {
+    id.starts_with('C') && id.len() >= 9
+}
+
+pub fn build_review_prompt(prompt: &str, review: bool) -> String {
+    if review {
+        format!(
+            "{}\n\n---\n\n\
+            実装が完了したら、以下のレビューフローを実行すること:\n\
+            1. 変更内容をコミットする（Conventional Commits 準拠）\n\
+            2. `gh pr create` で PR を作成する（ベースブランチは main）\n\
+            3. `gh pr edit <PR番号> --add-reviewer copilot` で GitHub Copilot のレビューを依頼する\n\
+            4. Copilot のレビューが届くまで 30 秒間隔で最大 10 回 `gh api repos/{{owner}}/{{repo}}/pulls/{{number}}/reviews` を実行して確認する。\
+               `gh pr review` や `gh pr comment` などの書き込み系コマンドは絶対に使わないこと（意図しないレビューコメントが作成されるため）\n\
+            5. Copilot のレビューコメントがあれば内容を読み、指摘された問題を修正する\n\
+            6. 修正をコミットして `git push` で PR を更新する\n\
+            7. 最終的な PR の URL を出力する",
+            prompt
+        )
+    } else {
+        prompt.to_string()
     }
 }
 
@@ -345,22 +369,7 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         claude_args.push("--resume".to_string());
     }
     if let Some(ref p) = opts.prompt {
-        let effective_prompt = if opts.review {
-            format!(
-                "{}\n\n---\n\n\
-                実装が完了したら、以下のレビューフローを実行すること:\n\
-                1. 変更内容をコミットする（Conventional Commits 準拠）\n\
-                2. `gh pr create` で PR を作成する\n\
-                3. `gh pr edit <PR番号> --add-reviewer copilot` で GitHub Copilot のレビューを依頼する\n\
-                4. レビュー結果を待つ: `gh pr reviews <PR番号>` でレビューコメントを確認する（数分かかる場合がある。最大3回リトライすること）\n\
-                5. レビューで指摘された内容を修正する\n\
-                6. 修正をコミットして PR を更新する（`git push`）\n\
-                7. 最終的な PR の URL を出力する",
-                p
-            )
-        } else {
-            p.clone()
-        };
+        let effective_prompt = build_review_prompt(p, opts.review);
         claude_args.push("-p".to_string());
         claude_args.push(effective_prompt);
         claude_args.push("--output-format".to_string());
@@ -600,6 +609,14 @@ async fn run_bridge(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
         .clone()
         .or_else(|| resolved.get("SLACK_CHANNEL_ID").cloned())
         .unwrap_or_default();
+
+    // Validate Slack channel ID format
+    if !slack_channel_id.is_empty() && !validate_slack_channel_id(&slack_channel_id) {
+        bail!(
+            "Invalid Slack channel ID: '{}'. Channel IDs start with 'C' (e.g., C01ABC2DEF3).",
+            slack_channel_id
+        );
+    }
 
     // LLM provider & API key
     let provider: crate::bridge::formatter::LlmProvider = opts.llm_provider.parse()?;
