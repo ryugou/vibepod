@@ -116,10 +116,31 @@ fn test_parse_run_with_worktree() {
 }
 
 #[test]
-fn test_parse_run_with_review() {
+fn test_parse_run_with_review_no_value() {
     let cli = Cli::parse_from(["vibepod", "run", "--prompt", "test", "--review"]);
     if let vibepod::cli::Commands::Run { review, .. } = cli.command {
-        assert!(review);
+        // --review with no value uses default_missing_value = ""
+        assert_eq!(review, Some("".to_string()));
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_with_review_copilot() {
+    let cli = Cli::parse_from(["vibepod", "run", "--prompt", "test", "--review", "copilot"]);
+    if let vibepod::cli::Commands::Run { review, .. } = cli.command {
+        assert_eq!(review, Some("copilot".to_string()));
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_without_review() {
+    let cli = Cli::parse_from(["vibepod", "run", "--prompt", "test"]);
+    if let vibepod::cli::Commands::Run { review, .. } = cli.command {
+        assert_eq!(review, None);
     } else {
         panic!("Expected Run command");
     }

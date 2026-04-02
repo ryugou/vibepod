@@ -60,9 +60,10 @@ pub enum Commands {
         /// Run in an isolated git worktree (for --prompt mode)
         #[arg(long)]
         worktree: bool,
-        /// Auto-create PR and request GitHub Copilot review after implementation (requires --prompt)
-        #[arg(long)]
-        review: bool,
+        /// Auto-review after implementation. Uses config reviewers if no value specified.
+        /// Possible values: copilot, codex
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        review: Option<String>,
     },
     /// Restore workspace to a previous session state
     Restore {},

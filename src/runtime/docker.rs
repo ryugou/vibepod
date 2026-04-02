@@ -131,6 +131,7 @@ pub struct ContainerConfig {
     pub env_vars: Vec<String>,
     pub network_disabled: bool,
     pub setup_cmd: Option<String>,
+    pub codex_auth: Option<String>,
 }
 
 impl DockerRuntime {
@@ -249,6 +250,16 @@ impl DockerRuntime {
             mounts.push(Mount {
                 target: Some("/home/vibepod/.gitconfig".to_string()),
                 source: Some(gitconfig_path.clone()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+
+        if let Some(ref codex_auth) = config.codex_auth {
+            mounts.push(Mount {
+                target: Some("/home/vibepod/.codex/auth.json".to_string()),
+                source: Some(codex_auth.clone()),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(true),
                 ..Default::default()
