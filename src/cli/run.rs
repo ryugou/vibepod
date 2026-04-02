@@ -144,9 +144,9 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
     if has_codex {
         sections.push(
             "## Codex Review（ローカル、コミット前）\n\
-以下を指摘がなくなるまで繰り返す（最大 3 回）:\n\
-1. Bash ツールで `codex review --dangerously-bypass-approvals-and-sandbox` を実行する\n\
-   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内で実行するため sandbox は不要）\n\
+以下を指摘がなくなるまで繰り返す（最大 5 回）:\n\
+1. Bash ツールで `codex review -c sandbox_mode=danger-full-access` を実行する（timeout: 600000 を必ず指定すること。デフォルトの 120 秒ではタイムアウトする）\n\
+   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内では Linux namespace が使えないため sandbox を無効化する）\n\
 2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
 3. 指摘があれば該当箇所を修正する\n\
 4. 手順 1 に戻る"
@@ -180,7 +180,7 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
     sections.push("## 完了\n- 最終的な PR の URL を出力する".to_string());
 
     format!(
-        "{}\n\n---\n\n実装が完了したら、以下のレビューフローを実行すること:\n\n{}",
+        "{}\n\n---\n\n【必須】上記の作業が終わったら、以下のレビューフローを必ず最後まで実行すること。レビューフローを省略してはならない。\n\n{}",
         prompt,
         sections.join("\n\n")
     )
