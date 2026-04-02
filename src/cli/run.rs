@@ -427,7 +427,7 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
             setup_parts.push("sudo npm install -g @openai/codex".to_string());
             // Fix ownership of ~/.codex/ which Docker creates as root when bind-mounting auth.json
             setup_parts.push(
-                "sudo chown -R $(id -u):$(id -g) $HOME/.codex 2>/dev/null || true".to_string(),
+                "(sudo chown -R $(id -u):$(id -g) $HOME/.codex 2>/dev/null || true)".to_string(),
             );
         }
         if setup_parts.is_empty() {
