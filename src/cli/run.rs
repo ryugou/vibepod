@@ -85,11 +85,23 @@ pub fn validate_slack_channel_id(id: &str) -> bool {
     (id.starts_with('C') || id.starts_with('G')) && id.len() >= 9
 }
 
+const VALID_REVIEWERS: &[&str] = &["copilot", "codex"];
+
 pub fn resolve_reviewers(review_arg: &Option<String>, config: &[String]) -> Vec<String> {
     match review_arg {
-        None => vec![],                                                   // --review なし
-        Some(explicit) if !explicit.is_empty() => vec![explicit.clone()], // --review copilot
-        Some(_) => config.to_vec(), // --review（値なし）→ config から
+        None => vec![],
+        Some(explicit) if !explicit.is_empty() => {
+            if VALID_REVIEWERS.contains(&explicit.as_str()) {
+                vec![explicit.clone()]
+            } else {
+                vec![]
+            }
+        }
+        Some(_) => config
+            .iter()
+            .filter(|r| VALID_REVIEWERS.contains(&r.as_str()))
+            .cloned()
+            .collect(),
     }
 }
 
@@ -346,12 +358,23 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
 
     // Resolve reviewers (before setup_cmd so codex can extend it)
     let config_reviewers = vibepod_config.reviewers();
-    let mut reviewers = resolve_reviewers(&opts.review, &config_reviewers);
     let review_explicit = opts
         .review
         .as_deref()
         .map(|s| !s.is_empty())
         .unwrap_or(false);
+    if review_explicit {
+        if let Some(ref v) = opts.review {
+            if !VALID_REVIEWERS.contains(&v.as_str()) {
+                bail!(
+                    "Unknown reviewer '{}'. Valid values: {}",
+                    v,
+                    VALID_REVIEWERS.join(", ")
+                );
+            }
+        }
+    }
+    let mut reviewers = resolve_reviewers(&opts.review, &config_reviewers);
 
     // Codex CLI availability check
     if reviewers.contains(&"codex".to_string()) {
@@ -392,9 +415,9 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         if reviewers.contains(&"codex".to_string()) {
             let setup_cmd_contains_node = lang_names.contains(&"node".to_string());
             if !setup_cmd_contains_node {
-                setup_parts.push("curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs".to_string());
+                setup_parts.push("curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs".to_string());
             }
-            setup_parts.push("npm install -g @openai/codex".to_string());
+            setup_parts.push("sudo npm install -g @openai/codex".to_string());
         }
         if setup_parts.is_empty() {
             None

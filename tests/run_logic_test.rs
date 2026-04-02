@@ -122,6 +122,20 @@ fn test_resolve_reviewers_empty_config() {
     assert!(result.is_empty());
 }
 
+#[test]
+fn test_resolve_reviewers_unknown_explicit_filtered() {
+    let config = vec!["copilot".to_string()];
+    let result = resolve_reviewers(&Some("unknown_tool".to_string()), &config);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_resolve_reviewers_unknown_in_config_filtered() {
+    let config = vec!["copilot".to_string(), "unknown_tool".to_string()];
+    let result = resolve_reviewers(&Some("".to_string()), &config);
+    assert_eq!(result, vec!["copilot".to_string()]);
+}
+
 // --- validate_slack_channel_id ---
 
 #[test]
