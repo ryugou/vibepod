@@ -101,3 +101,15 @@ fn test_format_invalid_json() {
         other => panic!("Expected PassThrough, got {:?}", other),
     }
 }
+
+#[test]
+fn test_format_multiple_content_blocks() {
+    let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Let me check"},{"type":"tool_use","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#;
+    match format_stream_event(line) {
+        StreamEvent::Display(s) => {
+            assert!(s.contains("[assistant] Let me check"));
+            assert!(s.contains("[tool_use] Read"));
+        }
+        other => panic!("Expected Display, got {:?}", other),
+    }
+}

@@ -86,6 +86,11 @@ fn test_invalid_slack_channel_id_wrong_prefix() {
 }
 
 #[test]
+fn test_valid_slack_private_channel_id() {
+    assert!(validate_slack_channel_id("G01ABC2DEF3"));
+}
+
+#[test]
 fn test_invalid_slack_channel_id_too_short() {
     assert!(!validate_slack_channel_id("C123"));
 }
