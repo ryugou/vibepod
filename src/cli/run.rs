@@ -119,38 +119,47 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
 
     let mut sections: Vec<String> = Vec::new();
 
-    sections.push("## 共通準備\n\
-        - 現在のブランチが main の場合は `git checkout -b <適切なブランチ名>` で新しいブランチを作成する".to_string());
+    sections.push(
+        "## 共通準備\n\
+- 現在のブランチが main の場合は `git checkout -b <適切なブランチ名>` で新しいブランチを作成する"
+            .to_string(),
+    );
 
     // Codex review フェーズ（ローカル、コミット前）
     if has_codex {
-        sections.push("## Codex Review（ローカル、コミット前）\n\
-            以下を指摘がなくなるまで繰り返す（最大 3 回）:\n\
-            1. Bash ツールで `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` を実行する\n\
-               （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること）\n\
-            2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
-            3. 指摘があれば該当箇所を修正する\n\
-            4. 手順 1 に戻る".to_string());
+        sections.push(
+            "## Codex Review（ローカル、コミット前）\n\
+以下を指摘がなくなるまで繰り返す（最大 3 回）:\n\
+1. Bash ツールで `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` を実行する\n\
+   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること）\n\
+2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
+3. 指摘があれば該当箇所を修正する\n\
+4. 手順 1 に戻る"
+                .to_string(),
+        );
     }
 
     // コミット + push + PR 作成
     sections.push(
         "## コミットと PR 作成\n\
-        1. 変更内容をコミットする（Conventional Commits 準拠）\n\
-        2. `git push -u origin <ブランチ名>` でリモートに push する\n\
-        3. `gh pr create --base main` で PR を作成する"
+1. 変更内容をコミットする（Conventional Commits 準拠）\n\
+2. `git push -u origin <ブランチ名>` でリモートに push する\n\
+3. `gh pr create --base main` で PR を作成する"
             .to_string(),
     );
 
     // Copilot review フェーズ（PR 上、1ラウンドのみ。API での re-review は未サポート）
     if has_copilot {
-        sections.push("## Copilot Review（PR 上、1ラウンド）\n\
-            1. `gh pr edit <PR番号> --add-reviewer copilot` で Copilot レビューを依頼する\n\
-            2. 30 秒間隔で最大 10 回 `gh api repos/{owner}/{repo}/pulls/{number}/reviews` をポーリングする\n\
-               （重要: `gh pr review` や `gh pr comment` 等の書き込み系コマンドは絶対に使わないこと）\n\
-            3. レビュー結果を確認する。インラインコメントは `gh api repos/{owner}/{repo}/pulls/{number}/comments` で取得する\n\
-            4. 指摘があれば修正し、コミットして `git push` する\n\
-            注意: Copilot の re-review は API から自動でリクエストできないため、1ラウンドで終了する".to_string());
+        sections.push(
+            "## Copilot Review（PR 上、1ラウンド）\n\
+1. `gh pr edit <PR番号> --add-reviewer copilot` で Copilot レビューを依頼する\n\
+2. 30 秒間隔で最大 10 回 `gh api repos/{owner}/{repo}/pulls/{number}/reviews` をポーリングする\n\
+   （重要: `gh pr review` や `gh pr comment` 等の書き込み系コマンドは絶対に使わないこと）\n\
+3. レビュー結果を確認する。インラインコメントは `gh api repos/{owner}/{repo}/pulls/{number}/comments` で取得する\n\
+4. 指摘があれば修正し、コミットして `git push` する\n\
+注意: Copilot の re-review は API から自動でリクエストできないため、1ラウンドで終了する"
+                .to_string(),
+        );
     }
 
     sections.push("## 完了\n- 最終的な PR の URL を出力する".to_string());
@@ -421,9 +430,10 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
                 setup_parts.push("curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs".to_string());
             }
             setup_parts.push("sudo npm install -g @openai/codex".to_string());
-            // Fix ownership of ~/.codex/ which Docker creates as root when bind-mounting auth.json
+            // Fix ownership of ~/.codex/ dir (Docker creates it as root when bind-mounting auth.json)
+            // Only chown the directory itself, not -R (auth.json is read-only bind-mount)
             setup_parts.push(
-                "(sudo chown -R $(id -u):$(id -g) $HOME/.codex 2>/dev/null || true)".to_string(),
+                "(if [ -d \"$HOME/.codex\" ]; then sudo chown $(id -u):$(id -g) \"$HOME/.codex\" 2>/dev/null || true; fi)".to_string(),
             );
         }
         if setup_parts.is_empty() {
