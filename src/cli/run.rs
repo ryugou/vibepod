@@ -86,14 +86,16 @@ pub fn build_review_prompt(prompt: &str, review: bool) -> String {
         format!(
             "{}\n\n---\n\n\
             実装が完了したら、以下のレビューフローを実行すること:\n\
-            1. 変更内容をコミットする（Conventional Commits 準拠）\n\
-            2. `gh pr create` で PR を作成する（ベースブランチは main）\n\
-            3. `gh pr edit <PR番号> --add-reviewer copilot` で GitHub Copilot のレビューを依頼する\n\
-            4. Copilot のレビューが届くまで 30 秒間隔で最大 10 回 `gh api repos/{{owner}}/{{repo}}/pulls/{{number}}/reviews` を実行して確認する。\
+            1. 現在のブランチが main の場合は、`git checkout -b <適切なブランチ名>` で新しいフィーチャーブランチを作成する。main 以外のブランチにいる場合はそのまま使う\n\
+            2. 変更内容をコミットする（Conventional Commits 準拠）\n\
+            3. `git push -u origin <ブランチ名>` でリモートに push する\n\
+            4. `gh pr create` で PR を作成する（ベースブランチは main）\n\
+            5. `gh pr edit <PR番号> --add-reviewer copilot` で GitHub Copilot のレビューを依頼する\n\
+            6. Copilot のレビューが届くまで 30 秒間隔で最大 10 回 `gh api repos/{{owner}}/{{repo}}/pulls/{{number}}/reviews` を実行して確認する。\
                `gh pr review` や `gh pr comment` などの書き込み系コマンドは絶対に使わないこと（意図しないレビューコメントが作成されるため）\n\
-            5. Copilot のレビューコメントがあれば内容を読み、指摘された問題を修正する\n\
-            6. 修正をコミットして `git push` で PR を更新する\n\
-            7. 最終的な PR の URL を出力する",
+            7. Copilot のレビューコメントがあれば内容を読み、指摘された問題を修正する\n\
+            8. 修正をコミットして `git push` で PR を更新する\n\
+            9. 最終的な PR の URL を出力する",
             prompt
         )
     } else {

@@ -62,8 +62,8 @@ fn test_review_prompt_injection() {
     let result = build_review_prompt("my prompt", true);
     assert!(result.starts_with("my prompt"));
     assert!(result.contains("レビューフロー"));
+    assert!(result.contains("git checkout -b"));
     assert!(result.contains("gh pr create"));
-    assert!(result.contains("gh pr review"));
     assert!(result.contains("gh api repos/"));
 }
 
