@@ -61,17 +61,16 @@ fn resolve_reviewers(review_arg: &Option<String>, config: &VibepodConfig) -> Vec
 ### Codex レビュープロンプト（新規）
 
 ```
-実装が完了したら、以下の Codex レビューフローを実行すること:
-1. 現在のブランチが main の場合は、新しいフィーチャーブランチを作成する
-2. 変更内容をコミットする（Conventional Commits 準拠）
-3. codex review を実行する
-4. レビューで指摘された問題があれば修正する
-5. 修正したら再度 codex review を実行する
-6. 指摘がなくなるまでステップ 4-5 を最大 3 回繰り返す
-7. git push -u origin <ブランチ名> でリモートに push する
-8. gh pr create で PR を作成する（ベースブランチは main）
-9. 最終的な PR の URL を出力する
+## Codex Review（ローカル、コミット前）
+以下を指摘がなくなるまで繰り返す（最大 5 回）:
+1. Bash ツールで `codex review -c sandbox_mode=danger-full-access -c approval_policy=never` を実行する（timeout: 600000 を必ず指定すること。デフォルトの 120 秒ではタイムアウトする）
+   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内では Linux namespace が使えないため sandbox を無効化し、非対話実行のため approval も無効化する）
+2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了
+3. 指摘があれば該当箇所を修正する
+4. 手順 1 に戻る
 ```
+
+注: `-c sandbox_mode=danger-full-access` は Docker コンテナ内で Linux namespace ベースのサンドボックスが使えないための回避策。`-c approval_policy=never` は非対話実行で承認プロンプトがブロックしないようにするため。`timeout: 600000`（10分）は Codex が LLM API を呼ぶため、デフォルトの 120 秒ではタイムアウトするため。
 
 ### 両方指定時（reviewers = ["copilot", "codex"]）
 

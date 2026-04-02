@@ -77,7 +77,8 @@ fn test_review_prompt_codex() {
     let reviewers = vec!["codex".to_string()];
     let result = build_review_prompt("my prompt", &reviewers);
     assert!(result.starts_with("my prompt"));
-    assert!(result.contains("codex review -c sandbox_mode=danger-full-access"));
+    assert!(result
+        .contains("codex review -c sandbox_mode=danger-full-access -c approval_policy=never",));
     assert!(result.contains("timeout: 600000"));
     assert!(result.contains("gh pr create"));
     // Codex ループ
