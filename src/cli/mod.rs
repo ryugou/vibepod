@@ -1,6 +1,8 @@
 pub mod init;
 pub mod login;
 pub mod logout;
+pub mod logs;
+pub mod ps;
 pub mod restore;
 pub mod run;
 
@@ -64,6 +66,24 @@ pub enum Commands {
         /// Possible values: copilot, codex
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         review: Option<String>,
+        /// Mount host file/directory into container (read-only). Repeatable.
+        /// Format: <host-path>:<container-path> or <host-path> (mounted to /mnt/<filename>)
+        #[arg(long, num_args = 1)]
+        mount: Vec<String>,
+    },
+    /// List running VibePod containers
+    Ps {},
+    /// Show logs of a VibePod container
+    Logs {
+        /// Container name (defaults to most recent)
+        #[arg()]
+        container: Option<String>,
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show from the end
+        #[arg(short = 'n', long, default_value = "100")]
+        tail: String,
     },
     /// Restore workspace to a previous session state
     Restore {},

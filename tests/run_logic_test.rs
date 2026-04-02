@@ -1,6 +1,6 @@
 use vibepod::cli::run::{
-    build_review_prompt, detect_languages, get_lang_install_cmd, resolve_reviewers,
-    validate_slack_channel_id,
+    build_review_prompt, detect_languages, get_lang_install_cmd, parse_mount_arg,
+    resolve_reviewers, validate_slack_channel_id,
 };
 
 // --- detect_languages ---
@@ -142,6 +142,47 @@ fn test_resolve_reviewers_unknown_in_config_filtered() {
     let config = vec!["copilot".to_string(), "unknown_tool".to_string()];
     let result = resolve_reviewers(&Some("".to_string()), &config);
     assert_eq!(result, vec!["copilot".to_string()]);
+}
+
+// --- parse_mount_arg ---
+
+#[test]
+fn test_parse_mount_arg_with_colon() {
+    let result = parse_mount_arg("/host/spec.md:/workspace/spec.md").unwrap();
+    assert_eq!(
+        result,
+        (
+            "/host/spec.md".to_string(),
+            "/workspace/spec.md".to_string()
+        )
+    );
+}
+
+#[test]
+fn test_parse_mount_arg_without_colon() {
+    let result = parse_mount_arg("/host/spec.md").unwrap();
+    assert_eq!(
+        result,
+        ("/host/spec.md".to_string(), "/mnt/spec.md".to_string())
+    );
+}
+
+#[test]
+fn test_parse_mount_arg_directory_without_colon() {
+    let result = parse_mount_arg("/some/path/mydir").unwrap();
+    assert_eq!(
+        result,
+        ("/some/path/mydir".to_string(), "/mnt/mydir".to_string())
+    );
+}
+
+#[test]
+fn test_parse_mount_arg_custom_container_path() {
+    let result = parse_mount_arg("/foo/bar.txt:/custom/path.txt").unwrap();
+    assert_eq!(
+        result,
+        ("/foo/bar.txt".to_string(), "/custom/path.txt".to_string())
+    );
 }
 
 // --- validate_slack_channel_id ---
