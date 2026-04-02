@@ -29,7 +29,7 @@
 ### コミットと PR 作成
 1. 変更内容をコミットする（Conventional Commits 準拠）
 2. `git push -u origin <ブランチ名>` でリモートに push する
-3. `gh pr create --base main` で PR を作成する
+3. `gh pr create --base main` で PR を作成する。
 
 ### 完了
 - 最終的な PR の URL を出力する
