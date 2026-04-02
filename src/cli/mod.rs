@@ -54,6 +54,15 @@ pub enum Commands {
         /// LLM provider for formatting notifications: anthropic (default), gemini, openai, none
         #[arg(long, default_value = "anthropic")]
         llm_provider: String,
+        /// Language toolchain to install in container (rust, node, python, go, java)
+        #[arg(long)]
+        lang: Option<String>,
+        /// Run in an isolated git worktree (for --prompt mode)
+        #[arg(long)]
+        worktree: bool,
+        /// Auto-create PR and request GitHub Copilot review after implementation (requires --prompt)
+        #[arg(long)]
+        review: bool,
     },
     /// Restore workspace to a previous session state
     Restore {},

@@ -31,18 +31,42 @@ pub async fn run(
     runtime: &crate::runtime::DockerRuntime,
     container_id: &str,
 ) -> Result<i64> {
-    // 1. ログディレクトリ作成、BridgeLogger 初期化
+    // 1. attach_container を最初に実行（コンテナ出力の取りこぼしを防ぐ）
+    let attach_result = runtime.attach_container(container_id).await?;
+
+    // 2. TerminalGuard で raw mode 設定（attach 直後、出力表示の前に）
+    let _terminal_guard = io::TerminalGuard::new().context("Failed to set terminal to raw mode")?;
+
+    // 3. I/O ループを即座に開始（コンテナ出力をバッファリング開始）
+    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (slack_response_tx, mut slack_response_rx) = mpsc::channel::<SlackResponse>(16);
+    let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (terminal_input_tx, mut terminal_input_rx) = mpsc::channel::<()>(64);
+
+    let io_runtime = runtime.clone();
+    let io_container_id = container_id.to_string();
+    let mut io_handle = tokio::spawn(async move {
+        io::run_io_loop(
+            attach_result,
+            output_tx,
+            stdin_rx,
+            terminal_input_tx,
+            &io_runtime,
+            &io_container_id,
+        )
+        .await
+    });
+
+    // 4. ログ・Formatter 初期化（I/O ループと並行）
     let config_dir = crate::config::default_config_dir()?;
     let log_path = config_dir
         .join("bridge-logs")
         .join(format!("{}.jsonl", config.session_id));
     let mut logger = BridgeLogger::new(&log_path)?;
 
-    // 2. LLM Formatter 初期化
     let text_formatter = Formatter::new(config.llm_provider, config.llm_api_key);
 
-    // 3. SlackClient 初期化・接続
-    // notify_slack 用にトークンを先にクローン（slack は event_loop で move される）
+    // 5. Slack 接続（I/O ループは既に動いているので出力を取りこぼさない）
     let bot_token = config.slack_bot_token;
     let app_token = config.slack_app_token;
     let channel_id = config.slack_channel_id;
@@ -55,11 +79,9 @@ pub async fn run(
         config.session_id.clone(),
     );
 
-    // Slack 接続失敗時はターミナル専用モードにフォールバック
     let slack_active = Arc::new(AtomicBool::new(false));
     let slack_available = match slack.connect().await {
         Ok(_) => {
-            // 3. セッション開始通知
             if let Err(e) = slack.notify_session_start().await {
                 eprintln!("Warning: Failed to send session start notification: {}", e);
             }
@@ -74,33 +96,6 @@ pub async fn run(
         }
     };
     slack_active.store(slack_available, Ordering::SeqCst);
-
-    // 4. TerminalGuard で raw mode 設定
-    let _terminal_guard = io::TerminalGuard::new().context("Failed to set terminal to raw mode")?;
-
-    // 5. attach_container でストリーム取得
-    let attach_result = runtime.attach_container(container_id).await?;
-
-    // 6. mpsc channel 作成
-    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
-    let (slack_response_tx, mut slack_response_rx) = mpsc::channel::<SlackResponse>(16);
-    let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(64);
-    let (terminal_input_tx, mut terminal_input_rx) = mpsc::channel::<()>(64);
-
-    // 7. tokio::spawn で I/O ループと Slack イベントループを起動
-    let io_runtime = runtime.clone();
-    let io_container_id = container_id.to_string();
-    let mut io_handle = tokio::spawn(async move {
-        io::run_io_loop(
-            attach_result,
-            output_tx,
-            stdin_rx,
-            terminal_input_tx,
-            &io_runtime,
-            &io_container_id,
-        )
-        .await
-    });
 
     let slack_handle = if slack_available {
         let tx = slack_response_tx.clone();
@@ -118,7 +113,6 @@ pub async fn run(
         None
     };
 
-    // SlackClient for notifications (separate instance for main loop usage)
     let notify_slack = SlackClient::new(
         bot_token,
         app_token,

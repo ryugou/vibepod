@@ -28,18 +28,24 @@ async fn main() -> Result<()> {
             notify_delay,
             slack_channel,
             llm_provider,
+            lang,
+            worktree,
+            review,
         } => {
-            vibepod::cli::run::execute(
+            vibepod::cli::run::execute(vibepod::cli::run::RunOptions {
                 resume,
                 prompt,
                 no_network,
-                env,
+                env_vars: env,
                 env_file,
                 bridge,
                 notify_delay,
                 slack_channel,
                 llm_provider,
-            )
+                lang,
+                worktree,
+                review,
+            })
             .await?;
         }
         Commands::Restore {} => {

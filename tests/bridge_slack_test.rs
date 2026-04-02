@@ -208,7 +208,9 @@ fn test_choice_display_truncation_boundary() {
     // ちょうど20文字 → 切り詰めなし
     let choice_20 = "12345678901234567890".to_string();
     let blocks = build_idle_notification_blocks("Pick:", "proj", "sess", &[choice_20]);
-    let elements = blocks.as_array().unwrap()
+    let elements = blocks
+        .as_array()
+        .unwrap()
         .iter()
         .find(|b| b["type"] == "actions")
         .unwrap()["elements"]
@@ -220,7 +222,9 @@ fn test_choice_display_truncation_boundary() {
     // 21文字 → 20文字 + "..." に切り詰め
     let choice_21 = "123456789012345678901".to_string();
     let blocks = build_idle_notification_blocks("Pick:", "proj", "sess", &[choice_21]);
-    let elements = blocks.as_array().unwrap()
+    let elements = blocks
+        .as_array()
+        .unwrap()
         .iter()
         .find(|b| b["type"] == "actions")
         .unwrap()["elements"]
@@ -236,12 +240,17 @@ fn test_choice_display_truncation_japanese() {
     let choice = "あいうえおかきくけこさしすせそたちつてとな".to_string();
     assert_eq!(choice.chars().count(), 21);
     let blocks = build_idle_notification_blocks("Pick:", "proj", "sess", &[choice]);
-    let elements = blocks.as_array().unwrap()
+    let elements = blocks
+        .as_array()
+        .unwrap()
         .iter()
         .find(|b| b["type"] == "actions")
         .unwrap()["elements"]
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(elements[0]["text"]["text"], "あいうえおかきくけこさしすせそたちつてと...");
+    assert_eq!(
+        elements[0]["text"]["text"],
+        "あいうえおかきくけこさしすせそたちつてと..."
+    );
 }

@@ -88,15 +88,17 @@ async fn test_on_output_resumed_transitions_to_buffering() {
 }
 
 #[test]
-fn test_buffer_for_slack_returns_all_content() {
+fn test_buffer_for_slack_truncates_to_tail() {
     let mut detector = IdleDetector::new(Duration::from_secs(5));
     for i in 0..50 {
         detector.on_output(format!("line {}\n", i).as_bytes());
     }
     let content = detector.buffer_for_slack();
-    // フィルタリング・切り詰めなし（formatter に委譲）
-    assert!(content.contains("line 0"));
-    assert!(content.contains("line 49"));
+    // 末尾40行に切り詰め（先頭10行は省略）
+    assert!(!content.contains("line 9\n"), "line 9 should be truncated");
+    assert!(content.contains("line 10"), "line 10 should be included");
+    assert!(content.contains("line 49"), "line 49 should be included");
+    assert!(content.starts_with("..."), "should start with ellipsis");
 }
 
 #[test]

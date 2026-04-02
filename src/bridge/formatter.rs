@@ -157,6 +157,9 @@ impl Formatter {
             LlmProvider::None => unreachable!("None provider handled in format()"),
         };
 
+        // マークダウンコードフェンスを除去（LLM が ```json ... ``` で囲むことがある）
+        let raw = strip_markdown_fences(&raw);
+
         // LLM レスポンスを JSON としてパース。失敗時は旧形式（プレーンテキスト）としてフォールバック
         match serde_json::from_str::<serde_json::Value>(&raw) {
             Ok(val) => {
@@ -283,6 +286,26 @@ impl Formatter {
             .map(|s| s.to_string())
             .context("Unexpected OpenAI API response: missing choices[0].message.content")
     }
+}
+
+/// LLM レスポンスからマークダウンコードフェンスを除去する。
+/// Gemini 等が ```json ... ``` で囲んで返すケースへの対策。
+fn strip_markdown_fences(text: &str) -> String {
+    let trimmed = text.trim();
+    // ```json ... ``` or ``` ... ``` パターン
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        // ```json\n の言語指定をスキップ
+        let rest = if let Some(after_lang) = rest.split_once('\n') {
+            after_lang.1
+        } else {
+            rest
+        };
+        // 末尾の ``` を除去
+        if let Some(content) = rest.strip_suffix("```") {
+            return content.trim().to_string();
+        }
+    }
+    text.to_string()
 }
 
 /// ローカル整形: ANSI ストリップ + 末尾 2000 文字に切り詰め。

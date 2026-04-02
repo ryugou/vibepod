@@ -341,10 +341,13 @@ impl SlackClient {
     }
 
     fn handle_reaction(&self, event: &Value) -> Option<SlackResponse> {
+        // Ignore reactions on other channels
+        let channel = event["item"]["channel"].as_str().unwrap_or("");
+        if channel != self.channel_id {
+            return None;
+        }
+
         let reaction = event["reaction"].as_str()?;
-        // item.ts is the message the reaction was added to.
-        // This should match a notification we sent; unrelated reactions are harmless
-        // (they produce a SlackResponse but update_responded will target our message).
         let message_ts = event["item"]["ts"].as_str()?;
 
         let text = map_reaction_to_stdin(reaction)?;
@@ -363,6 +366,11 @@ impl SlackClient {
         }
         // Ignore message subtypes (edits, deletes, etc.)
         if event.get("subtype").is_some() {
+            return None;
+        }
+        // Ignore messages from other channels/DMs
+        let channel = event["channel"].as_str().unwrap_or("");
+        if channel != self.channel_id {
             return None;
         }
 

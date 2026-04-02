@@ -39,11 +39,45 @@ Dashboard 専用の内部 API として作らない。最初から「VibePod 自
 
 ## Dashboard（Web UI）
 
-v2 の中核機能。詳細は今後設計するが、少なくとも以下を含む：
+v2 の中核機能。iPhone の Safari（Tailscale 経由）から、vibepod で起動した Claude Code の状態確認と操作を行う。
 
-- セッション一覧と状態表示（実行中 / 入力待ち / 完了）
-- pty 出力のリアルタイムストリーミング（WebSocket）
-- 入力待ちへの応答 UI
+### 動機
+
+Slack 通知 + StreamDeck の組み合わせでは、許可ダイアログの詳細が取れない・選択肢が限定されるなどの制限があり、実用に耐えない。Mosh クライアントならフル操作可能だが、Claude Code 操作に特化した UI ではない。ターミナルの丸ごと表示ではなく、会話と許可ダイアログを整形して表示し、ボタンで応答できる UI が必要。
+
+### 技術方針
+
+- vibepod がホストする Web サーバ（Rust）に Web UI を組み込む
+- Claude Code のトランスクリプト（JSONL）をリアルタイムで読み、会話内容を表示する
+- ボタン押下時は `tmux send-keys` でコンテナ内の Claude Code に入力を送る
+- Tailscale 経由でアクセスするため、認証は Tailscale のネットワーク境界に依存する（追加認証は後回し）
+
+### トランスクリプトから取れる情報（検証済み）
+
+- assistant メッセージのテキスト（Claude Code の発言）
+- tool_use の name と input（Write のファイルパス、Bash のコマンド内容など）
+- **取れないもの**: 許可ダイアログの選択肢テキスト（UI 側で生成されるため JSONL に含まれない）
+
+### 操作方法（検証済み）
+
+- `tmux send-keys -t :<window> Enter` → Yes（デフォルト選択を送信）
+- `tmux send-keys -t :<window> S-Tab` → Always（未検証、要確認）
+- `tmux send-keys -t :<window> Escape` → No（未検証、要確認）
+- フルパス指定が必要（例: `/opt/homebrew/bin/tmux`）
+
+### 段階的な進め方
+
+1. **Step 1**: トランスクリプトの末尾を表示 + Yes/No ボタンだけの最小 UI
+2. **Step 2**: リアルタイム更新（WebSocket or SSE）
+3. **Step 3**: 複数セッションの一覧、ログ検索、通知設定の UI 化など → Dashboard へ育てる
+
+### 検証で得た知見
+
+- Claude Code の hooks は `Notification` イベントで `notification_type` と `message` を渡してくる
+- `notification_type: "permission_prompt"` の時、`transcript_path` から JSONL を読むと詳細が取れる
+- ただし hooks 経由だと情報が限定的で、トランスクリプト直読みの方が確実
+- StreamDeck Mobile（iOS）からシェルスクリプト実行は不可（引数も渡せない）
+- Mosh 接続 + tmux attach で iPhone からフル操作は可能（La Terminal で検証済み）
 
 ## Mobile App（iPhone / Apple Watch）
 
