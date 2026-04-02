@@ -180,7 +180,7 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
     sections.push("## 完了\n- 最終的な PR の URL を出力する".to_string());
 
     format!(
-        "{}\n\n---\n\n実装が完了したら、以下のレビューフローを実行すること:\n\n{}",
+        "{}\n\n---\n\n【必須】上記の作業が終わったら、以下のレビューフローを必ず最後まで実行すること。レビューフローを省略してはならない。\n\n{}",
         prompt,
         sections.join("\n\n")
     )
