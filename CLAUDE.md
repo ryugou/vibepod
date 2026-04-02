@@ -13,6 +13,7 @@
 
 ## レビューフロー
 
+
 実装が完了したら、以下のレビューフローを実行すること:
 
 ### 共通準備
@@ -20,8 +21,8 @@
 
 ### Codex Review（ローカル、コミット前）
 以下を指摘がなくなるまで繰り返す（最大 5 回）:
-1. Bash ツールで `codex review -c sandbox_mode=danger-full-access` を実行する（timeout: 600000 を必ず指定すること。デフォルトの 120 秒ではタイムアウトする）
-（重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内では Linux namespace が使えないため sandbox を無効化する）
+1. Bash ツールで `codex review -c sandbox_mode=danger-full-access -c approval_policy=never` を実行する（timeout: 600000 を必ず指定すること。デフォルトの 120 秒ではタイムアウトする）
+（重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内では Linux namespace が使えないため sandbox を無効化し、非対話実行のため approval も無効化する）
 2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了
 3. 指摘があれば該当箇所を修正する
 4. 手順 1 に戻る
