@@ -145,6 +145,7 @@ pub struct ContainerConfig {
     pub network_disabled: bool,
     pub setup_cmd: Option<String>,
     pub codex_auth: Option<String>,
+    pub extra_mounts: Vec<(String, String)>,
 }
 
 impl DockerRuntime {
@@ -273,6 +274,16 @@ impl DockerRuntime {
             mounts.push(Mount {
                 target: Some("/home/vibepod/.codex/auth.json".to_string()),
                 source: Some(codex_auth.clone()),
+                typ: Some(MountTypeEnum::BIND),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+
+        for (host, container) in &config.extra_mounts {
+            mounts.push(Mount {
+                target: Some(container.clone()),
+                source: Some(host.clone()),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(true),
                 ..Default::default()
@@ -444,6 +455,63 @@ impl DockerRuntime {
             .resize_container_tty(container_id, options)
             .await
             .context("Failed to resize container TTY")?;
+        Ok(())
+    }
+
+    pub async fn list_vibepod_containers(&self) -> Result<Vec<(String, String)>> {
+        let options = ListContainersOptions::<String> {
+            all: true,
+            ..Default::default()
+        };
+        let containers = self.docker.list_containers(Some(options)).await?;
+        let mut result = Vec::new();
+        for container in containers {
+            if let Some(names) = &container.names {
+                for name in names {
+                    let clean = name.trim_start_matches('/').to_string();
+                    if clean.starts_with("vibepod-") {
+                        let status = container.status.clone().unwrap_or_default();
+                        result.push((clean, status));
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    pub async fn find_container_by_name(&self, name: &str) -> Result<Option<String>> {
+        let options = ListContainersOptions::<String> {
+            all: true,
+            ..Default::default()
+        };
+        let containers = self.docker.list_containers(Some(options)).await?;
+        for container in containers {
+            if let Some(names) = &container.names {
+                for cname in names {
+                    if cname.trim_start_matches('/') == name {
+                        return Ok(container.id.clone());
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub async fn get_logs(&self, container_id: &str, tail: &str) -> Result<()> {
+        let options = LogsOptions::<String> {
+            follow: false,
+            stdout: true,
+            stderr: true,
+            tail: tail.to_string(),
+            ..Default::default()
+        };
+        let mut stream = self.docker.logs(container_id, Some(options));
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(output) => print!("{}", output),
+                Err(_) => break,
+            }
+        }
         Ok(())
     }
 

@@ -21,6 +21,20 @@ pub struct RunOptions {
     pub lang: Option<String>,
     pub worktree: bool,
     pub review: Option<String>,
+    pub mount: Vec<String>,
+}
+
+pub fn parse_mount_arg(arg: &str) -> anyhow::Result<(String, String)> {
+    if let Some((host, container)) = arg.split_once(':') {
+        Ok((host.to_string(), container.to_string()))
+    } else {
+        let path = std::path::Path::new(arg);
+        let filename = path
+            .file_name()
+            .context("Invalid mount path")?
+            .to_string_lossy();
+        Ok((arg.to_string(), format!("/mnt/{}", filename)))
+    }
 }
 
 struct RunContext {
@@ -42,6 +56,7 @@ struct RunContext {
     project_name: String,
     store: SessionStore,
     deferred_session: session::Session,
+    extra_mounts: Vec<(String, String)>,
 }
 
 pub fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static str)> {
@@ -130,8 +145,8 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
         sections.push(
             "## Codex Review（ローカル、コミット前）\n\
 以下を指摘がなくなるまで繰り返す（最大 3 回）:\n\
-1. Bash ツールで `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` を実行する\n\
-   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること）\n\
+1. Bash ツールで `codex review --dangerously-bypass-approvals-and-sandbox` を実行する\n\
+   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内で実行するため sandbox は不要）\n\
 2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
 3. 指摘があれば該当箇所を修正する\n\
 4. 手順 1 に戻る"
@@ -195,6 +210,7 @@ fn build_container_config(ctx: &RunContext, image: String, no_network: bool) -> 
         network_disabled: no_network,
         setup_cmd: ctx.setup_cmd.clone(),
         codex_auth: ctx.codex_auth.clone(),
+        extra_mounts: ctx.extra_mounts.clone(),
     }
 }
 
@@ -637,6 +653,14 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         None
     };
 
+    // Parse --mount arguments
+    let mut extra_mounts = Vec::new();
+    for arg in &opts.mount {
+        let parsed =
+            parse_mount_arg(arg).with_context(|| format!("Invalid --mount argument: {}", arg))?;
+        extra_mounts.push(parsed);
+    }
+
     Ok(Some(RunContext {
         runtime,
         container_name,
@@ -656,6 +680,7 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         project_name,
         store,
         deferred_session,
+        extra_mounts,
     }))
 }
 
@@ -833,6 +858,9 @@ async fn run_bridge(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
     println!("  │  Agent: Claude Code");
     println!("  │  Mode: {}", mode_label);
     println!("  │  Mount: {} → /workspace", ctx.effective_workspace);
+    for (host, container) in &ctx.extra_mounts {
+        println!("  │  Mount (ro): {} → {}", host, container);
+    }
     if !ctx.lang_display.is_empty() {
         println!("  │  Language: {}", ctx.lang_display);
     }
@@ -879,6 +907,9 @@ async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
     println!("  │  Agent: Claude Code");
     println!("  │  Mode: interactive");
     println!("  │  Mount: {} → /workspace", ctx.effective_workspace);
+    for (host, container) in &ctx.extra_mounts {
+        println!("  │  Mount (ro): {} → {}", host, container);
+    }
     if !ctx.lang_display.is_empty() {
         println!("  │  Language: {}", ctx.lang_display);
     }
@@ -901,6 +932,11 @@ async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
             "{}:/home/vibepod/.gitconfig:ro",
             gitconfig.display()
         ));
+    }
+    // Extra read-only mounts from --mount
+    for (host, container) in &ctx.extra_mounts {
+        docker_args.push("-v".to_string());
+        docker_args.push(format!("{}:{}:ro", host, container));
     }
     if let Some(ref temp_cj) = ctx.temp_claude_json {
         docker_args.push("-v".to_string());
@@ -964,6 +1000,9 @@ async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> Result<()> 
         println!("Agent: Claude Code");
         println!("Mode: {}", mode_label);
         println!("Mount: {} → /workspace", ctx.effective_workspace);
+        for (host, container) in &ctx.extra_mounts {
+            println!("Mount (ro): {} → {}", host, container);
+        }
         if !ctx.lang_display.is_empty() {
             println!("Language: {}", ctx.lang_display);
         }
@@ -976,6 +1015,9 @@ async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> Result<()> 
         println!("  │  Agent: Claude Code");
         println!("  │  Mode: {}", mode_label);
         println!("  │  Mount: {} → /workspace", ctx.effective_workspace);
+        for (host, container) in &ctx.extra_mounts {
+            println!("  │  Mount (ro): {} → {}", host, container);
+        }
         if !ctx.lang_display.is_empty() {
             println!("  │  Language: {}", ctx.lang_display);
         }

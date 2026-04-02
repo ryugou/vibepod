@@ -145,3 +145,91 @@ fn test_parse_run_without_review() {
         panic!("Expected Run command");
     }
 }
+
+#[test]
+fn test_parse_run_with_single_mount() {
+    let cli = Cli::parse_from([
+        "vibepod",
+        "run",
+        "--mount",
+        "/host/spec.md:/workspace/spec.md",
+    ]);
+    if let vibepod::cli::Commands::Run { mount, .. } = cli.command {
+        assert_eq!(mount, vec!["/host/spec.md:/workspace/spec.md"]);
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_with_multiple_mounts() {
+    let cli = Cli::parse_from(["vibepod", "run", "--mount", "/a:/b", "--mount", "/c:/d"]);
+    if let vibepod::cli::Commands::Run { mount, .. } = cli.command {
+        assert_eq!(mount, vec!["/a:/b", "/c:/d"]);
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_without_mount() {
+    let cli = Cli::parse_from(["vibepod", "run"]);
+    if let vibepod::cli::Commands::Run { mount, .. } = cli.command {
+        assert!(mount.is_empty());
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_ps_command() {
+    let cli = Cli::parse_from(["vibepod", "ps"]);
+    assert!(matches!(cli.command, vibepod::cli::Commands::Ps {}));
+}
+
+#[test]
+fn test_parse_logs_command_no_args() {
+    let cli = Cli::parse_from(["vibepod", "logs"]);
+    if let vibepod::cli::Commands::Logs {
+        container,
+        follow,
+        tail,
+    } = cli.command
+    {
+        assert_eq!(container, None);
+        assert!(!follow);
+        assert_eq!(tail, "100");
+    } else {
+        panic!("Expected Logs command");
+    }
+}
+
+#[test]
+fn test_parse_logs_command_with_container() {
+    let cli = Cli::parse_from(["vibepod", "logs", "vibepod-myproject-abc123"]);
+    if let vibepod::cli::Commands::Logs { container, .. } = cli.command {
+        assert_eq!(container, Some("vibepod-myproject-abc123".to_string()));
+    } else {
+        panic!("Expected Logs command");
+    }
+}
+
+#[test]
+fn test_parse_logs_command_with_follow() {
+    let cli = Cli::parse_from(["vibepod", "logs", "--follow"]);
+    if let vibepod::cli::Commands::Logs { follow, .. } = cli.command {
+        assert!(follow);
+    } else {
+        panic!("Expected Logs command");
+    }
+}
+
+#[test]
+fn test_parse_logs_command_with_tail() {
+    let cli = Cli::parse_from(["vibepod", "logs", "-n", "50"]);
+    if let vibepod::cli::Commands::Logs { tail, .. } = cli.command {
+        assert_eq!(tail, "50");
+    } else {
+        panic!("Expected Logs command");
+    }
+}

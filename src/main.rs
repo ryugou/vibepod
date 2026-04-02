@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
             lang,
             worktree,
             review,
+            mount,
         } => {
             vibepod::cli::run::execute(vibepod::cli::run::RunOptions {
                 resume,
@@ -45,8 +46,19 @@ async fn main() -> Result<()> {
                 lang,
                 worktree,
                 review,
+                mount,
             })
             .await?;
+        }
+        Commands::Ps {} => {
+            vibepod::cli::ps::execute().await?;
+        }
+        Commands::Logs {
+            container,
+            follow,
+            tail,
+        } => {
+            vibepod::cli::logs::execute(container, follow, tail).await?;
         }
         Commands::Restore {} => {
             vibepod::cli::restore::execute()?;
