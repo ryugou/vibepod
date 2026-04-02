@@ -20,7 +20,7 @@ pub struct RunOptions {
     pub llm_provider: String,
     pub lang: Option<String>,
     pub worktree: bool,
-    pub review: bool,
+    pub review: Option<String>,
 }
 
 struct RunContext {
@@ -36,6 +36,8 @@ struct RunContext {
     worktree_branch_name: Option<String>,
     worktree_dir_name: Option<String>,
     lang_display: String,
+    reviewers: Vec<String>,
+    codex_auth: Option<String>,
     session_id: String,
     project_name: String,
     store: SessionStore,
@@ -83,26 +85,66 @@ pub fn validate_slack_channel_id(id: &str) -> bool {
     (id.starts_with('C') || id.starts_with('G')) && id.len() >= 9
 }
 
-pub fn build_review_prompt(prompt: &str, review: bool) -> String {
-    if review {
-        format!(
-            "{}\n\n---\n\n\
-            実装が完了したら、以下のレビューフローを実行すること:\n\
-            1. 現在のブランチが main の場合は、`git checkout -b <適切なブランチ名>` で新しいフィーチャーブランチを作成する。main 以外のブランチにいる場合はそのまま使う\n\
-            2. 変更内容をコミットする（Conventional Commits 準拠）\n\
-            3. `git push -u origin <ブランチ名>` でリモートに push する\n\
-            4. `gh pr create` で PR を作成する（ベースブランチは main）\n\
-            5. `gh pr edit <PR番号> --add-reviewer copilot` で GitHub Copilot のレビューを依頼する\n\
-            6. Copilot のレビューが届くまで 30 秒間隔で最大 10 回 `gh api repos/{{owner}}/{{repo}}/pulls/{{number}}/reviews` を実行して確認する。\
-               `gh pr review` や `gh pr comment` などの書き込み系コマンドは絶対に使わないこと（意図しないレビューコメントが作成されるため）\n\
-            7. Copilot のレビューコメントがあれば内容を読み、指摘された問題を修正する\n\
-            8. 修正をコミットして `git push` で PR を更新する\n\
-            9. 最終的な PR の URL を出力する",
-            prompt
-        )
-    } else {
-        prompt.to_string()
+pub fn resolve_reviewers(review_arg: &Option<String>, config: &[String]) -> Vec<String> {
+    match review_arg {
+        None => vec![],                                                   // --review なし
+        Some(explicit) if !explicit.is_empty() => vec![explicit.clone()], // --review copilot
+        Some(_) => config.to_vec(), // --review（値なし）→ config から
     }
+}
+
+pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
+    if reviewers.is_empty() {
+        return prompt.to_string();
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+
+    // Codex review section
+    if reviewers.contains(&"codex".to_string()) {
+        sections.push(
+            "以下の Codex レビューフローを実行すること:\n\
+            1. 現在のブランチが main の場合は、新しいフィーチャーブランチを作成する\n\
+            2. 変更内容をコミットする（Conventional Commits 準拠）\n\
+            3. codex review を実行する\n\
+            4. レビューで指摘された問題があれば修正する\n\
+            5. 修正したら再度 codex review を実行する\n\
+            6. 指摘がなくなるまでステップ 4-5 を最大 3 回繰り返す\n\
+            7. git push -u origin <ブランチ名> でリモートに push する\n\
+            8. gh pr create で PR を作成する（ベースブランチは main）\n\
+            9. 最終的な PR の URL を出力する"
+                .to_string(),
+        );
+    }
+
+    // Copilot review section
+    if reviewers.contains(&"copilot".to_string()) {
+        sections.push(
+            "以下の Copilot レビューフローを実行すること:\n\
+            1. 現在のブランチが main の場合は、新しいフィーチャーブランチを作成する\n\
+            2. 変更内容をコミットする（Conventional Commits 準拠）\n\
+            3. git push -u origin <ブランチ名> でリモートに push する\n\
+            4. gh pr create で PR を作成する（ベースブランチは main）\n\
+            5. gh pr edit <PR番号> --add-reviewer copilot で Copilot レビューを依頼する\n\
+            6. 30 秒間隔で最大 10 回 gh api repos/{owner}/{repo}/pulls/{number}/reviews を実行して確認する\n\
+            7. レビューコメントがあれば修正する\n\
+            8. 修正をコミットして git push で PR を更新する\n\
+            9. gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST -f \"reviewers[]=copilot\" で re-review を依頼する\n\
+            10. 再度 30 秒間隔で最大 5 回レビュー結果を確認する\n\
+            11. 最終的な PR の URL を出力する"
+                .to_string(),
+        );
+    }
+
+    if sections.is_empty() {
+        return prompt.to_string();
+    }
+
+    format!(
+        "{}\n\n---\n\n実装が完了したら、{}",
+        prompt,
+        sections.join("\n\nその後、")
+    )
 }
 
 fn build_container_config(ctx: &RunContext, image: String, no_network: bool) -> ContainerConfig {
@@ -128,6 +170,7 @@ fn build_container_config(ctx: &RunContext, image: String, no_network: bool) -> 
         env_vars: ctx.resolved_env_vars.clone(),
         network_disabled: no_network,
         setup_cmd: ctx.setup_cmd.clone(),
+        codex_auth: ctx.codex_auth.clone(),
     }
 }
 
@@ -144,7 +187,7 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
     if opts.worktree && opts.prompt.is_none() {
         bail!("--worktree requires --prompt");
     }
-    if opts.review && opts.prompt.is_none() {
+    if opts.review.is_some() && opts.prompt.is_none() {
         bail!("--review requires --prompt");
     }
 
@@ -273,14 +316,19 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         (cwd_str.clone(), None, None)
     };
 
+    // Load vibepod project config
+    let config_dir_early = config::default_config_dir()?;
+    let vibepod_config = config::VibepodConfig::load(&cwd, &config_dir_early)?;
+
     // Language detection
-    let detected_langs: Vec<(String, &'static str)> = if opts.lang.is_none() {
+    let effective_lang = opts.lang.clone().or_else(|| vibepod_config.lang());
+    let detected_langs: Vec<(String, &'static str)> = if effective_lang.is_none() {
         detect_languages(&cwd)
     } else {
         Vec::new()
     };
 
-    let (lang_names, lang_display): (Vec<String>, String) = if let Some(ref l) = opts.lang {
+    let (lang_names, lang_display): (Vec<String>, String) = if let Some(ref l) = effective_lang {
         (vec![l.clone()], format!("{} (--lang)", l))
     } else if detected_langs.len() == 1 {
         let (name, file) = &detected_langs[0];
@@ -296,15 +344,62 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         (Vec::new(), String::new())
     };
 
+    // Resolve reviewers (before setup_cmd so codex can extend it)
+    let config_reviewers = vibepod_config.reviewers();
+    let mut reviewers = resolve_reviewers(&opts.review, &config_reviewers);
+    let review_explicit = opts
+        .review
+        .as_deref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    // Codex CLI availability check
+    if reviewers.contains(&"codex".to_string()) {
+        let codex_available = Command::new("which")
+            .arg("codex")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !codex_available {
+            if review_explicit {
+                bail!("Codex CLI is not installed. Install it with: npm install -g @openai/codex");
+            } else {
+                eprintln!("Warning: Codex CLI not found, skipping codex review");
+                reviewers.retain(|r| r != "codex");
+            }
+        }
+    }
+
+    // Codex auth mount path
+    let home_early = config::home_dir()?;
+    let codex_auth = if reviewers.contains(&"codex".to_string()) {
+        let codex_auth_path = home_early.join(".codex/auth.json");
+        if codex_auth_path.exists() {
+            Some(codex_auth_path.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let setup_cmd: Option<String> = {
-        let cmds: Vec<&str> = lang_names
+        let mut setup_parts: Vec<String> = lang_names
             .iter()
-            .filter_map(|l| get_lang_install_cmd(l))
+            .filter_map(|l| get_lang_install_cmd(l).map(|s| s.to_string()))
             .collect();
-        if cmds.is_empty() {
+        if reviewers.contains(&"codex".to_string()) {
+            let setup_cmd_contains_node = lang_names.contains(&"node".to_string());
+            if !setup_cmd_contains_node {
+                setup_parts.push("curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs".to_string());
+            }
+            setup_parts.push("npm install -g @openai/codex".to_string());
+        }
+        if setup_parts.is_empty() {
             None
         } else {
-            Some(cmds.join(" && "))
+            Some(setup_parts.join(" && "))
         }
     };
 
@@ -374,7 +469,7 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         claude_args.push("--resume".to_string());
     }
     if let Some(ref p) = opts.prompt {
-        let effective_prompt = build_review_prompt(p, opts.review);
+        let effective_prompt = build_review_prompt(p, &reviewers);
         claude_args.push("-p".to_string());
         claude_args.push(effective_prompt);
         claude_args.push("--output-format".to_string());
@@ -511,6 +606,8 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         worktree_branch_name,
         worktree_dir_name,
         lang_display,
+        reviewers,
+        codex_auth,
         session_id,
         project_name,
         store,
@@ -695,8 +792,8 @@ async fn run_bridge(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
     if !ctx.lang_display.is_empty() {
         println!("  │  Language: {}", ctx.lang_display);
     }
-    if opts.review {
-        println!("  │  Review: enabled (GitHub Copilot)");
+    if !ctx.reviewers.is_empty() {
+        println!("  │  Review: enabled ({})", ctx.reviewers.join(", "));
     }
     println!("  │");
 
@@ -826,8 +923,8 @@ async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> Result<()> 
         if !ctx.lang_display.is_empty() {
             println!("Language: {}", ctx.lang_display);
         }
-        if opts.review {
-            println!("Review: enabled (GitHub Copilot)");
+        if !ctx.reviewers.is_empty() {
+            println!("Review: enabled ({})", ctx.reviewers.join(", "));
         }
         println!();
     } else {

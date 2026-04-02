@@ -1,5 +1,6 @@
 use vibepod::cli::run::{
-    build_review_prompt, detect_languages, get_lang_install_cmd, validate_slack_channel_id,
+    build_review_prompt, detect_languages, get_lang_install_cmd, resolve_reviewers,
+    validate_slack_channel_id,
 };
 
 // --- detect_languages ---
@@ -58,19 +59,67 @@ fn test_lang_install_cmd_unknown() {
 // --- build_review_prompt ---
 
 #[test]
-fn test_review_prompt_injection() {
-    let result = build_review_prompt("my prompt", true);
+fn test_review_prompt_copilot() {
+    let reviewers = vec!["copilot".to_string()];
+    let result = build_review_prompt("my prompt", &reviewers);
     assert!(result.starts_with("my prompt"));
-    assert!(result.contains("レビューフロー"));
-    assert!(result.contains("git checkout -b"));
+    assert!(result.contains("Copilot レビューフロー"));
     assert!(result.contains("gh pr create"));
     assert!(result.contains("gh api repos/"));
+    assert!(result.contains("requested_reviewers"));
+}
+
+#[test]
+fn test_review_prompt_codex() {
+    let reviewers = vec!["codex".to_string()];
+    let result = build_review_prompt("my prompt", &reviewers);
+    assert!(result.starts_with("my prompt"));
+    assert!(result.contains("Codex レビューフロー"));
+    assert!(result.contains("codex review"));
+}
+
+#[test]
+fn test_review_prompt_both() {
+    let reviewers = vec!["codex".to_string(), "copilot".to_string()];
+    let result = build_review_prompt("my prompt", &reviewers);
+    assert!(result.contains("Codex レビューフロー"));
+    assert!(result.contains("Copilot レビューフロー"));
 }
 
 #[test]
 fn test_no_review_prompt_unchanged() {
-    let result = build_review_prompt("my prompt", false);
+    let result = build_review_prompt("my prompt", &[]);
     assert_eq!(result, "my prompt");
+}
+
+// --- resolve_reviewers ---
+
+#[test]
+fn test_resolve_reviewers_none() {
+    let config = vec!["copilot".to_string()];
+    let result = resolve_reviewers(&None, &config);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_resolve_reviewers_explicit() {
+    let config = vec!["copilot".to_string()];
+    let result = resolve_reviewers(&Some("codex".to_string()), &config);
+    assert_eq!(result, vec!["codex".to_string()]);
+}
+
+#[test]
+fn test_resolve_reviewers_from_config() {
+    let config = vec!["copilot".to_string()];
+    let result = resolve_reviewers(&Some("".to_string()), &config);
+    assert_eq!(result, vec!["copilot".to_string()]);
+}
+
+#[test]
+fn test_resolve_reviewers_empty_config() {
+    let config: Vec<String> = vec![];
+    let result = resolve_reviewers(&Some("".to_string()), &config);
+    assert!(result.is_empty());
 }
 
 // --- validate_slack_channel_id ---
