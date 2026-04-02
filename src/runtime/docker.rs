@@ -19,14 +19,12 @@ pub fn format_stream_event(line: &str) -> StreamEvent {
                         .and_then(|m| m.get("content"))
                         .and_then(|c| c.as_array())
                     {
+                        let mut lines: Vec<String> = Vec::new();
                         for item in contents {
                             match item.get("type").and_then(|t| t.as_str()) {
                                 Some("text") => {
                                     if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                        return StreamEvent::Display(format!(
-                                            "  │  [assistant] {}",
-                                            text
-                                        ));
+                                        lines.push(format!("  │  [assistant] {}", text));
                                     }
                                 }
                                 Some("tool_use") => {
@@ -59,13 +57,16 @@ pub fn format_stream_event(line: &str) -> StreamEvent {
                                     } else {
                                         input.to_string()
                                     };
-                                    return StreamEvent::Display(format!(
+                                    lines.push(format!(
                                         "  │  [tool_use] {} {}",
                                         name, input_display
                                     ));
                                 }
                                 _ => {}
                             }
+                        }
+                        if !lines.is_empty() {
+                            return StreamEvent::Display(lines.join("\n"));
                         }
                     }
                     StreamEvent::Skip
@@ -214,7 +215,7 @@ impl DockerRuntime {
             if let Some(names) = &container.names {
                 for name in names {
                     let clean_name = name.trim_start_matches('/').to_string();
-                    if clean_name.starts_with(name_prefix) {
+                    if clean_name.starts_with(&format!("{}-", name_prefix)) {
                         if let Some(id) = &container.id {
                             return Ok(Some((id.clone(), clean_name)));
                         }

@@ -38,6 +38,8 @@ struct RunContext {
     lang_display: String,
     session_id: String,
     project_name: String,
+    store: SessionStore,
+    deferred_session: session::Session,
 }
 
 pub fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static str)> {
@@ -78,7 +80,7 @@ pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
 }
 
 pub fn validate_slack_channel_id(id: &str) -> bool {
-    id.starts_with('C') && id.len() >= 9
+    (id.starts_with('C') || id.starts_with('G')) && id.len() >= 9
 }
 
 pub fn build_review_prompt(prompt: &str, review: bool) -> String {
@@ -193,8 +195,10 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         opts.prompt.as_deref().unwrap_or("").to_string()
     };
 
+    // Session recording is deferred until the container actually starts.
+    // We prepare the data here but call store.add() later in each run_* function.
     let session_id = session::generate_session_id();
-    let session_record = session::Session {
+    let deferred_session = session::Session {
         id: session_id.clone(),
         started_at: chrono::Local::now().to_rfc3339(),
         head_before,
@@ -203,7 +207,6 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         claude_session_path: None,
         restored: false,
     };
-    store.add(session_record)?;
 
     let project_name = cwd
         .file_name()
@@ -510,6 +513,8 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         lang_display,
         session_id,
         project_name,
+        store,
+        deferred_session,
     }))
 }
 
@@ -703,6 +708,9 @@ async fn run_bridge(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
         .create_and_start_container(&container_config)
         .await?;
 
+    // Record session now that container has actually started
+    ctx.store.add(ctx.deferred_session.clone())?;
+
     println!("  ◇  Container started: {}", ctx.container_name);
     println!("  │  Bridge mode active — Slack notifications enabled");
     println!("  └\n");
@@ -777,6 +785,9 @@ async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
     docker_args.push("claude".to_string());
     docker_args.extend(ctx.claude_args.clone());
 
+    // Record session now that container is about to start
+    ctx.store.add(ctx.deferred_session.clone())?;
+
     println!("  ◇  Container: {}", ctx.container_name);
     println!("  └\n");
 
@@ -837,6 +848,9 @@ async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> Result<()> 
         .runtime
         .create_and_start_container(&container_config)
         .await?;
+
+    // Record session now that container has actually started
+    ctx.store.add(ctx.deferred_session.clone())?;
 
     if opts.prompt.is_some() {
         println!("Container started: {}", ctx.container_name);

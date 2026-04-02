@@ -13,13 +13,20 @@ pub fn execute() -> Result<()> {
         bail!("Not a git repository. Run this command inside a git-initialized directory.");
     }
 
-    // 2. Ensure .vibepod/ is not tracked by git
+    // 2. Ensure .vibepod/ is ignored by git (not just untracked)
     let tracking_check = std::process::Command::new("git")
         .args(["ls-files", ".vibepod"])
         .current_dir(&cwd)
         .output()?;
     if !tracking_check.stdout.is_empty() {
         bail!(".vibepod/ is tracked by git. Add it to .gitignore.");
+    }
+    let ignore_check = std::process::Command::new("git")
+        .args(["check-ignore", "-q", ".vibepod"])
+        .current_dir(&cwd)
+        .output()?;
+    if !ignore_check.status.success() {
+        bail!(".vibepod/ is not in .gitignore. Add it to prevent `git clean` from deleting session history.");
     }
 
     // 3. Load sessions
