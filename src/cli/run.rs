@@ -124,10 +124,10 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
 
     // Codex review フェーズ（ローカル、コミット前）
     if has_codex {
-        steps.push("シェルで `codex review` コマンドを実行する（Bash ツールで実行すること。Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI のコマンドを直接実行する）".to_string());
+        steps.push("シェルで `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` コマンドを実行する（Bash ツールで実行すること。Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI のコマンドを直接実行する。コンテナ内で実行するため sandbox 権限の付与が必要）".to_string());
         steps.push("Codex review で指摘された問題があれば修正する".to_string());
         steps.push(
-            "修正したら再度 `codex review` コマンドを実行する。指摘がなくなるまで最大 3 回繰り返す"
+            "修正したら再度 `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` コマンドを実行する。指摘がなくなるまで最大 3 回繰り返す"
                 .to_string(),
         );
     }
@@ -425,6 +425,10 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
                 setup_parts.push("curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs".to_string());
             }
             setup_parts.push("sudo npm install -g @openai/codex".to_string());
+            // Fix ownership of ~/.codex/ which Docker creates as root when bind-mounting auth.json
+            setup_parts.push(
+                "sudo chown -R $(id -u):$(id -g) $HOME/.codex 2>/dev/null || true".to_string(),
+            );
         }
         if setup_parts.is_empty() {
             None
