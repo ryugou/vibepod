@@ -145,8 +145,8 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
         sections.push(
             "## Codex Review（ローカル、コミット前）\n\
 以下を指摘がなくなるまで繰り返す（最大 5 回）:\n\
-1. Bash ツールで `codex review` を実行する（timeout: 600000 を必ず指定すること。デフォルトの 120 秒ではタイムアウトする）\n\
-   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること）\n\
+1. Bash ツールで `codex review -c sandbox_mode=danger-full-access` を実行する（timeout: 600000 を必ず指定すること。デフォルトの 120 秒ではタイムアウトする）\n\
+   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内では Linux namespace が使えないため sandbox を無効化する）\n\
 2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
 3. 指摘があれば該当箇所を修正する\n\
 4. 手順 1 に戻る"
