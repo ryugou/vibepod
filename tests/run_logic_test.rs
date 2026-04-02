@@ -65,9 +65,9 @@ fn test_review_prompt_copilot() {
     assert!(result.starts_with("my prompt"));
     assert!(result.contains("レビューフロー"));
     assert!(result.contains("gh pr create"));
-    assert!(result.contains("requested_reviewers"));
-    // Copilot re-review ループ
-    assert!(result.contains("手順 1 に戻る"));
+    assert!(result.contains("add-reviewer copilot"));
+    // 1ラウンドのみ（re-review 未サポート）
+    assert!(result.contains("1ラウンド"));
     // インラインコメント取得 API
     assert!(result.contains("pulls/{number}/comments"));
 }

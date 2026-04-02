@@ -142,18 +142,15 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
             .to_string(),
     );
 
-    // Copilot review フェーズ（PR 上）
+    // Copilot review フェーズ（PR 上、1ラウンドのみ。API での re-review は未サポート）
     if has_copilot {
-        sections.push("## Copilot Review（PR 上）\n\
-            以下を指摘がなくなるまで繰り返す（最大 3 ラウンド）:\n\
-            1. `gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST -f \"reviewers[]=copilot\"` でレビューを依頼する\n\
-               （初回は `gh pr edit <PR番号> --add-reviewer copilot` でも可）\n\
+        sections.push("## Copilot Review（PR 上、1ラウンド）\n\
+            1. `gh pr edit <PR番号> --add-reviewer copilot` で Copilot レビューを依頼する\n\
             2. 30 秒間隔で最大 10 回 `gh api repos/{owner}/{repo}/pulls/{number}/reviews` をポーリングする\n\
                （重要: `gh pr review` や `gh pr comment` 等の書き込み系コマンドは絶対に使わないこと）\n\
             3. レビュー結果を確認する。インラインコメントは `gh api repos/{owner}/{repo}/pulls/{number}/comments` で取得する\n\
-            4. 指摘がなければこのフェーズ完了\n\
-            5. 指摘があれば修正し、コミットして `git push` する\n\
-            6. 手順 1 に戻る（re-review を依頼する）".to_string());
+            4. 指摘があれば修正し、コミットして `git push` する\n\
+            注意: Copilot の re-review は API から自動でリクエストできないため、1ラウンドで終了する".to_string());
     }
 
     sections.push("## 完了\n- 最終的な PR の URL を出力する".to_string());
