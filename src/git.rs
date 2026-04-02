@@ -44,11 +44,24 @@ pub fn get_remote_url(path: &Path) -> Option<String> {
         .ok()
         .and_then(|o| {
             if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                Some(sanitize_remote_url(&url))
             } else {
                 None
             }
         })
+}
+
+/// Remove credentials from remote URLs (e.g., x-access-token:gho_xxx@)
+fn sanitize_remote_url(url: &str) -> String {
+    if let Some(at_pos) = url.find('@') {
+        if let Some(proto_end) = url.find("://") {
+            let prefix = &url[..proto_end + 3];
+            let after_at = &url[at_pos + 1..];
+            return format!("{}{}", prefix, after_at);
+        }
+    }
+    url.to_string()
 }
 
 pub fn commit_exists(path: &Path, hash: &str) -> bool {

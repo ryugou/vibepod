@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # vibepod ユーザーを作成し、ホストの uid/gid に合わせる
 RUN groupadd --non-unique -g ${HOST_GID} vibepod && \
-    useradd -m -u ${HOST_UID} -g ${HOST_GID} -s /bin/bash vibepod
+    useradd -m -u ${HOST_UID} -g ${HOST_GID} -s /bin/bash vibepod && \
+    echo "vibepod ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 USER vibepod
 ENV PATH=/home/vibepod/.local/bin:$PATH

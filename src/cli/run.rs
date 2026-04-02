@@ -70,11 +70,11 @@ pub fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static st
 
 pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
     match lang {
-        "rust" => Some("apt-get update && apt-get install -y build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && . $HOME/.cargo/env"),
-        "node" => Some("curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs"),
-        "python" => Some("apt-get update && apt-get install -y python3 python3-pip python3-venv"),
-        "go" => Some("ARCH=$(uname -m) && GOARCH=$([ \"$ARCH\" = \"aarch64\" ] && echo arm64 || echo amd64) && curl -fsSL https://go.dev/dl/go1.24.2.linux-${GOARCH}.tar.gz | tar -C /usr/local -xzf - && export PATH=$PATH:/usr/local/go/bin"),
-        "java" => Some("apt-get update && apt-get install -y default-jdk"),
+        "rust" => Some("sudo apt-get update && sudo apt-get install -y build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && . $HOME/.cargo/env"),
+        "node" => Some("curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs"),
+        "python" => Some("sudo apt-get update && sudo apt-get install -y python3 python3-pip python3-venv"),
+        "go" => Some("ARCH=$(uname -m) && GOARCH=$([ \"$ARCH\" = \"aarch64\" ] && echo arm64 || echo amd64) && curl -fsSL https://go.dev/dl/go1.24.2.linux-${GOARCH}.tar.gz | sudo tar -C /usr/local -xzf - && export PATH=$PATH:/usr/local/go/bin"),
+        "java" => Some("sudo apt-get update && sudo apt-get install -y default-jdk"),
         _ => None,
     }
 }
