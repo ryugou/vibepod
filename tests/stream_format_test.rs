@@ -103,6 +103,23 @@ fn test_format_invalid_json() {
 }
 
 #[test]
+fn test_format_tool_use_truncation_multibyte() {
+    // 81文字の日本語文字列（マルチバイト）でパニックしないことを確認
+    let long_jp: String = "あ".repeat(81);
+    let line = format!(
+        r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Edit","input":{{"old_string":"{}"}}}}]}}}}"#,
+        long_jp
+    );
+    match format_stream_event(&line) {
+        StreamEvent::Display(s) => {
+            assert!(s.contains("[tool_use] Edit"));
+            assert!(s.contains("...\""), "Expected truncation with '...'");
+        }
+        other => panic!("Expected Display, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_format_multiple_content_blocks() {
     let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Let me check"},{"type":"tool_use","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#;
     match format_stream_event(line) {
