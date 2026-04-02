@@ -297,8 +297,7 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
 
     // 4. Check for existing container
     let name_prefix = format!("vibepod-{}", project_name);
-    if let Some((existing_id, existing_name)) =
-        runtime.find_running_container(&name_prefix).await?
+    if let Some((existing_id, existing_name)) = runtime.find_running_container(&name_prefix).await?
     {
         if opts.bridge {
             // bridge モードでは既存コンテナを置き換える（bridge は新規コンテナの attach が必要）
