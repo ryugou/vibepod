@@ -117,52 +117,51 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
         return prompt.to_string();
     }
 
-    let mut steps: Vec<String> = Vec::new();
+    let mut sections: Vec<String> = Vec::new();
 
-    // ブランチ作成（共通）
-    steps.push("現在のブランチが main の場合は、`git checkout -b <適切なブランチ名>` で新しいフィーチャーブランチを作成する。main 以外のブランチにいる場合はそのまま使う".to_string());
+    sections.push("## 共通準備\n\
+        - 現在のブランチが main の場合は `git checkout -b <適切なブランチ名>` で新しいブランチを作成する".to_string());
 
     // Codex review フェーズ（ローカル、コミット前）
     if has_codex {
-        steps.push("シェルで `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` コマンドを実行する（Bash ツールで実行すること。Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI のコマンドを直接実行する。コンテナ内で実行するため sandbox 権限の付与が必要）".to_string());
-        steps.push("Codex review で指摘された問題があれば修正する".to_string());
-        steps.push(
-            "修正したら再度 `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` コマンドを実行する。指摘がなくなるまで最大 3 回繰り返す"
-                .to_string(),
-        );
+        sections.push("## Codex Review（ローカル、コミット前）\n\
+            以下を指摘がなくなるまで繰り返す（最大 3 回）:\n\
+            1. Bash ツールで `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` を実行する\n\
+               （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること）\n\
+            2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
+            3. 指摘があれば該当箇所を修正する\n\
+            4. 手順 1 に戻る".to_string());
     }
 
-    // コミット + push + PR 作成（共通）
-    steps.push("変更内容をコミットする（Conventional Commits 準拠）".to_string());
-    steps.push("`git push -u origin <ブランチ名>` でリモートに push する".to_string());
-    steps.push("`gh pr create` で PR を作成する（ベースブランチは main）".to_string());
+    // コミット + push + PR 作成
+    sections.push(
+        "## コミットと PR 作成\n\
+        1. 変更内容をコミットする（Conventional Commits 準拠）\n\
+        2. `git push -u origin <ブランチ名>` でリモートに push する\n\
+        3. `gh pr create --base main` で PR を作成する"
+            .to_string(),
+    );
 
     // Copilot review フェーズ（PR 上）
     if has_copilot {
-        steps.push(
-            "`gh pr edit <PR番号> --add-reviewer copilot` で Copilot レビューを依頼する"
-                .to_string(),
-        );
-        steps.push("30 秒間隔で最大 10 回 `gh api repos/{owner}/{repo}/pulls/{number}/reviews` を実行して確認する。`gh pr review` や `gh pr comment` などの書き込み系コマンドは絶対に使わないこと".to_string());
-        steps.push("レビューコメントがあれば修正する".to_string());
-        steps.push("修正をコミットして `git push` で PR を更新する".to_string());
-        steps.push("`gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST -f \"reviewers[]=copilot\"` で re-review を依頼する".to_string());
-        steps.push("再度 30 秒間隔で最大 5 回レビュー結果を確認する".to_string());
+        sections.push("## Copilot Review（PR 上）\n\
+            以下を指摘がなくなるまで繰り返す（最大 3 ラウンド）:\n\
+            1. `gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST -f \"reviewers[]=copilot\"` でレビューを依頼する\n\
+               （初回は `gh pr edit <PR番号> --add-reviewer copilot` でも可）\n\
+            2. 30 秒間隔で最大 10 回 `gh api repos/{owner}/{repo}/pulls/{number}/reviews` をポーリングする\n\
+               （重要: `gh pr review` や `gh pr comment` 等の書き込み系コマンドは絶対に使わないこと）\n\
+            3. レビュー結果を確認する。インラインコメントは `gh api repos/{owner}/{repo}/pulls/{number}/comments` で取得する\n\
+            4. 指摘がなければこのフェーズ完了\n\
+            5. 指摘があれば修正し、コミットして `git push` する\n\
+            6. 手順 1 に戻る（re-review を依頼する）".to_string());
     }
 
-    // 最終出力
-    steps.push("最終的な PR の URL を出力する".to_string());
-
-    let numbered: Vec<String> = steps
-        .iter()
-        .enumerate()
-        .map(|(i, s)| format!("{}. {}", i + 1, s))
-        .collect();
+    sections.push("## 完了\n- 最終的な PR の URL を出力する".to_string());
 
     format!(
-        "{}\n\n---\n\n実装が完了したら、以下のレビューフローを実行すること:\n{}",
+        "{}\n\n---\n\n実装が完了したら、以下のレビューフローを実行すること:\n\n{}",
         prompt,
-        numbered.join("\n")
+        sections.join("\n\n")
     )
 }
 
