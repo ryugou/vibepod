@@ -1,138 +1,8 @@
 use anyhow::{Context, Result};
-
-#[derive(Debug)]
-pub enum StreamEvent {
-    Display(String),
-    Result(String),
-    Skip,
-    PassThrough(String),
-}
-
-pub fn format_stream_event(line: &str) -> StreamEvent {
-    match serde_json::from_str::<serde_json::Value>(line) {
-        Ok(json) => {
-            let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match event_type {
-                "assistant" => {
-                    if let Some(contents) = json
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_array())
-                    {
-                        let mut lines: Vec<String> = Vec::new();
-                        for item in contents {
-                            match item.get("type").and_then(|t| t.as_str()) {
-                                Some("text") => {
-                                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                        lines.push(format!("  │  [assistant] {}", text));
-                                    }
-                                }
-                                Some("tool_use") => {
-                                    let name = item
-                                        .get("name")
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("unknown");
-                                    let input = item
-                                        .get("input")
-                                        .cloned()
-                                        .unwrap_or(serde_json::Value::Null);
-                                    let input_display = if let Some(obj) = input.as_object() {
-                                        let pairs: Vec<String> = obj
-                                            .iter()
-                                            .map(|(k, v)| {
-                                                let val = v
-                                                    .as_str()
-                                                    .map(|s| {
-                                                        let mut truncated = String::new();
-                                                        let mut count = 0usize;
-                                                        let mut over_limit = false;
-                                                        for ch in s.chars() {
-                                                            if count < 77 {
-                                                                truncated.push(ch);
-                                                            }
-                                                            count += 1;
-                                                            if count > 80 {
-                                                                over_limit = true;
-                                                                break;
-                                                            }
-                                                        }
-                                                        if over_limit {
-                                                            format!("\"{}...\"", truncated)
-                                                        } else {
-                                                            format!("\"{}\"", s)
-                                                        }
-                                                    })
-                                                    .unwrap_or_else(|| v.to_string());
-                                                format!("{}: {}", k, val)
-                                            })
-                                            .collect();
-                                        format!("{{ {} }}", pairs.join(", "))
-                                    } else {
-                                        input.to_string()
-                                    };
-                                    lines.push(format!(
-                                        "  │  [tool_use] {} {}",
-                                        name, input_display
-                                    ));
-                                }
-                                _ => {}
-                            }
-                        }
-                        if !lines.is_empty() {
-                            return StreamEvent::Display(lines.join("\n"));
-                        }
-                    }
-                    StreamEvent::Skip
-                }
-                "result" => {
-                    if let Some(result_val) = json.get("result").and_then(|r| r.as_str()) {
-                        StreamEvent::Result(result_val.to_string())
-                    } else {
-                        StreamEvent::Skip
-                    }
-                }
-                "rate_limit_event" => {
-                    if let Some(info) = json.get("rate_limit_info") {
-                        let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                        if status != "allowed" {
-                            let resets_at =
-                                info.get("resetsAt").and_then(|r| r.as_str()).unwrap_or("");
-                            let limit_type = info
-                                .get("rateLimitType")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("");
-                            StreamEvent::Display(format!(
-                                "  │  [rate_limit] status: {}, resets_at: {}, type: {}",
-                                status, resets_at, limit_type
-                            ))
-                        } else {
-                            StreamEvent::Skip
-                        }
-                    } else {
-                        StreamEvent::Skip
-                    }
-                }
-                _ => StreamEvent::Skip,
-            }
-        }
-        Err(_) => StreamEvent::PassThrough(line.to_string()),
-    }
-}
-use bollard::container::{
-    AttachContainerOptions, AttachContainerResults, Config, CreateContainerOptions,
-    ListContainersOptions, LogsOptions, RemoveContainerOptions, ResizeContainerTtyOptions,
-    StartContainerOptions, StopContainerOptions, WaitContainerOptions,
-};
-use bollard::image::BuildImageOptions;
-use bollard::models::{HostConfig, Mount, MountTypeEnum};
-use bollard::Docker;
-use futures_util::StreamExt;
 use std::collections::HashMap;
+use std::process::{Command, Stdio};
 
-#[derive(Clone)]
-pub struct DockerRuntime {
-    docker: Docker,
-}
+pub struct DockerRuntime;
 
 pub struct ContainerConfig {
     pub image: String,
@@ -148,18 +18,81 @@ pub struct ContainerConfig {
     pub extra_mounts: Vec<(String, String)>,
 }
 
+impl ContainerConfig {
+    pub fn to_docker_args(&self, interactive: bool) -> Vec<String> {
+        let mut args = vec!["run".to_string()];
+        if interactive {
+            args.push("-it".to_string());
+            args.push("--rm".to_string());
+        } else {
+            args.push("-d".to_string());
+        }
+        args.push("--name".to_string());
+        args.push(self.container_name.clone());
+        args.push("-v".to_string());
+        args.push(format!("{}:/workspace", self.workspace_path));
+
+        if let Some(ref gitconfig) = self.gitconfig {
+            args.push("-v".to_string());
+            args.push(format!("{}:/home/vibepod/.gitconfig:ro", gitconfig));
+        }
+
+        for (host, container) in &self.extra_mounts {
+            args.push("-v".to_string());
+            args.push(format!("{}:{}:ro", host, container));
+        }
+
+        if let Some(ref claude_json) = self.claude_json {
+            args.push("-v".to_string());
+            args.push(format!("{}:/home/vibepod/.claude.json", claude_json));
+        }
+
+        if let Some(ref codex_auth) = self.codex_auth {
+            args.push("-v".to_string());
+            args.push(format!("{}:/home/vibepod/.codex/auth.json:ro", codex_auth));
+        }
+
+        if self.network_disabled {
+            args.push("--network".to_string());
+            args.push("none".to_string());
+        }
+
+        for env_var in &self.env_vars {
+            args.push("-e".to_string());
+            args.push(env_var.clone());
+        }
+        args.push("-e".to_string());
+        args.push("TERM=xterm-256color".to_string());
+
+        args.push(self.image.clone());
+
+        if let Some(ref setup) = self.setup_cmd {
+            args.push("sh".to_string());
+            args.push("-c".to_string());
+            args.push(format!("{} && exec \"$@\"", setup));
+            args.push("sh".to_string());
+        }
+        args.extend(self.args.clone());
+
+        args
+    }
+}
+
 impl DockerRuntime {
     pub async fn new() -> Result<Self> {
-        let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker. Is Docker Desktop or OrbStack running?")?;
-        Ok(Self { docker })
+        Ok(Self)
     }
 
     pub async fn ping(&self) -> Result<()> {
-        self.docker
-            .ping()
-            .await
-            .context("Docker is not responding")?;
+        let output = Command::new("docker")
+            .args(["info"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .context("Failed to run docker info. Is Docker Desktop or OrbStack running?")?;
+        if !output.status.success() {
+            anyhow::bail!("Docker is not responding. Is Docker Desktop or OrbStack running?");
+        }
         Ok(())
     }
 
@@ -169,51 +102,60 @@ impl DockerRuntime {
         image_name: &str,
         build_args: HashMap<String, String>,
     ) -> Result<()> {
-        let mut header = tar::Header::new_gnu();
-        let dockerfile_bytes = dockerfile_content.as_bytes();
-        header.set_path("Dockerfile")?;
-        header.set_size(dockerfile_bytes.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
+        use std::io::Write as IoWrite;
 
-        let mut tar_builder = tar::Builder::new(Vec::new());
-        tar_builder.append(&header, dockerfile_bytes)?;
-        let tar_data = tar_builder.into_inner()?;
+        let temp_dir = std::env::temp_dir().join("vibepod-build");
+        std::fs::create_dir_all(&temp_dir)?;
+        let dockerfile_path = temp_dir.join("Dockerfile");
+        let mut file = std::fs::File::create(&dockerfile_path)?;
+        file.write_all(dockerfile_content.as_bytes())?;
 
-        let options = BuildImageOptions {
-            t: image_name,
-            buildargs: build_args
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect(),
-            ..Default::default()
-        };
+        let mut args = vec![
+            "build".to_string(),
+            "-f".to_string(),
+            dockerfile_path.to_string_lossy().to_string(),
+            "-t".to_string(),
+            image_name.to_string(),
+        ];
 
-        let mut stream = self
-            .docker
-            .build_image(options, None, Some(tar_data.into()));
+        for (k, v) in &build_args {
+            args.push("--build-arg".to_string());
+            args.push(format!("{}={}", k, v));
+        }
 
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(output) => {
-                    if let Some(stream) = output.stream {
-                        print!("{}", stream);
-                    }
-                    if let Some(error) = output.error {
-                        anyhow::bail!("Build error: {}", error);
-                    }
-                }
-                Err(e) => anyhow::bail!("Build failed: {}", e),
-            }
+        args.push(temp_dir.to_string_lossy().to_string());
+
+        let status = Command::new("docker")
+            .args(&args)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to run docker build")?;
+
+        if !status.success() {
+            anyhow::bail!("docker build failed");
         }
 
         Ok(())
     }
 
     pub async fn image_exists(&self, image_name: &str) -> Result<bool> {
-        match self.docker.inspect_image(image_name).await {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+        let output = Command::new("docker")
+            .args(["inspect", "--type", "image", image_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .context("Failed to run docker inspect")?;
+
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such image") || stderr.contains("No such object") {
+            Ok(false)
+        } else {
+            anyhow::bail!("docker inspect failed: {}", stderr.trim())
         }
     }
 
@@ -221,258 +163,60 @@ impl DockerRuntime {
         &self,
         name_prefix: &str,
     ) -> Result<Option<(String, String)>> {
-        let options = ListContainersOptions::<String> {
-            all: false,
-            ..Default::default()
-        };
-        let containers = self.docker.list_containers(Some(options)).await?;
-        for container in containers {
-            if let Some(names) = &container.names {
-                for name in names {
-                    let clean_name = name.trim_start_matches('/').to_string();
-                    if clean_name.starts_with(&format!("{}-", name_prefix)) {
-                        if let Some(id) = &container.id {
-                            return Ok(Some((id.clone(), clean_name)));
-                        }
-                    }
+        let filter = format!("name={}-", name_prefix);
+        let output = Command::new("docker")
+            .args(["ps", "--filter", &filter, "--format", "{{.ID}}\t{{.Names}}"])
+            .output()
+            .context("Failed to run docker ps")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker ps failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let prefix_with_dash = format!("{}-", name_prefix);
+        for line in stdout.lines() {
+            if let Some((id, name)) = line.split_once('\t') {
+                if name.starts_with(&prefix_with_dash) {
+                    return Ok(Some((id.to_string(), name.to_string())));
                 }
             }
         }
         Ok(None)
     }
 
-    pub async fn create_and_start_container(&self, config: &ContainerConfig) -> Result<String> {
-        let mut mounts = vec![Mount {
-            target: Some("/workspace".to_string()),
-            source: Some(config.workspace_path.clone()),
-            typ: Some(MountTypeEnum::BIND),
-            read_only: Some(false),
-            ..Default::default()
-        }];
-
-        if let Some(ref claude_json_path) = config.claude_json {
-            mounts.push(Mount {
-                target: Some("/home/vibepod/.claude.json".to_string()),
-                source: Some(claude_json_path.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(false),
-                ..Default::default()
-            });
-        }
-
-        if let Some(ref gitconfig_path) = config.gitconfig {
-            mounts.push(Mount {
-                target: Some("/home/vibepod/.gitconfig".to_string()),
-                source: Some(gitconfig_path.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
-                ..Default::default()
-            });
-        }
-
-        if let Some(ref codex_auth) = config.codex_auth {
-            mounts.push(Mount {
-                target: Some("/home/vibepod/.codex/auth.json".to_string()),
-                source: Some(codex_auth.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
-                ..Default::default()
-            });
-        }
-
-        for (host, container) in &config.extra_mounts {
-            mounts.push(Mount {
-                target: Some(container.clone()),
-                source: Some(host.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
-                ..Default::default()
-            });
-        }
-
-        let host_config = HostConfig {
-            mounts: Some(mounts),
-            network_mode: if config.network_disabled {
-                Some("none".to_string())
-            } else {
-                None
-            },
-            ..Default::default()
-        };
-
-        let mut env = config.env_vars.clone();
-        env.push("TERM=xterm-256color".to_string());
-
-        let cmd = if let Some(ref setup) = config.setup_cmd {
-            let mut result = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!("{} && exec \"$@\"", setup),
-                "sh".to_string(),
-            ];
-            result.extend(config.args.clone());
-            result
-        } else {
-            config.args.clone()
-        };
-
-        let container_config = Config {
-            image: Some(config.image.clone()),
-            cmd: Some(cmd),
-            host_config: Some(host_config),
-            env: Some(env),
-            tty: Some(true),
-            open_stdin: Some(true),
-            attach_stdin: Some(true),
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            ..Default::default()
-        };
-
-        let options = CreateContainerOptions {
-            name: config.container_name.clone(),
-            ..Default::default()
-        };
-
-        let response = self
-            .docker
-            .create_container(Some(options), container_config)
-            .await
-            .context("Failed to create container")?;
-
-        self.docker
-            .start_container(&response.id, None::<StartContainerOptions<String>>)
-            .await
-            .context("Failed to start container")?;
-
-        Ok(response.id)
-    }
-
-    pub async fn stream_logs(&self, container_id: &str) -> Result<()> {
-        let options = LogsOptions::<String> {
-            follow: true,
-            stdout: true,
-            stderr: true,
-            ..Default::default()
-        };
-
-        let mut stream = self.docker.logs(container_id, Some(options));
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(output) => print!("{}", output),
-                Err(_) => {
-                    // Stream closed — container exited, this is expected
-                    break;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn stream_logs_formatted(&self, container_id: &str) -> Result<Option<String>> {
-        let separator = "────────────────────────────────────────────────────────";
-        println!("{}", separator);
-
-        let options = LogsOptions::<String> {
-            follow: true,
-            stdout: true,
-            stderr: true,
-            ..Default::default()
-        };
-
-        let mut stream = self.docker.logs(container_id, Some(options));
-        let mut result_text: Option<String> = None;
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(output) => {
-                    let line = output.to_string();
-                    let trimmed = line.trim_end_matches('\n');
-                    match format_stream_event(trimmed) {
-                        StreamEvent::Display(s) => println!("{}", s),
-                        StreamEvent::Result(s) => result_text = Some(s),
-                        StreamEvent::Skip => {}
-                        StreamEvent::PassThrough(_) => print!("{}", output),
-                    }
-                }
-                Err(_) => {
-                    break;
-                }
-            }
-        }
-
-        println!("{}", separator);
-        Ok(result_text)
-    }
-
-    pub async fn stop_container(&self, container_id: &str, timeout_secs: i64) -> Result<()> {
-        let options = StopContainerOptions { t: timeout_secs };
-        self.docker
-            .stop_container(container_id, Some(options))
-            .await
-            .context("Failed to stop container")?;
-        Ok(())
-    }
-
-    pub async fn remove_container(&self, container_id: &str) -> Result<()> {
-        let options = RemoveContainerOptions {
-            force: true,
-            ..Default::default()
-        };
-        self.docker
-            .remove_container(container_id, Some(options))
-            .await
-            .context("Failed to remove container")?;
-        Ok(())
-    }
-
-    pub async fn attach_container(&self, container_id: &str) -> Result<AttachContainerResults> {
-        let options = AttachContainerOptions::<String> {
-            stdin: Some(true),
-            stdout: Some(true),
-            stderr: Some(true),
-            stream: Some(true),
-            ..Default::default()
-        };
-        let results = self
-            .docker
-            .attach_container(container_id, Some(options))
-            .await
-            .context("Failed to attach to container")?;
-        Ok(results)
-    }
-
-    pub async fn resize_container_tty(
-        &self,
-        container_id: &str,
-        width: u16,
-        height: u16,
-    ) -> Result<()> {
-        let options = ResizeContainerTtyOptions { width, height };
-        self.docker
-            .resize_container_tty(container_id, options)
-            .await
-            .context("Failed to resize container TTY")?;
-        Ok(())
-    }
-
     pub async fn list_vibepod_containers(&self) -> Result<Vec<(String, String)>> {
-        let options = ListContainersOptions::<String> {
-            all: true,
-            ..Default::default()
-        };
-        let containers = self.docker.list_containers(Some(options)).await?;
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                "name=vibepod-",
+                "--format",
+                "{{.Names}}\t{{.Status}}",
+            ])
+            .output()
+            .context("Failed to run docker ps")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker ps failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let mut result = Vec::new();
-        for container in containers {
-            if let Some(names) = &container.names {
-                for name in names {
-                    let clean = name.trim_start_matches('/').to_string();
-                    if clean.starts_with("vibepod-") {
-                        let status = container.status.clone().unwrap_or_default();
-                        result.push((clean, status));
-                    }
+        for line in stdout.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((name, status)) = line.split_once('\t') {
+                if name.starts_with("vibepod-") {
+                    result.push((name.to_string(), status.to_string()));
                 }
             }
         }
@@ -480,17 +224,31 @@ impl DockerRuntime {
     }
 
     pub async fn find_container_by_name(&self, name: &str) -> Result<Option<String>> {
-        let options = ListContainersOptions::<String> {
-            all: true,
-            ..Default::default()
-        };
-        let containers = self.docker.list_containers(Some(options)).await?;
-        for container in containers {
-            if let Some(names) = &container.names {
-                for cname in names {
-                    if cname.trim_start_matches('/') == name {
-                        return Ok(container.id.clone());
-                    }
+        let filter = format!("name={}", name);
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                &filter,
+                "--format",
+                "{{.ID}}\t{{.Names}}",
+            ])
+            .output()
+            .context("Failed to run docker ps")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker ps failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some((id, container_name)) = line.split_once('\t') {
+                if container_name == name {
+                    return Ok(Some(id.to_string()));
                 }
             }
         }
@@ -498,33 +256,22 @@ impl DockerRuntime {
     }
 
     pub async fn get_logs(&self, container_id: &str, tail: &str) -> Result<()> {
-        let options = LogsOptions::<String> {
-            follow: false,
-            stdout: true,
-            stderr: true,
-            tail: tail.to_string(),
-            ..Default::default()
-        };
-        let mut stream = self.docker.logs(container_id, Some(options));
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(output) => print!("{}", output),
-                Err(_) => break,
-            }
-        }
+        Command::new("docker")
+            .args(["logs", "--tail", tail, container_id])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to run docker logs")?;
         Ok(())
     }
 
-    pub async fn wait_container(&self, container_id: &str) -> Result<i64> {
-        let options = WaitContainerOptions {
-            condition: "not-running",
-        };
-        let mut stream = self.docker.wait_container(container_id, Some(options));
-        if let Some(result) = stream.next().await {
-            let response = result.context("Failed to wait for container")?;
-            Ok(response.status_code)
-        } else {
-            Ok(0)
-        }
+    pub async fn stream_logs(&self, container_id: &str) -> Result<()> {
+        Command::new("docker")
+            .args(["logs", "--follow", container_id])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to run docker logs")?;
+        Ok(())
     }
 }

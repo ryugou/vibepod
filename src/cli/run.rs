@@ -3,7 +3,7 @@ use std::process::Command;
 
 use crate::config::{self, ProjectEntry};
 use crate::git;
-use crate::runtime::{ContainerConfig, DockerRuntime};
+use crate::runtime::{format_stream_event, ContainerConfig, DockerRuntime, StreamEvent};
 use crate::session::{self, SessionStore};
 use crate::ui::banner;
 use crate::ui::prompts;
@@ -14,10 +14,6 @@ pub struct RunOptions {
     pub no_network: bool,
     pub env_vars: Vec<String>,
     pub env_file: Option<String>,
-    pub bridge: bool,
-    pub notify_delay: u64,
-    pub slack_channel: Option<String>,
-    pub llm_provider: String,
     pub lang: Option<String>,
     pub worktree: bool,
     pub review: Option<String>,
@@ -38,7 +34,6 @@ pub fn parse_mount_arg(arg: &str) -> anyhow::Result<(String, String)> {
 }
 
 struct RunContext {
-    runtime: DockerRuntime,
     container_name: String,
     effective_workspace: String,
     claude_args: Vec<String>,
@@ -52,8 +47,6 @@ struct RunContext {
     lang_display: String,
     reviewers: Vec<String>,
     codex_auth: Option<String>,
-    session_id: String,
-    project_name: String,
     store: SessionStore,
     deferred_session: session::Session,
     extra_mounts: Vec<(String, String)>,
@@ -483,21 +476,34 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
     let name_prefix = format!("vibepod-{}", project_name);
     if let Some((existing_id, existing_name)) = runtime.find_running_container(&name_prefix).await?
     {
-        if opts.bridge {
-            // bridge モードでは既存コンテナを置き換える（bridge は新規コンテナの attach が必要）
-            println!("  ◇  Replacing existing container for bridge mode...");
-            runtime.stop_container(&existing_id, 10).await?;
-            runtime.remove_container(&existing_id).await?;
-        } else {
-            match prompts::handle_existing_container(&existing_name)? {
-                prompts::ExistingContainerAction::Attach => {
-                    println!("  ◇  Attaching to {}...", existing_name);
-                    runtime.stream_logs(&existing_id).await?;
-                    return Ok(None);
+        match prompts::handle_existing_container(&existing_name)? {
+            prompts::ExistingContainerAction::Attach => {
+                println!("  ◇  Attaching to {}...", existing_name);
+                runtime.stream_logs(&existing_id).await?;
+                return Ok(None);
+            }
+            prompts::ExistingContainerAction::Replace => {
+                let stop = Command::new("docker")
+                    .args(["stop", "-t", "10", &existing_id])
+                    .output()
+                    .context("Failed to run docker stop")?;
+                if !stop.status.success() {
+                    bail!(
+                        "Failed to stop container {}: {}",
+                        existing_name,
+                        String::from_utf8_lossy(&stop.stderr).trim()
+                    );
                 }
-                prompts::ExistingContainerAction::Replace => {
-                    runtime.stop_container(&existing_id, 10).await?;
-                    runtime.remove_container(&existing_id).await?;
+                let rm = Command::new("docker")
+                    .args(["rm", "-f", &existing_id])
+                    .output()
+                    .context("Failed to run docker rm")?;
+                if !rm.status.success() {
+                    bail!(
+                        "Failed to remove container {}: {}",
+                        existing_name,
+                        String::from_utf8_lossy(&rm.stderr).trim()
+                    );
                 }
             }
         }
@@ -662,7 +668,6 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
     }
 
     Ok(Some(RunContext {
-        runtime,
         container_name,
         effective_workspace,
         claude_args,
@@ -676,230 +681,10 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
         lang_display,
         reviewers,
         codex_auth,
-        session_id,
-        project_name,
         store,
         deferred_session,
         extra_mounts,
     }))
-}
-
-async fn run_bridge(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
-    let interactive = !opts.resume && opts.prompt.is_none();
-
-    // bridge.env は常に config_dir/bridge.env から読む（--env-file はコンテナ用で独立）
-    let config_dir = config::default_config_dir()?;
-    let bridge_env_path = config_dir.join("bridge.env");
-
-    if !bridge_env_path.exists() {
-        bail!(
-            "Bridge env file not found: {}\n  \
-             Create it with SLACK_BOT_TOKEN, SLACK_APP_TOKEN, and SLACK_CHANNEL_ID.\n  \
-             Default location: {}/bridge.env",
-            bridge_env_path.display(),
-            config_dir.display()
-        );
-    }
-
-    let content = std::fs::read_to_string(&bridge_env_path).with_context(|| {
-        format!(
-            "Failed to read bridge env file: {}",
-            bridge_env_path.display()
-        )
-    })?;
-
-    let parsed: Vec<(String, String)> = content
-        .lines()
-        .filter(|line| {
-            let t = line.trim();
-            !t.is_empty() && !t.starts_with('#')
-        })
-        .filter_map(|line| {
-            let t = line.trim();
-            let (key, value) = t.split_once('=')?;
-            let value = value.trim_matches('"').trim_matches('\'');
-            Some((key.to_string(), value.to_string()))
-        })
-        .collect();
-
-    let has_op_refs = parsed.iter().any(|(_, v)| v.starts_with("op://"));
-
-    let resolved: std::collections::HashMap<String, String> = if has_op_refs {
-        let op_available = Command::new("op")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !op_available {
-            bail!(
-                "bridge.env contains op:// references but 1Password CLI (op) is not installed.\n  \
-                 Install it: https://developer.1password.com/docs/cli/"
-            );
-        }
-
-        println!("  ◇  Resolving op:// references in bridge.env...");
-
-        let output = Command::new("op")
-            .args([
-                "run",
-                &format!("--env-file={}", bridge_env_path.display()),
-                "--no-masking",
-                "--",
-                "env",
-            ])
-            .output()
-            .context("Failed to run `op run` to resolve bridge secrets")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("1Password CLI failed to resolve bridge secrets: {}", stderr);
-        }
-
-        let env_keys: std::collections::HashSet<String> =
-            parsed.iter().map(|(k, _)| k.clone()).collect();
-        let resolved_output = String::from_utf8_lossy(&output.stdout);
-        resolved_output
-            .lines()
-            .filter_map(|line| {
-                let (key, value) = line.split_once('=')?;
-                if env_keys.contains(key) {
-                    Some((key.to_string(), value.to_string()))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    } else {
-        parsed.into_iter().collect()
-    };
-
-    let slack_bot_token = resolved.get("SLACK_BOT_TOKEN").cloned().unwrap_or_default();
-    let slack_app_token = resolved.get("SLACK_APP_TOKEN").cloned().unwrap_or_default();
-
-    // SLACK_CHANNEL_ID: CLI option > env file
-    let slack_channel_id = opts
-        .slack_channel
-        .clone()
-        .or_else(|| resolved.get("SLACK_CHANNEL_ID").cloned())
-        .unwrap_or_default();
-
-    // Validate Slack channel ID format
-    if !slack_channel_id.is_empty() && !validate_slack_channel_id(&slack_channel_id) {
-        bail!(
-            "Invalid Slack channel ID: '{}'. Channel IDs start with 'C' (e.g., C01ABC2DEF3).",
-            slack_channel_id
-        );
-    }
-
-    // LLM provider & API key
-    let provider: crate::bridge::formatter::LlmProvider = opts.llm_provider.parse()?;
-    let llm_api_key = provider
-        .env_key_name()
-        .and_then(|key| resolved.get(key).cloned())
-        .unwrap_or_default();
-
-    // Validation
-    let mut missing = Vec::new();
-    if slack_bot_token.is_empty() {
-        missing.push("SLACK_BOT_TOKEN".to_string());
-    }
-    if slack_app_token.is_empty() {
-        missing.push("SLACK_APP_TOKEN".to_string());
-    }
-    if slack_channel_id.is_empty() {
-        missing.push("SLACK_CHANNEL_ID (set via --slack-channel or in bridge.env)".to_string());
-    }
-    if let Some(key_name) = provider.env_key_name() {
-        if llm_api_key.is_empty() {
-            missing.push(key_name.to_string());
-        }
-    }
-    if !missing.is_empty() {
-        bail!(
-            "Bridge mode requires the following configuration:\n  - {}\n  \
-             Set them in {} or use CLI options.",
-            missing.join("\n  - "),
-            bridge_env_path.display()
-        );
-    }
-
-    println!(
-        "  ◇  Bridge mode enabled (notify delay: {}s, llm: {:?})",
-        opts.notify_delay, provider
-    );
-    if provider != crate::bridge::formatter::LlmProvider::None {
-        println!(
-            "  │  ⚠ Terminal output excerpts will be sent to {:?} API and Slack for formatting.",
-            provider
-        );
-    } else {
-        println!(
-            "  │  Terminal output will be sent to Slack (local formatting, no LLM API calls)."
-        );
-    }
-
-    let bridge_cfg = crate::bridge::BridgeConfig {
-        slack_bot_token,
-        slack_app_token,
-        slack_channel_id,
-        notify_delay_secs: opts.notify_delay,
-        session_id: ctx.session_id.clone(),
-        project_name: ctx.project_name.clone(),
-        llm_provider: provider,
-        llm_api_key,
-    };
-
-    let mode_label = if interactive {
-        "bridge (interactive)"
-    } else {
-        "bridge (fire-and-forget)"
-    };
-    println!("  ◇  Starting container...");
-    println!("  │  Agent: Claude Code");
-    println!("  │  Mode: {}", mode_label);
-    println!("  │  Mount: {} → /workspace", ctx.effective_workspace);
-    for (host, container) in &ctx.extra_mounts {
-        println!("  │  Mount (ro): {} → {}", host, container);
-    }
-    if !ctx.lang_display.is_empty() {
-        println!("  │  Language: {}", ctx.lang_display);
-    }
-    if !ctx.reviewers.is_empty() {
-        println!("  │  Review: enabled ({})", ctx.reviewers.join(", "));
-    }
-    println!("  │");
-
-    let container_config =
-        build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
-
-    let container_id = ctx
-        .runtime
-        .create_and_start_container(&container_config)
-        .await?;
-
-    // Record session now that container has actually started
-    ctx.store.add(ctx.deferred_session.clone())?;
-
-    println!("  ◇  Container started: {}", ctx.container_name);
-    println!("  │  Bridge mode active — Slack notifications enabled");
-    println!("  └\n");
-
-    let exit_code = crate::bridge::run(bridge_cfg, &ctx.runtime, &container_id).await?;
-
-    // クリーンアップ
-    ctx.runtime.stop_container(&container_id, 10).await.ok();
-    ctx.runtime.remove_container(&container_id).await.ok();
-
-    // temp .claude.json 削除
-    if let Some(ref temp_cj) = ctx.temp_claude_json {
-        std::fs::remove_file(temp_cj).ok();
-    }
-
-    println!(
-        "  Container stopped and removed. (exit code: {})",
-        exit_code
-    );
-    Ok(())
 }
 
 async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
@@ -915,52 +700,9 @@ async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
     }
     println!("  │");
 
-    let mut docker_args = vec![
-        "run".to_string(),
-        "-it".to_string(),
-        "--rm".to_string(),
-        "--name".to_string(),
-        ctx.container_name.clone(),
-        "-v".to_string(),
-        format!("{}:/workspace", ctx.effective_workspace),
-    ];
-    // Mount host gitconfig for user identity
-    let gitconfig = ctx.home.join(".gitconfig");
-    if gitconfig.exists() {
-        docker_args.push("-v".to_string());
-        docker_args.push(format!(
-            "{}:/home/vibepod/.gitconfig:ro",
-            gitconfig.display()
-        ));
-    }
-    // Extra read-only mounts from --mount
-    for (host, container) in &ctx.extra_mounts {
-        docker_args.push("-v".to_string());
-        docker_args.push(format!("{}:{}:ro", host, container));
-    }
-    if let Some(ref temp_cj) = ctx.temp_claude_json {
-        docker_args.push("-v".to_string());
-        docker_args.push(format!("{}:/home/vibepod/.claude.json", temp_cj.display()));
-    }
-    if opts.no_network {
-        docker_args.push("--network".to_string());
-        docker_args.push("none".to_string());
-    }
-    for env_var in &ctx.resolved_env_vars {
-        docker_args.push("-e".to_string());
-        docker_args.push(env_var.clone());
-    }
-    docker_args.push("-e".to_string());
-    docker_args.push("TERM=xterm-256color".to_string());
-    docker_args.push(ctx.global_config.image.clone());
-    if let Some(ref setup) = ctx.setup_cmd {
-        docker_args.push("sh".to_string());
-        docker_args.push("-c".to_string());
-        docker_args.push(format!("{} && exec \"$@\"", setup));
-        docker_args.push("sh".to_string());
-    }
-    docker_args.push("claude".to_string());
-    docker_args.extend(ctx.claude_args.clone());
+    let container_config =
+        build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
+    let docker_args = container_config.to_docker_args(true);
 
     // Record session now that container is about to start
     ctx.store.add(ctx.deferred_session.clone())?;
@@ -1026,11 +768,20 @@ async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> Result<()> 
 
     let container_config =
         build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
+    let docker_run_args = container_config.to_docker_args(false);
 
-    let container_id = ctx
-        .runtime
-        .create_and_start_container(&container_config)
-        .await?;
+    // Start container with docker run -d
+    let start_output = Command::new("docker")
+        .args(&docker_run_args)
+        .output()
+        .context("Failed to start container")?;
+
+    if !start_output.status.success() {
+        bail!(
+            "Failed to start container: {}",
+            String::from_utf8_lossy(&start_output.stderr).trim()
+        );
+    }
 
     // Record session now that container has actually started
     ctx.store.add(ctx.deferred_session.clone())?;
@@ -1045,24 +796,66 @@ async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> Result<()> 
         println!("  └\n");
     }
 
+    let separator = "────────────────────────────────────────────────────────";
+    if opts.prompt.is_some() {
+        println!("{}", separator);
+    }
+
+    // Stream logs with docker logs --follow
+    let mut log_child = tokio::process::Command::new("docker")
+        .args(["logs", "--follow", &ctx.container_name])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("Failed to run docker logs")?;
+
+    let stdout = log_child
+        .stdout
+        .take()
+        .context("Failed to capture docker logs stdout")?;
+
+    let is_prompt = opts.prompt.is_some();
+    let reader = tokio::io::BufReader::new(stdout);
+    let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
+
     let result_text: Option<String> = tokio::select! {
-        result = async {
-            if opts.prompt.is_some() {
-                ctx.runtime.stream_logs_formatted(&container_id).await
-            } else {
-                ctx.runtime.stream_logs(&container_id).await.map(|_| None)
+        r = async {
+            let mut rt: Option<String> = None;
+            while let Ok(Some(line)) = lines.next_line().await {
+                if is_prompt {
+                    match format_stream_event(&line) {
+                        StreamEvent::Display(s) => println!("{}", s),
+                        StreamEvent::Result(s) => rt = Some(s),
+                        StreamEvent::Skip => {}
+                        StreamEvent::PassThrough(s) => println!("{}", s),
+                    }
+                } else {
+                    println!("{}", line);
+                }
             }
-        } => {
-            result.unwrap_or(None)
-        }
+            rt
+        } => r,
         _ = tokio::signal::ctrl_c() => {
             println!("\nStopping container...");
             None
         }
     };
 
-    ctx.runtime.stop_container(&container_id, 10).await.ok();
-    ctx.runtime.remove_container(&container_id).await.ok();
+    let _ = log_child.kill().await;
+
+    // docker stop + docker rm -f
+    Command::new("docker")
+        .args(["stop", "-t", "10", &ctx.container_name])
+        .output()
+        .ok();
+    Command::new("docker")
+        .args(["rm", "-f", &ctx.container_name])
+        .output()
+        .ok();
+
+    if opts.prompt.is_some() {
+        println!("{}", separator);
+    }
 
     // Clean up temp claude.json
     if let Some(ref temp_cj) = ctx.temp_claude_json {
@@ -1128,9 +921,7 @@ pub async fn execute(opts: RunOptions) -> Result<()> {
         return Ok(());
     };
 
-    if opts.bridge {
-        run_bridge(&opts, &ctx).await
-    } else if interactive {
+    if interactive {
         run_interactive(&opts, &ctx).await
     } else {
         run_fire_and_forget(&opts, &ctx).await
