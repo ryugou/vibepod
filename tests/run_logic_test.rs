@@ -63,10 +63,11 @@ fn test_review_prompt_copilot() {
     let reviewers = vec!["copilot".to_string()];
     let result = build_review_prompt("my prompt", &reviewers);
     assert!(result.starts_with("my prompt"));
-    assert!(result.contains("Copilot レビューフロー"));
+    assert!(result.contains("レビューフロー"));
     assert!(result.contains("gh pr create"));
     assert!(result.contains("gh api repos/"));
     assert!(result.contains("requested_reviewers"));
+    assert!(result.contains("re-review"));
 }
 
 #[test]
@@ -74,16 +75,18 @@ fn test_review_prompt_codex() {
     let reviewers = vec!["codex".to_string()];
     let result = build_review_prompt("my prompt", &reviewers);
     assert!(result.starts_with("my prompt"));
-    assert!(result.contains("Codex レビューフロー"));
     assert!(result.contains("codex review"));
+    assert!(result.contains("gh pr create"));
 }
 
 #[test]
 fn test_review_prompt_both() {
     let reviewers = vec!["codex".to_string(), "copilot".to_string()];
     let result = build_review_prompt("my prompt", &reviewers);
-    assert!(result.contains("Codex レビューフロー"));
-    assert!(result.contains("Copilot レビューフロー"));
+    assert!(result.contains("codex review"));
+    assert!(result.contains("add-reviewer copilot"));
+    // PR 作成は1回だけ
+    assert_eq!(result.matches("gh pr create").count(), 1);
 }
 
 #[test]

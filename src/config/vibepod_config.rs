@@ -35,10 +35,29 @@ impl VibepodConfig {
     fn merge(project: Option<Self>, global: Option<Self>) -> Self {
         match (project, global) {
             (Some(p), Some(g)) => {
-                // プロジェクト側にキーがあればそちら、なければグローバル
+                // フィールド単位でディープマージ（プロジェクト優先、なければグローバル）
+                let reviewers = p
+                    .review
+                    .as_ref()
+                    .and_then(|r| r.reviewers.clone())
+                    .or(g.review.as_ref().and_then(|r| r.reviewers.clone()));
+                let lang = p
+                    .run
+                    .as_ref()
+                    .and_then(|r| r.lang.clone())
+                    .or(g.run.as_ref().and_then(|r| r.lang.clone()));
+
                 VibepodConfig {
-                    review: p.review.or(g.review),
-                    run: p.run.or(g.run),
+                    review: if p.review.is_some() || g.review.is_some() {
+                        Some(ReviewConfig { reviewers })
+                    } else {
+                        None
+                    },
+                    run: if p.run.is_some() || g.run.is_some() {
+                        Some(RunConfig { lang })
+                    } else {
+                        None
+                    },
                 }
             }
             (Some(p), None) => p,
