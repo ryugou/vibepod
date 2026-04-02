@@ -72,6 +72,9 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
+| `--lang <name>` | Install language toolchain in container (`rust`, `node`, `python`, `go`, `java`). Auto-detected from project files if omitted |
+| `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
+| `--review` | Auto-create PR and request GitHub Copilot review after implementation (requires `--prompt`) |
 | `--bridge` | Enable Slack bridge mode (see below) |
 | `--notify-delay <secs>` | Idle detection delay in seconds (default: 30, requires `--bridge`) |
 | `--slack-channel <id>` | Override Slack channel ID from bridge.env |
@@ -81,6 +84,8 @@ Runs an AI coding agent inside a container, mounting your project directory.
 
 - **`vibepod run`** (interactive) — day-to-day development. You get a normal Claude Code session safely inside a Docker container. Permission prompts work normally — no bypass mode.
 - **`--prompt`** (fire-and-forget) — when the spec is already written and you want to kick off autonomous execution with `--dangerously-skip-permissions`. Great for running overnight or during meetings. Pair with a spec file in your repo: `vibepod run --prompt "Follow specs/login.md and implement"`.
+- **`--prompt --worktree`** — same as above, but runs in an isolated git worktree. Your working tree stays untouched. Review the changes before merging.
+- **`--prompt --review`** — runs autonomously, then creates a PR and requests a GitHub Copilot review. Fixes review feedback and pushes updates automatically.
 
 #### Passing secrets with 1Password
 
@@ -168,6 +173,36 @@ curl -fsSL https://raw.githubusercontent.com/ryugou/vibepod/main/install.sh | sh
 cargo install vibepod
 ```
 
+#### Stream output (`--prompt` mode)
+
+When running with `--prompt`, VibePod streams Claude Code's activity in real-time via `--output-format stream-json`:
+
+```
+────────────────────────────────────────────────────────
+  │  [assistant] ファイルを確認します。
+  │  [tool_use] Read { file_path: "src/main.rs" }
+  │  [tool_use] Edit { file_path: "src/main.rs", old_string: "fn main()...", new_string: "fn main()..." }
+  │  [tool_use] Bash { command: "cargo check" }
+────────────────────────────────────────────────────────
+
+Result:
+Implementation complete. All checks pass.
+
+Container stopped and removed.
+```
+
+#### Language toolchain auto-detection
+
+When `--lang` is not specified, VibePod auto-detects the language from project files:
+
+| File | Language |
+|------|----------|
+| `Cargo.toml` | Rust (+ build-essential) |
+| `package.json` | Node.js |
+| `go.mod` | Go |
+| `pyproject.toml` / `requirements.txt` | Python |
+| `pom.xml` / `build.gradle` | Java |
+
 ## Roadmap
 
 | Version | Features |
@@ -176,6 +211,7 @@ cargo install vibepod
 | **v1.1** | Pre-installed plugins (superpowers, frontend-design), `--env-file` with 1Password integration |
 | **v1.2** | `vibepod restore` (git HEAD auto-recovery with session reports) |
 | **v1.3** | Slack bridge mode (`--bridge`), multi-provider LLM formatting |
+| **v1.4** | Stream output, `--worktree` isolation, `--lang` toolchain, `--review` Copilot flow, banner version display, `RunOptions` refactoring |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
 | **v2.1+** | Gemini CLI / Codex support, multi-container execution |
 
