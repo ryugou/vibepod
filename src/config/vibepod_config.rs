@@ -36,21 +36,28 @@ impl VibepodConfig {
         match (project, global) {
             (Some(p), Some(g)) => {
                 // フィールド単位でディープマージ（プロジェクト優先、なければグローバル）
+                let reviewers = p
+                    .review
+                    .as_ref()
+                    .and_then(|r| r.reviewers.clone())
+                    .or(g.review.as_ref().and_then(|r| r.reviewers.clone()));
+                let lang = p
+                    .run
+                    .as_ref()
+                    .and_then(|r| r.lang.clone())
+                    .or(g.run.as_ref().and_then(|r| r.lang.clone()));
+
                 VibepodConfig {
-                    review: Some(ReviewConfig {
-                        reviewers: p
-                            .review
-                            .as_ref()
-                            .and_then(|r| r.reviewers.clone())
-                            .or(g.review.as_ref().and_then(|r| r.reviewers.clone())),
-                    }),
-                    run: Some(RunConfig {
-                        lang: p
-                            .run
-                            .as_ref()
-                            .and_then(|r| r.lang.clone())
-                            .or(g.run.as_ref().and_then(|r| r.lang.clone())),
-                    }),
+                    review: if p.review.is_some() || g.review.is_some() {
+                        Some(ReviewConfig { reviewers })
+                    } else {
+                        None
+                    },
+                    run: if p.run.is_some() || g.run.is_some() {
+                        Some(RunConfig { lang })
+                    } else {
+                        None
+                    },
                 }
             }
             (Some(p), None) => p,
