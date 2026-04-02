@@ -145,8 +145,8 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
         sections.push(
             "## Codex Review（ローカル、コミット前）\n\
 以下を指摘がなくなるまで繰り返す（最大 3 回）:\n\
-1. Bash ツールで `codex review -c 'sandbox_permissions=[\"disk-full-read-access\"]'` を実行する\n\
-   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること）\n\
+1. Bash ツールで `codex review --dangerously-bypass-approvals-and-sandbox` を実行する\n\
+   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内で実行するため sandbox は不要）\n\
 2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
 3. 指摘があれば該当箇所を修正する\n\
 4. 手順 1 に戻る"
