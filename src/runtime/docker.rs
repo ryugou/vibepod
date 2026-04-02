@@ -43,8 +43,21 @@ pub fn format_stream_event(line: &str) -> StreamEvent {
                                                 let val = v
                                                     .as_str()
                                                     .map(|s| {
-                                                        if s.len() > 80 {
-                                                            format!("\"{}...\"", &s[..77])
+                                                        let mut truncated = String::new();
+                                                        let mut count = 0usize;
+                                                        let mut over_limit = false;
+                                                        for ch in s.chars() {
+                                                            if count < 77 {
+                                                                truncated.push(ch);
+                                                            }
+                                                            count += 1;
+                                                            if count > 80 {
+                                                                over_limit = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                        if over_limit {
+                                                            format!("\"{}...\"", truncated)
                                                         } else {
                                                             format!("\"{}\"", s)
                                                         }
