@@ -316,9 +316,16 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 5. Project registration
     let mut projects = config::load_projects(&config_dir)?;
-    if !config::is_project_registered(&projects, &cwd_str)
-        && prompts::confirm_project_registration(&project_name)?
-    {
+    let should_register = if !config::is_project_registered(&projects, &cwd_str) {
+        if interactive {
+            prompts::confirm_project_registration(&project_name)?
+        } else {
+            true // Auto-register in non-interactive mode
+        }
+    } else {
+        false
+    };
+    if should_register {
         config::register_project(
             &mut projects,
             ProjectEntry {
