@@ -156,10 +156,10 @@ pub fn execute() -> Result<()> {
         &diff_stat,
     );
 
-    let report_filename = format!("{}.md", chrono::Local::now().format("%Y-%m-%d-%H%M%S"));
-    let report_path = store.reports_dir().join(&report_filename);
-    std::fs::create_dir_all(store.reports_dir())?;
-    std::fs::write(&report_path, &report_content)?;
+    let session_dir = store.session_dir(&selected.id);
+    std::fs::create_dir_all(&session_dir)?;
+    let report_path = session_dir.join("report.md");
+    std::fs::write(&report_path, report_content)?;
 
     println!("  │");
     println!("  ◇  Report saved: {}", report_path.display());

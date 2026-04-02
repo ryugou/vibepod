@@ -2,8 +2,10 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
+/// Docker CLI ラッパー。docker コマンドを通じてコンテナ操作を行う。
 pub struct DockerRuntime;
 
+/// コンテナ起動設定。`docker run` に渡す全パラメータを保持する。
 pub struct ContainerConfig {
     pub image: String,
     pub container_name: String,

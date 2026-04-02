@@ -33,6 +33,7 @@ impl TokenData {
     }
 }
 
+/// OAuth トークンの保存・読み込み・検証を管理する。
 pub struct AuthManager {
     config_dir: PathBuf,
 }
