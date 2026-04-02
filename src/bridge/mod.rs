@@ -38,7 +38,7 @@ pub async fn run(
     let _terminal_guard = io::TerminalGuard::new().context("Failed to set terminal to raw mode")?;
 
     // 3. I/O ループを即座に開始（コンテナ出力をバッファリング開始）
-    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(4096);
     let (slack_response_tx, mut slack_response_rx) = mpsc::channel::<SlackResponse>(16);
     let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(64);
     let (terminal_input_tx, mut terminal_input_rx) = mpsc::channel::<()>(64);
