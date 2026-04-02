@@ -65,9 +65,11 @@ fn test_review_prompt_copilot() {
     assert!(result.starts_with("my prompt"));
     assert!(result.contains("レビューフロー"));
     assert!(result.contains("gh pr create"));
-    assert!(result.contains("gh api repos/"));
-    assert!(result.contains("requested_reviewers"));
-    assert!(result.contains("re-review"));
+    assert!(result.contains("add-reviewer copilot"));
+    // 1ラウンドのみ（re-review 未サポート）
+    assert!(result.contains("1ラウンド"));
+    // インラインコメント取得 API
+    assert!(result.contains("pulls/{number}/comments"));
 }
 
 #[test]
@@ -76,15 +78,18 @@ fn test_review_prompt_codex() {
     let result = build_review_prompt("my prompt", &reviewers);
     assert!(result.starts_with("my prompt"));
     assert!(result.contains("codex review"));
+    assert!(result.contains("sandbox_permissions"));
     assert!(result.contains("gh pr create"));
+    // Codex ループ
+    assert!(result.contains("指摘がなくなるまで"));
 }
 
 #[test]
 fn test_review_prompt_both() {
     let reviewers = vec!["codex".to_string(), "copilot".to_string()];
     let result = build_review_prompt("my prompt", &reviewers);
-    assert!(result.contains("codex review"));
-    assert!(result.contains("add-reviewer copilot"));
+    assert!(result.contains("Codex Review"));
+    assert!(result.contains("Copilot Review"));
     // PR 作成は1回だけ
     assert_eq!(result.matches("gh pr create").count(), 1);
 }
