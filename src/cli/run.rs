@@ -110,52 +110,53 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
         return prompt.to_string();
     }
 
-    let mut sections: Vec<String> = Vec::new();
+    let has_codex = reviewers.contains(&"codex".to_string());
+    let has_copilot = reviewers.contains(&"copilot".to_string());
 
-    // Codex review section
-    if reviewers.contains(&"codex".to_string()) {
-        sections.push(
-            "以下の Codex レビューフローを実行すること:\n\
-            1. 現在のブランチが main の場合は、新しいフィーチャーブランチを作成する\n\
-            2. 変更内容をコミットする（Conventional Commits 準拠）\n\
-            3. codex review を実行する\n\
-            4. レビューで指摘された問題があれば修正する\n\
-            5. 修正したら再度 codex review を実行する\n\
-            6. 指摘がなくなるまでステップ 4-5 を最大 3 回繰り返す\n\
-            7. git push -u origin <ブランチ名> でリモートに push する\n\
-            8. gh pr create で PR を作成する（ベースブランチは main）\n\
-            9. 最終的な PR の URL を出力する"
-                .to_string(),
-        );
-    }
-
-    // Copilot review section
-    if reviewers.contains(&"copilot".to_string()) {
-        sections.push(
-            "以下の Copilot レビューフローを実行すること:\n\
-            1. 現在のブランチが main の場合は、新しいフィーチャーブランチを作成する\n\
-            2. 変更内容をコミットする（Conventional Commits 準拠）\n\
-            3. git push -u origin <ブランチ名> でリモートに push する\n\
-            4. gh pr create で PR を作成する（ベースブランチは main）\n\
-            5. gh pr edit <PR番号> --add-reviewer copilot で Copilot レビューを依頼する\n\
-            6. 30 秒間隔で最大 10 回 gh api repos/{owner}/{repo}/pulls/{number}/reviews を実行して確認する\n\
-            7. レビューコメントがあれば修正する\n\
-            8. 修正をコミットして git push で PR を更新する\n\
-            9. gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST -f \"reviewers[]=copilot\" で re-review を依頼する\n\
-            10. 再度 30 秒間隔で最大 5 回レビュー結果を確認する\n\
-            11. 最終的な PR の URL を出力する"
-                .to_string(),
-        );
-    }
-
-    if sections.is_empty() {
+    if !has_codex && !has_copilot {
         return prompt.to_string();
     }
 
+    let mut steps: Vec<String> = Vec::new();
+
+    // ブランチ作成（共通）
+    steps.push("現在のブランチが main の場合は、`git checkout -b <適切なブランチ名>` で新しいフィーチャーブランチを作成する。main 以外のブランチにいる場合はそのまま使う".to_string());
+
+    // Codex review フェーズ（ローカル、コミット前）
+    if has_codex {
+        steps.push("codex review を実行する".to_string());
+        steps.push("レビューで指摘された問題があれば修正する".to_string());
+        steps.push("修正したら再度 codex review を実行する。指摘がなくなるまで最大 3 回繰り返す".to_string());
+    }
+
+    // コミット + push + PR 作成（共通）
+    steps.push("変更内容をコミットする（Conventional Commits 準拠）".to_string());
+    steps.push("`git push -u origin <ブランチ名>` でリモートに push する".to_string());
+    steps.push("`gh pr create` で PR を作成する（ベースブランチは main）".to_string());
+
+    // Copilot review フェーズ（PR 上）
+    if has_copilot {
+        steps.push("`gh pr edit <PR番号> --add-reviewer copilot` で Copilot レビューを依頼する".to_string());
+        steps.push("30 秒間隔で最大 10 回 `gh api repos/{owner}/{repo}/pulls/{number}/reviews` を実行して確認する。`gh pr review` や `gh pr comment` などの書き込み系コマンドは絶対に使わないこと".to_string());
+        steps.push("レビューコメントがあれば修正する".to_string());
+        steps.push("修正をコミットして `git push` で PR を更新する".to_string());
+        steps.push("`gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST -f \"reviewers[]=copilot\"` で re-review を依頼する".to_string());
+        steps.push("再度 30 秒間隔で最大 5 回レビュー結果を確認する".to_string());
+    }
+
+    // 最終出力
+    steps.push("最終的な PR の URL を出力する".to_string());
+
+    let numbered: Vec<String> = steps
+        .iter()
+        .enumerate()
+        .map(|(i, s)| format!("{}. {}", i + 1, s))
+        .collect();
+
     format!(
-        "{}\n\n---\n\n実装が完了したら、{}",
+        "{}\n\n---\n\n実装が完了したら、以下のレビューフローを実行すること:\n{}",
         prompt,
-        sections.join("\n\nその後、")
+        numbered.join("\n")
     )
 }
 
@@ -425,6 +426,10 @@ async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
             Some(setup_parts.join(" && "))
         }
     };
+
+    if setup_cmd.is_some() {
+        eprintln!("Note: Language/tool setup requires sudo in the container. If setup fails, run `vibepod init` to rebuild the image.");
+    }
 
     // 2. Load config
     let config_dir = config::default_config_dir()?;
