@@ -26,7 +26,7 @@ async fn create_and_setup(ctx: &RunContext, opts: &RunOptions) -> Result<()> {
 
     // セットアップコマンドを実行してマーカーを作成する
     let setup_result = if let Some(ref setup_cmd) = ctx.setup_cmd {
-        let full_cmd = format!("{} && touch /.vibepod-setup-done", setup_cmd);
+        let full_cmd = format!("{} && touch /home/vibepod/.vibepod-setup-done", setup_cmd);
         Command::new("docker")
             .args(["exec", &ctx.container_name, "sh", "-c", &full_cmd])
             .stdin(std::process::Stdio::null())
@@ -36,7 +36,12 @@ async fn create_and_setup(ctx: &RunContext, opts: &RunOptions) -> Result<()> {
             .context("Failed to run setup command")?
     } else {
         Command::new("docker")
-            .args(["exec", &ctx.container_name, "touch", "/.vibepod-setup-done"])
+            .args([
+                "exec",
+                &ctx.container_name,
+                "touch",
+                "/home/vibepod/.vibepod-setup-done",
+            ])
             .status()
             .context("Failed to create setup marker")?
     };

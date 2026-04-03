@@ -235,10 +235,16 @@ impl DockerRuntime {
         Ok(labels)
     }
 
-    /// `/.vibepod-setup-done` マーカーファイルの存在を確認する。
+    /// `/home/vibepod/.vibepod-setup-done` マーカーファイルの存在を確認する。
     pub async fn check_setup_marker(&self, name: &str) -> Result<bool> {
         let output = Command::new("docker")
-            .args(["exec", name, "test", "-f", "/.vibepod-setup-done"])
+            .args([
+                "exec",
+                name,
+                "test",
+                "-f",
+                "/home/vibepod/.vibepod-setup-done",
+            ])
             .output()
             .await
             .context("Failed to run docker exec test")?;
