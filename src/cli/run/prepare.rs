@@ -279,40 +279,42 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 4. Check for existing container
     let name_prefix = format!("vibepod-{}", project_name);
-    if let Some((existing_id, existing_name)) = runtime.find_running_container(&name_prefix).await?
-    {
-        match prompts::handle_existing_container(&existing_name)? {
-            prompts::ExistingContainerAction::Attach => {
-                println!("  ◇  Attaching to {}...", existing_name);
-                runtime.stream_logs(&existing_id).await?;
-                return Ok(None);
-            }
-            prompts::ExistingContainerAction::Replace => {
-                let stop = Command::new("docker")
-                    .args(["stop", "-t", "10", &existing_id])
-                    .output()
-                    .context("Failed to run docker stop")?;
-                if !stop.status.success() {
-                    bail!(
-                        "Failed to stop container {}: {}",
-                        existing_name,
-                        String::from_utf8_lossy(&stop.stderr).trim()
-                    );
+
+    // --reuse: use a fixed container name and detect stopped containers for reconnection.
+    // Running reuse containers are handled below by the normal running-container prompt.
+    let (reuse_existing, container_name_override) = if opts.reuse {
+        let reuse_name = format!("vibepod-{}-reuse", project_name);
+        let existing_id = runtime.find_stopped_container(&reuse_name).await?;
+        (existing_id.is_some(), Some(reuse_name))
+    } else {
+        (false, None)
+    };
+
+    // If a container with the project prefix is already running (and we're not reusing it),
+    // prompt the user to attach or replace it.
+    if !reuse_existing {
+        if let Some((existing_id, existing_name)) =
+            runtime.find_running_container(&name_prefix).await?
+        {
+            if !interactive {
+                // Non-interactive mode: skip prompt, just replace
+                runtime.stop_container(&existing_id, 10).await?;
+                runtime.remove_container(&existing_id).await?;
+            } else {
+                match prompts::handle_existing_container(&existing_name)? {
+                    prompts::ExistingContainerAction::Attach => {
+                        println!("  ◇  Attaching to {}...", existing_name);
+                        runtime.stream_logs(&existing_id).await?;
+                        return Ok(None);
+                    }
+                    prompts::ExistingContainerAction::Replace => {
+                        runtime.stop_container(&existing_id, 10).await?;
+                        runtime.remove_container(&existing_id).await?;
+                    }
                 }
-                let rm = Command::new("docker")
-                    .args(["rm", "-f", &existing_id])
-                    .output()
-                    .context("Failed to run docker rm")?;
-                if !rm.status.success() {
-                    bail!(
-                        "Failed to remove container {}: {}",
-                        existing_name,
-                        String::from_utf8_lossy(&rm.stderr).trim()
-                    );
-                }
-            }
+            } // else (interactive)
         }
-    }
+    } // if !reuse_existing
 
     // 5. Project registration
     let mut projects = config::load_projects(&config_dir)?;
@@ -429,10 +431,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 8. Generate container name
-    let short_hash: String = (0..6)
-        .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
-        .collect();
-    let container_name = format!("vibepod-{}-{}", project_name, short_hash);
+    let container_name = if let Some(override_name) = container_name_override {
+        override_name
+    } else {
+        let short_hash: String = (0..6)
+            .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
+            .collect();
+        format!("vibepod-{}-{}", project_name, short_hash)
+    };
 
     // 9. Auth: load token
     let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
@@ -496,5 +502,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         store,
         deferred_session,
         extra_mounts,
+        reuse: opts.reuse,
+        reuse_existing,
     }))
 }

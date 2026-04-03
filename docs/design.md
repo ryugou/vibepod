@@ -211,10 +211,13 @@ image = "vibepod-claude:latest"
 | `--worktree` | git worktree で隔離実行（`--prompt` 必須）。変更は `.worktrees/` に作成される |
 | `--review` | 実装後に PR 作成 → Codex + Copilot レビュー → 修正を自動実行（`--prompt` 必須） |
 | `--mount <src:dst>` | 追加ホストパスを read-only でマウント（複数指定可） |
+| `--reuse` | コンテナを再利用して 2 回目以降のセットアップをスキップ |
 
 > **`--prompt` 未指定時**: interactive モードで起動。ツリー UI で起動情報を表示し、`docker run -it` でコンテナに接続する。`--dangerously-skip-permissions` は付与しない（ユーザーが各操作を承認する）。
 >
 > **`--prompt` 指定時**: fire-and-forget モードで起動。`--dangerously-skip-permissions` + `-p` + `--output-format stream-json --verbose` で Claude Code を起動し、JSONL ストリームをリアルタイムにフォーマット表示する。コンテナ隔離が安全境界となる。
+>
+> **`--reuse` 指定時**: コンテナを再利用モードで起動する。初回は `docker run -d`（idle entrypoint: `tail -f /dev/null`）でコンテナを作成し、`setup_cmd` があれば `VIBEPOD_SETUP_DONE` マーカーが出るまで待機してからセットアップ完了とみなす。その後 `docker exec` で claude を実行する。2 回目以降は停止済みコンテナを `docker start` で再起動し、セットアップをスキップして `docker exec` で直接実行する。実行後はコンテナを停止するが削除しない（次回の `--reuse` で再利用可能）。`vibepod rm <name>` でコンテナを手動削除できる。
 
 **コンテナ構成：**
 

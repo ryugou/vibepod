@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use tokio::process::Command;
 
 /// Docker CLI ラッパー。docker コマンドを通じてコンテナ操作を行う。
 pub struct DockerRuntime;
@@ -18,14 +19,25 @@ pub struct ContainerConfig {
     pub setup_cmd: Option<String>,
     pub codex_auth: Option<String>,
     pub extra_mounts: Vec<(String, String)>,
+    /// When true, omit `--rm` from `docker run` (container persists after exit)
+    pub reuse: bool,
+    /// When true, run the container with an idle entrypoint (`tail -f /dev/null`) so it
+    /// stays alive for `docker exec`; setup_cmd runs first if present.
+    /// Used when creating a brand-new reuse container.
+    pub reuse_entrypoint: bool,
 }
 
 impl ContainerConfig {
     pub fn to_docker_args(&self, interactive: bool) -> Vec<String> {
         let mut args = vec!["run".to_string()];
-        if interactive {
+        if self.reuse_entrypoint {
+            // Creating a new reuse container: always detached, no --rm
+            args.push("-d".to_string());
+        } else if interactive {
             args.push("-it".to_string());
-            args.push("--rm".to_string());
+            if !self.reuse {
+                args.push("--rm".to_string());
+            }
         } else {
             args.push("-d".to_string());
         }
@@ -68,13 +80,29 @@ impl ContainerConfig {
 
         args.push(self.image.clone());
 
-        if let Some(ref setup) = self.setup_cmd {
-            args.push("sh".to_string());
-            args.push("-c".to_string());
-            args.push(format!("{} && exec \"$@\"", setup));
-            args.push("sh".to_string());
+        if self.reuse_entrypoint {
+            // Idle entrypoint: run setup (if any) then keep container alive
+            if let Some(ref setup) = self.setup_cmd {
+                args.push("sh".to_string());
+                args.push("-c".to_string());
+                args.push(format!(
+                    "{} && echo VIBEPOD_SETUP_DONE && tail -f /dev/null",
+                    setup
+                ));
+            } else {
+                args.push("tail".to_string());
+                args.push("-f".to_string());
+                args.push("/dev/null".to_string());
+            }
+        } else {
+            if let Some(ref setup) = self.setup_cmd {
+                args.push("sh".to_string());
+                args.push("-c".to_string());
+                args.push(format!("{} && exec \"$@\"", setup));
+                args.push("sh".to_string());
+            }
+            args.extend(self.args.clone());
         }
-        args.extend(self.args.clone());
 
         args
     }
@@ -91,6 +119,7 @@ impl DockerRuntime {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .output()
+            .await
             .context("Failed to run docker info. Is Docker Desktop or OrbStack running?")?;
         if !output.status.success() {
             anyhow::bail!("Docker is not responding. Is Docker Desktop or OrbStack running?");
@@ -106,9 +135,8 @@ impl DockerRuntime {
     ) -> Result<()> {
         use std::io::Write as IoWrite;
 
-        let temp_dir = std::env::temp_dir().join("vibepod-build");
-        std::fs::create_dir_all(&temp_dir)?;
-        let dockerfile_path = temp_dir.join("Dockerfile");
+        let temp_dir = tempfile::tempdir().context("Failed to create temporary build directory")?;
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
         let mut file = std::fs::File::create(&dockerfile_path)?;
         file.write_all(dockerfile_content.as_bytes())?;
 
@@ -125,13 +153,14 @@ impl DockerRuntime {
             args.push(format!("{}={}", k, v));
         }
 
-        args.push(temp_dir.to_string_lossy().to_string());
+        args.push(temp_dir.path().to_string_lossy().to_string());
 
         let status = Command::new("docker")
             .args(&args)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
+            .await
             .context("Failed to run docker build")?;
 
         if !status.success() {
@@ -147,6 +176,7 @@ impl DockerRuntime {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()
+            .await
             .context("Failed to run docker inspect")?;
 
         if output.status.success() {
@@ -169,6 +199,7 @@ impl DockerRuntime {
         let output = Command::new("docker")
             .args(["ps", "--filter", &filter, "--format", "{{.ID}}\t{{.Names}}"])
             .output()
+            .await
             .context("Failed to run docker ps")?;
 
         if !output.status.success() {
@@ -190,6 +221,42 @@ impl DockerRuntime {
         Ok(None)
     }
 
+    /// Find a container by exact name that is in the exited (stopped) state.
+    pub async fn find_stopped_container(&self, name: &str) -> Result<Option<String>> {
+        let filter_name = format!("name={}", name);
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                &filter_name,
+                "--filter",
+                "status=exited",
+                "--format",
+                "{{.ID}}\t{{.Names}}",
+            ])
+            .output()
+            .await
+            .context("Failed to run docker ps")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker ps failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some((id, container_name)) = line.split_once('\t') {
+                if container_name == name {
+                    return Ok(Some(id.to_string()));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub async fn list_vibepod_containers(&self) -> Result<Vec<(String, String)>> {
         let output = Command::new("docker")
             .args([
@@ -201,6 +268,7 @@ impl DockerRuntime {
                 "{{.Names}}\t{{.Status}}",
             ])
             .output()
+            .await
             .context("Failed to run docker ps")?;
 
         if !output.status.success() {
@@ -237,6 +305,7 @@ impl DockerRuntime {
                 "{{.ID}}\t{{.Names}}",
             ])
             .output()
+            .await
             .context("Failed to run docker ps")?;
 
         if !output.status.success() {
@@ -258,22 +327,73 @@ impl DockerRuntime {
     }
 
     pub async fn get_logs(&self, container_id: &str, tail: &str) -> Result<()> {
-        Command::new("docker")
+        let status = Command::new("docker")
             .args(["logs", "--tail", tail, container_id])
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
+            .await
             .context("Failed to run docker logs")?;
+        if !status.success() {
+            anyhow::bail!("docker logs failed for container {}", container_id);
+        }
         Ok(())
     }
 
     pub async fn stream_logs(&self, container_id: &str) -> Result<()> {
-        Command::new("docker")
+        let status = Command::new("docker")
             .args(["logs", "--follow", container_id])
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
+            .await
             .context("Failed to run docker logs")?;
+        if !status.success() {
+            anyhow::bail!("docker logs failed for container {}", container_id);
+        }
+        Ok(())
+    }
+
+    pub async fn start_container(&self, container_id: &str) -> Result<()> {
+        let status = Command::new("docker")
+            .args(["start", container_id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .status()
+            .await
+            .context("Failed to run docker start")?;
+        if !status.success() {
+            anyhow::bail!("docker start failed for container {}", container_id);
+        }
+        Ok(())
+    }
+
+    pub async fn stop_container(&self, container_id: &str, timeout_secs: u32) -> Result<()> {
+        let timeout_str = timeout_secs.to_string();
+        let status = Command::new("docker")
+            .args(["stop", "-t", &timeout_str, container_id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .status()
+            .await
+            .context("Failed to run docker stop")?;
+        if !status.success() {
+            anyhow::bail!("docker stop failed for container {}", container_id);
+        }
+        Ok(())
+    }
+
+    pub async fn remove_container(&self, container_id: &str) -> Result<()> {
+        let status = Command::new("docker")
+            .args(["rm", "-f", container_id])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .status()
+            .await
+            .context("Failed to run docker rm")?;
+        if !status.success() {
+            anyhow::bail!("docker rm failed for container {}", container_id);
+        }
         Ok(())
     }
 }

@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
             worktree,
             review,
             mount,
+            reuse,
         } => {
             vibepod::cli::run::execute(vibepod::cli::run::RunOptions {
                 resume,
@@ -39,6 +40,7 @@ async fn main() -> Result<()> {
                 worktree,
                 review,
                 mount,
+                reuse,
             })
             .await?;
         }
@@ -54,6 +56,9 @@ async fn main() -> Result<()> {
         }
         Commands::Restore {} => {
             vibepod::cli::restore::execute()?;
+        }
+        Commands::Rm { name, all } => {
+            vibepod::cli::rm::execute(name, all).await?;
         }
     }
 

@@ -68,6 +68,20 @@ Lists VibePod containers (running and stopped).
 vibepod ps
 ```
 
+### `vibepod rm`
+
+Remove VibePod containers.
+
+```bash
+vibepod rm <name>
+vibepod rm --all
+```
+
+| Argument | Description |
+|----------|-------------|
+| `<name>` | 削除するコンテナ名 |
+| `--all` | 全 VibePod コンテナを削除 |
+
 ### `vibepod logs`
 
 Shows logs from a VibePod container.
@@ -93,6 +107,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--review [reviewer]` | Auto-create PR and request code review after implementation (requires `--prompt`). Reviewer (`codex` or `copilot`) can be specified or falls back to `config.toml` |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
+| `--reuse` | Reuse container across runs to skip setup on subsequent runs |
 
 #### When to use which?
 
