@@ -1,0 +1,76 @@
+# リリース前 E2E 検証チェックリスト
+
+リリース前に手動で実行する E2E テスト手順。`cargo test` で検証できない Docker 実行・認証・コンテナ操作を対象とする。
+
+## 前提条件
+
+- Docker Desktop / OrbStack が起動している
+- `vibepod init` 済み（Docker イメージがビルドされている）
+- `vibepod login` 済み（認証トークンがある）
+- テスト用の git リポジトリがある
+
+## チェック項目
+
+### 基本動作
+
+- [ ] `vibepod --version` — バージョンが正しい
+- [ ] `vibepod --help` — ヘルプが表示される
+- [ ] `vibepod run --help` — run のオプション一覧が表示される
+
+### インタラクティブモード
+
+- [ ] `vibepod run` — コンテナが起動し、Claude Code の対話セッションに入れる
+- [ ] コンテナ内でファイル読み書きができる（/workspace にプロジェクトがマウントされている）
+- [ ] Ctrl+C でコンテナが停止・削除される
+
+### prompt モード
+
+- [ ] `vibepod run --prompt "CLAUDE.md を読んで"` — fire-and-forget で実行され、stream-json の整形表示が出る
+- [ ] 実行完了後に Result が表示される
+- [ ] コンテナが自動的に停止・削除される
+
+### prompt + review
+
+- [ ] `vibepod run --prompt "..." --review codex` — codex review が実行される（タイムアウトしない）
+- [ ] codex review の結果に応じてコミット・push・PR 作成が行われる
+
+### worktree
+
+- [ ] `vibepod run --prompt "..." --worktree` — .worktrees/ 配下に隔離されたワークツリーが作成される
+- [ ] 実行完了後に worktree のパスとブランチ名が表示される
+- [ ] メインの作業ツリーに影響がない
+
+### --lang
+
+- [ ] `vibepod run --lang rust` — コンテナ内で `cargo --version` が使える
+- [ ] `vibepod run --lang node` — コンテナ内で `node --version` が使える
+
+### --mount
+
+- [ ] `vibepod run --mount /path/to/file` — 指定ファイルが /mnt/ 配下に read-only でマウントされる
+
+### --env-file
+
+- [ ] `vibepod run --env-file .env` — 環境変数がコンテナ内に渡される
+
+### ps / logs
+
+- [ ] `vibepod ps` — コンテナ一覧が表示される（CONTAINER / PROJECT / STATUS の列が正しい）
+- [ ] `vibepod logs <container>` — コンテナのログが表示される
+
+### 認証
+
+- [ ] `vibepod login` — OAuth フローが完了し、トークンが保存される
+- [ ] `vibepod logout` — トークンが削除される
+- [ ] トークン期限切れ時に `vibepod run` が適切なエラーメッセージを出す
+
+### restore
+
+- [ ] `vibepod restore` — セッション一覧が表示され、選択したセッションの状態に復元できる
+
+### エラーケース
+
+- [ ] Docker 未起動時に `vibepod run` → 適切なエラーメッセージ
+- [ ] 未認証時に `vibepod run` → 「vibepod login を実行してください」
+- [ ] git リポジトリ外で `vibepod run` → 適切なエラーメッセージ
+- [ ] 存在しないイメージで `vibepod run` → 「vibepod init を実行してください」
