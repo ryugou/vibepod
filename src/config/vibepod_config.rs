@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Default)]
+/// プロジェクト設定とグローバル設定をマージした結果を保持する。プロジェクト設定が優先される。
 pub struct VibepodConfig {
     pub review: Option<ReviewConfig>,
     pub run: Option<RunConfig>,

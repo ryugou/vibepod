@@ -2,7 +2,7 @@
 
 Safely run AI coding agents in Docker containers.
 
-VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) inside an isolated container — with just two commands.
+VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) inside an isolated container — set up in three steps.
 
 ## Quick Start
 
@@ -60,6 +60,23 @@ This will:
 2. Generate a Markdown report of all changes (saved to `.vibepod/reports/`)
 3. Run `git reset --hard` + `git clean -fd` to restore the workspace
 
+### `vibepod ps`
+
+Lists VibePod containers (running and stopped).
+
+```bash
+vibepod ps
+```
+
+### `vibepod logs`
+
+Shows logs from a VibePod container.
+
+```bash
+vibepod logs
+vibepod logs --tail 50
+```
+
 ### `vibepod run`
 
 Runs an AI coding agent inside a container, mounting your project directory.
@@ -74,18 +91,15 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
 | `--lang <name>` | Install language toolchain in container (`rust`, `node`, `python`, `go`, `java`). Auto-detected from project files if omitted |
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
-| `--review` | Auto-create PR and request GitHub Copilot review after implementation (requires `--prompt`) |
-| `--bridge` | Enable Slack bridge mode (see below) |
-| `--notify-delay <secs>` | Idle detection delay in seconds (default: 30, requires `--bridge`) |
-| `--slack-channel <id>` | Override Slack channel ID from bridge.env |
-| `--llm-provider <name>` | LLM for TUI output formatting: `anthropic` (default), `gemini`, `openai`, or `none` |
+| `--review [reviewer]` | Auto-create PR and request code review after implementation (requires `--prompt`). Reviewer (`codex` or `copilot`) can be specified or falls back to `config.toml` |
+| `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 
 #### When to use which?
 
 - **`vibepod run`** (interactive) — day-to-day development. You get a normal Claude Code session safely inside a Docker container. Permission prompts work normally — no bypass mode.
 - **`--prompt`** (fire-and-forget) — when the spec is already written and you want to kick off autonomous execution with `--dangerously-skip-permissions`. Great for running overnight or during meetings. Pair with a spec file in your repo: `vibepod run --prompt "Follow specs/login.md and implement"`.
 - **`--prompt --worktree`** — same as above, but runs in an isolated git worktree. Your working tree stays untouched. Review the changes before merging.
-- **`--prompt --review`** — runs autonomously, then creates a PR and requests a GitHub Copilot review. Fixes review feedback and pushes updates automatically.
+- **`--prompt --review`** — runs autonomously, then creates a PR and requests code review from configured reviewers (Codex, Copilot). Fixes review feedback and pushes updates automatically.
 
 #### Passing secrets with 1Password
 
@@ -102,51 +116,32 @@ VibePod resolves them via 1Password CLI before passing to the container:
 vibepod run --env-file .env.template
 ```
 
-### Bridge Mode (Slack notifications)
-
-Bridge mode monitors the container's terminal output and sends Slack notifications when the agent is waiting for input. You can respond directly from Slack.
-
-```bash
-vibepod run --bridge --llm-provider gemini
-```
-
-**Setup:**
-
-1. Create a Slack app with Socket Mode, Bot Token Scopes (`chat:write`, `reactions:read`), and Event Subscriptions (`message.im`, `reaction_added`)
-2. Configure `~/.config/vibepod/bridge.env`:
-
-```
-SLACK_BOT_TOKEN="xoxb-..."
-SLACK_APP_TOKEN="xapp-..."
-SLACK_CHANNEL_ID="C0123456789"
-ANTHROPIC_API_KEY="sk-..."
-GEMINI_API_KEY="AIza..."
-OPENAI_API_KEY="sk-..."
-```
-
-Values can use `op://` references for 1Password integration.
-
-3. Run with `--bridge`:
-
-```bash
-vibepod run --bridge                          # default: anthropic
-vibepod run --bridge --llm-provider none      # no LLM, local ANSI stripping only
-vibepod run --bridge --notify-delay 10        # 10s idle threshold
-```
-
-**Privacy:** Bridge mode sends terminal output to the selected LLM API and Slack. See [SECURITY.md](SECURITY.md) for details.
-
 ## Security Model
 
 VibePod provides 3-layer isolation:
 
 1. **Docker container** — the agent runs in an ephemeral container, not on your host
-2. **Minimal mounts** — only your project directory and Claude auth are mounted; no `~/.ssh`, no `.env`, no home directory
+2. **Minimal mounts** — only what the agent needs is mounted:
+   - `$(pwd)` → `/workspace` (read-write): your project files
+   - `~/.claude.json` → container via **temporary copy** (read-write): onboarding state; the host file is never written directly
+   - `~/.gitconfig` → `/home/vibepod/.gitconfig` (read-only): git user name and email
+   - `--mount`-specified paths (read-only): additional host paths you explicitly opt in
+   - `~/.codex/auth.json` (read-only, when `--review codex` is used): Codex authentication
+   - `GH_TOKEN` injected from `gh auth token` when available, for GitHub CLI access inside the container
 3. **Git safety net** — your project is git-managed, so any unwanted changes can be reverted with `git reset --hard`
 
 This follows [Anthropic's official recommendation](https://docs.anthropic.com/en/docs/claude-code/security) to use `--dangerously-skip-permissions` only inside containers.
 
-**Bridge mode** adds external data transmission to Slack and an LLM API. See [SECURITY.md](SECURITY.md) for the full data flow and trust model.
+### Interactive vs `--prompt` security model
+
+| Mode | `--dangerously-skip-permissions` | Safety boundary |
+|------|----------------------------------|-----------------|
+| `vibepod run` (interactive) | **Off** — permission prompts work normally | User approves each action |
+| `vibepod run --prompt` | **On** — autonomous execution | Container isolation is the safety boundary |
+
+In interactive mode, Claude Code asks for confirmation before each potentially destructive action. In `--prompt` mode these prompts are bypassed — the container's isolation is what prevents damage to your host.
+
+See [SECURITY.md](SECURITY.md) for the full security details.
 
 ## Alias
 
@@ -212,8 +207,9 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 | **v1.2** | `vibepod restore` (git HEAD auto-recovery with session reports) |
 | **v1.3** | Slack bridge mode (`--bridge`), multi-provider LLM formatting |
 | **v1.4** | Stream output, `--worktree` isolation, `--lang` toolchain, `--review` Copilot flow, banner version display, `RunOptions` refactoring |
+| **v1.5** | `vibepod ps`, `vibepod logs`, `--mount`, `config.toml` unified config, `--review` evolution (Codex + Copilot), bridge removal, docker run unification, run.rs split |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
-| **v2.1+** | Gemini CLI / Codex support, multi-container execution |
+| **v2.1+** | Gemini CLI / Codex as agent runtimes (not to be confused with `--review codex` which uses Codex for code review), multi-container execution |
 
 ## License
 

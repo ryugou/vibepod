@@ -9,14 +9,14 @@ pub async fn execute() -> Result<()> {
         println!("No running VibePod containers.");
         return Ok(());
     }
-    println!("{:<40} {:<20} {:<20}", "CONTAINER", "PROJECT", "STATUS");
+    println!("{:<45} {:<25} STATUS", "CONTAINER", "PROJECT");
     for (name, status) in &containers {
         let project = name
-            .trim_start_matches("vibepod-")
-            .rsplit_once('-')
+            .strip_prefix("vibepod-")
+            .and_then(|rest| rest.rsplit_once('-'))
             .map(|(p, _)| p)
             .unwrap_or(name);
-        println!("{:<40} {:<20} {:<20}", name, project, status);
+        println!("{:<45} {:<25} {}", name, project, status);
     }
     Ok(())
 }

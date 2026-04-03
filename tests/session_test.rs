@@ -28,10 +28,11 @@ fn test_session_limit_100() {
     let dir = TempDir::new().unwrap();
     let store = SessionStore::new(dir.path().join(".vibepod"));
 
-    for i in 0..105 {
+    for i in 0..105u64 {
         let session = Session {
             id: format!("session-{:04}", i),
-            started_at: format!("2026-03-23T{:02}:00:00+09:00", i % 24),
+            // Use unique monotonically-increasing timestamps so session order is deterministic
+            started_at: format!("2026-01-01T00:{:02}:{:02}+09:00", i / 60, i % 60),
             head_before: format!("{:040x}", i),
             branch: "main".to_string(),
             prompt: "interactive".to_string(),
