@@ -12,10 +12,6 @@ The container communicates with Claude's API as part of normal operation. This i
 
 **Exception — `--review`:** When `--review codex` or `--review copilot` is used, repository content may reach additional external services. `codex` runs `codex review` inside the container (OpenAI API); `copilot` creates a GitHub PR and triggers GitHub Copilot review (GitHub API). Treat `--review`-enabled runs accordingly.
 
-### Gemini API key transport
-
-The Gemini API uses a query-string `?key=` parameter (Google's official pattern). While functional, this means the API key appears in URLs. Proxy or network logs may capture it. The other providers (Anthropic, OpenAI) send keys via HTTP headers.
-
 ### GH_TOKEN automatic injection
 
 When `gh` is installed and authenticated on the host, VibePod runs `gh auth token` and injects the result as `GH_TOKEN` into the container. If `gh` is not installed or not authenticated, `GH_TOKEN` is not injected. When present, the container process has access to your host GitHub token and can perform GitHub operations (push, create PRs, call GitHub API) with the same permissions as your host user.

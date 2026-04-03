@@ -94,7 +94,6 @@ vibepod/
 | `tokio` | 非同期ランタイム（signal, process, io） |
 | `serde` / `serde_json` | 設定ファイル・JSONL ストリームのシリアライズ |
 | `toml` | TOML 設定ファイルのパース・シリアライズ |
-| `reqwest` | HTTP クライアント（GitHub API 等） |
 | `chrono` | 時刻処理（セッション管理、worktree 命名） |
 | `regex` | 正規表現（トークン抽出、選択肢検出） |
 | `anyhow` | エラーハンドリング |
@@ -195,9 +194,9 @@ image = "vibepod-claude:latest"
 1. カレントディレクトリが git リポジトリか確認
 2. `~/.config/vibepod/config.toml` からイメージ名を取得
 3. 初回実行のプロジェクトなら登録するか対話で確認
-4. Docker API でコンテナを作成・起動
+4. `docker run` コマンドでコンテナを作成・起動（インタラクティブは `-it --rm`、`--prompt` モードは `-d` + `docker logs --follow`）
 5. コンテナの stdout/stderr をターミナルにストリーミング
-6. Ctrl+C でコンテナを停止・削除
+6. Ctrl+C でコンテナを停止・削除（`docker stop` + `docker rm`）
 
 **CLI オプション：**
 
@@ -298,8 +297,9 @@ registered_at = "2026-03-22T10:00:00Z"
 │  ┌───────────────────────────┐  │
 │  │  Docker コンテナ            │  │
 │  │  ┌─────────────────────┐  │  │
-│  │  │  Claude Code        │  │  │
-│  │  │  (skip-permissions) │  │  │
+│  │  │  Claude Code              │  │  │
+│  │  │  interactive: 通常モード   │  │  │
+│  │  │  --prompt: skip-permissions│  │  │
 │  │  └─────────────────────┘  │  │
 │  │  見えるもの:               │  │
 │  │   ✅ /workspace (プロジェクト) │

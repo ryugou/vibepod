@@ -2,7 +2,7 @@
 
 Safely run AI coding agents in Docker containers.
 
-VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) inside an isolated container — with just two commands.
+VibePod wraps Docker to let you run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) inside an isolated container — set up in three steps.
 
 ## Quick Start
 
@@ -209,7 +209,7 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 | **v1.4** | Stream output, `--worktree` isolation, `--lang` toolchain, `--review` Copilot flow, banner version display, `RunOptions` refactoring |
 | **v1.5** | `vibepod ps`, `vibepod logs`, `--mount`, `config.toml` unified config, `--review` evolution (Codex + Copilot), bridge removal, docker run unification, run.rs split |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
-| **v2.1+** | Gemini CLI / Codex support, multi-container execution |
+| **v2.1+** | Gemini CLI / Codex as agent runtimes (not to be confused with `--review codex` which uses Codex for code review), multi-container execution |
 
 ## License
 
