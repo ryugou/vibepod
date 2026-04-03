@@ -298,28 +298,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         {
             if !interactive {
                 // Non-interactive mode: skip prompt, just replace
-                let stop = Command::new("docker")
-                    .args(["stop", "-t", "10", &existing_id])
-                    .output()
-                    .context("Failed to run docker stop")?;
-                if !stop.status.success() {
-                    bail!(
-                        "Failed to stop container {}: {}",
-                        existing_name,
-                        String::from_utf8_lossy(&stop.stderr).trim()
-                    );
-                }
-                let rm = Command::new("docker")
-                    .args(["rm", "-f", &existing_id])
-                    .output()
-                    .context("Failed to run docker rm")?;
-                if !rm.status.success() {
-                    bail!(
-                        "Failed to remove container {}: {}",
-                        existing_name,
-                        String::from_utf8_lossy(&rm.stderr).trim()
-                    );
-                }
+                runtime.stop_container(&existing_id, 10).await?;
+                runtime.remove_container(&existing_id).await?;
             } else {
                 match prompts::handle_existing_container(&existing_name)? {
                     prompts::ExistingContainerAction::Attach => {
@@ -328,28 +308,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                         return Ok(None);
                     }
                     prompts::ExistingContainerAction::Replace => {
-                        let stop = Command::new("docker")
-                            .args(["stop", "-t", "10", &existing_id])
-                            .output()
-                            .context("Failed to run docker stop")?;
-                        if !stop.status.success() {
-                            bail!(
-                                "Failed to stop container {}: {}",
-                                existing_name,
-                                String::from_utf8_lossy(&stop.stderr).trim()
-                            );
-                        }
-                        let rm = Command::new("docker")
-                            .args(["rm", "-f", &existing_id])
-                            .output()
-                            .context("Failed to run docker rm")?;
-                        if !rm.status.success() {
-                            bail!(
-                                "Failed to remove container {}: {}",
-                                existing_name,
-                                String::from_utf8_lossy(&rm.stderr).trim()
-                            );
-                        }
+                        runtime.stop_container(&existing_id, 10).await?;
+                        runtime.remove_container(&existing_id).await?;
                     }
                 }
             } // else (interactive)

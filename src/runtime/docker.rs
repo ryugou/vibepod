@@ -368,9 +368,10 @@ impl DockerRuntime {
         Ok(())
     }
 
-    pub async fn stop_container(&self, container_id: &str) -> Result<()> {
+    pub async fn stop_container(&self, container_id: &str, timeout_secs: u32) -> Result<()> {
+        let timeout_str = timeout_secs.to_string();
         let status = Command::new("docker")
-            .args(["stop", container_id])
+            .args(["stop", "-t", &timeout_str, container_id])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .status()

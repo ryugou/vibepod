@@ -24,14 +24,19 @@ async fn wait_for_reuse_setup(container_name: &str) -> Result<()> {
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = reader.lines();
 
+    let mut found_marker = false;
     while let Ok(Some(line)) = lines.next_line().await {
         println!("{}", line);
         if line.contains("VIBEPOD_SETUP_DONE") {
+            found_marker = true;
             break;
         }
     }
 
     let _ = child.kill().await;
+    if !found_marker {
+        bail!("Container setup failed: VIBEPOD_SETUP_DONE marker was not found. Check the setup output above for errors.");
+    }
     Ok(())
 }
 
@@ -158,12 +163,17 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     // Check docker logs exit status — a non-zero exit that isn't from Ctrl+C is an error
     if !ctrl_c_pressed {
         if let Ok(status) = exit_status {
-            if !status.success() {
-                bail!(
-                    "docker logs exited with non-zero status for container {}",
-                    ctx.container_name
-                );
+            // Signal-killed processes (e.g., after our kill()) have no exit code on Unix
+            if let Some(code) = status.code() {
+                if code != 0 {
+                    bail!(
+                        "docker logs exited with code {} for container {}",
+                        code,
+                        ctx.container_name
+                    );
+                }
             }
+            // No exit code (killed by signal) is expected after kill()
         }
     }
 
@@ -267,7 +277,7 @@ async fn run_reuse_prompt(opts: &RunOptions, ctx: &RunContext, _mode_label: &str
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
 
-    let (result_text, ctrl_c_pressed): (Option<String>, bool) = tokio::select! {
+    let (result_text, _ctrl_c_pressed): (Option<String>, bool) = tokio::select! {
         r = async {
             let mut rt: Option<String> = None;
             while let Ok(Some(line)) = lines.next_line().await {
