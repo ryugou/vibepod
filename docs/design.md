@@ -6,7 +6,7 @@ AI コーディングエージェントを Docker コンテナ内で安全に自
 
 Claude Code の `--dangerously-skip-permissions` はすべての操作を自動承認し、自律実行を可能にする。Anthropic 公式はコンテナ内での使用を推奨しているが、安全に使うための手順が煩雑（Dockerfile 作成、docker run のオプション指定、マウント管理等）。
 
-VibePod はこの手順を `init` + `run` の 2 コマンドに簡素化する。
+VibePod はこの手順を `init` + `login` + `run` の 3 ステップに簡素化する。
 
 ## ゴール
 
@@ -56,6 +56,8 @@ vibepod/
 │   │   ├── restore.rs    # vibepod restore
 │   │   ├── ps.rs         # vibepod ps（実行中コンテナ一覧）
 │   │   ├── logs.rs       # vibepod logs（コンテナログ表示）
+│   │   ├── stop.rs       # vibepod stop（コンテナ停止）
+│   │   ├── rm.rs         # vibepod rm（コンテナ削除）
 │   │   └── run/
 │   │       ├── mod.rs        # RunOptions, RunContext, execute, build_container_config
 │   │       ├── prepare.rs    # prepare_context
@@ -96,6 +98,8 @@ vibepod/
 | `chrono` | 時刻処理（セッション管理、worktree 命名） |
 | `regex` | 正規表現（トークン抽出、選択肢検出） |
 | `anyhow` | エラーハンドリング |
+| `sha2` | コンテナ名のパスハッシュ生成 |
+| `tempfile` | 一時ファイル（`.claude.json` コピー等） |
 
 ---
 
@@ -193,9 +197,11 @@ image = "vibepod-claude:latest"
 1. カレントディレクトリが git リポジトリか確認
 2. `~/.config/vibepod/config.toml` からイメージ名を取得
 3. 初回実行のプロジェクトなら登録するか対話で確認
-4. `docker run` コマンドでコンテナを作成・起動（インタラクティブは `-it --rm`、`--prompt` モードは `-d` + `docker logs --follow`）
-5. コンテナの stdout/stderr をターミナルにストリーミング
-6. Ctrl+C でコンテナを停止・削除（`docker stop` + `docker rm`）
+4. コンテナの状態を確認し、ライフサイクルに従って処理（詳細は下記「コンテナ再利用」参照）
+   - **コンテナなし**: `docker run -d` で作成 → setup 実行 → `docker exec` で Claude 起動
+   - **stopped**: `docker start` → マーカー確認 → `docker exec` で Claude 起動
+   - **running**: そのまま `docker exec` で Claude 起動（並行 exec）
+5. Ctrl+C で exec セッション終了（コンテナは停止せず保持。`vibepod stop` / `vibepod rm` で明示的に管理）
 
 **CLI オプション：**
 
@@ -334,7 +340,7 @@ registered_at = "2026-03-22T10:00:00Z"
 | `vibepod login` 未実行で `run` | エラーメッセージ + `vibepod login を先に実行してください` と案内 |
 | トークンの有効期限が残り 7 日以内 | `vibepod login` を再実行してくださいと案内（強制） |
 | カレントディレクトリが git リポジトリでない | エラーメッセージ + `git init されたディレクトリで実行してください` と案内 |
-| 同一プロジェクトで既にコンテナが実行中 | 既存コンテナに attach するか、停止して新規起動するか選択 |
+| 同一プロジェクトで既にコンテナが実行中 | そのまま `docker exec` で接続（並行セッション可）。`--new` 指定時はエラー: `vibepod stop` / `vibepod rm` を促す |
 | Docker イメージのビルド失敗（ネットワーク等） | エラー内容を表示 + リトライを促す |
 
 ## コンテナ管理
@@ -349,13 +355,10 @@ registered_at = "2026-03-22T10:00:00Z"
 **シグナルハンドリング (Ctrl+C):**
 
 1. SIGINT を受信
-2. コンテナに SIGTERM を送信（Claude Code が graceful に終了する猶予）
-3. 10 秒のタイムアウト
-4. タイムアウト後、SIGKILL で強制停止
-5. コンテナを削除
+2. `docker exec` セッションを終了（コンテナ自体は running のまま保持）
 
 > **コンテナはデフォルトで再利用**: プロジェクトごとに 1 つのコンテナが永続し、`vibepod run` のたびに再利用される。
-> `--new` を指定した場合や `--worktree` 使用時は使い捨てコンテナが作成される。
+> `--new` を指定した場合や `--worktree` 使用時は使い捨てコンテナが作成・削除される。
 > `~/.claude` はマウントしないため、コンテナ内のセッション情報は永続化されない。
 
 ---

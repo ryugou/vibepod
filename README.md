@@ -116,7 +116,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--review [reviewer]` | Auto-create PR and request code review after implementation (requires `--prompt`). Reviewer (`codex` or `copilot`) can be specified or falls back to `config.toml` |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
-| `--new` | Force-create a new container (discard existing) |
+| `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
 
 **Container reuse is the default.** VibePod creates one container per project (named `vibepod-{project}-{hash}`) and reuses it across runs. Setup only runs once; subsequent `vibepod run` calls skip setup and connect instantly via `docker exec`. Use `--new` to force a fresh container.
 
@@ -146,7 +146,7 @@ vibepod run --env-file .env.template
 
 VibePod provides 3-layer isolation:
 
-1. **Docker container** — the agent runs in an ephemeral container, not on your host
+1. **Docker container** — the agent runs in an isolated container, not on your host. By default, one container per project is reused across runs; use `--new` or `vibepod rm` to start fresh
 2. **Minimal mounts** — only what the agent needs is mounted:
    - `$(pwd)` → `/workspace` (read-write): your project files
    - `~/.claude.json` → container via **temporary copy** (read-write): onboarding state; the host file is never written directly
@@ -209,7 +209,7 @@ When running with `--prompt`, VibePod streams Claude Code's activity in real-tim
 Result:
 Implementation complete. All checks pass.
 
-Container stopped and removed.
+Container stopped (kept for reuse).
 ```
 
 #### Language toolchain auto-detection
