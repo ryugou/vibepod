@@ -4,6 +4,7 @@ pub mod logout;
 pub mod logs;
 pub mod ps;
 pub mod restore;
+pub mod rm;
 pub mod run;
 
 use clap::{Parser, Subcommand};
@@ -58,6 +59,9 @@ pub enum Commands {
         /// Format: <host-path>:<container-path> or <host-path> (mounted to /mnt/<filename>)
         #[arg(long, num_args = 1)]
         mount: Vec<String>,
+        /// Reuse container across runs (skip setup on subsequent runs)
+        #[arg(long)]
+        reuse: bool,
     },
     /// List running VibePod containers
     Ps {},
@@ -75,4 +79,12 @@ pub enum Commands {
     },
     /// Restore workspace to a previous session state
     Restore {},
+    /// Remove VibePod containers
+    Rm {
+        /// Container name (or use --all)
+        name: Option<String>,
+        /// Remove all VibePod containers
+        #[arg(long)]
+        all: bool,
+    },
 }

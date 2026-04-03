@@ -279,6 +279,19 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 4. Check for existing container
     let name_prefix = format!("vibepod-{}", project_name);
+
+    // --reuse: use a fixed container name and detect stopped containers for reconnection.
+    // Running reuse containers are handled below by the normal running-container prompt.
+    let (reuse_existing, container_name_override) = if opts.reuse {
+        let reuse_name = format!("vibepod-{}-reuse", project_name);
+        let existing_id = runtime.find_stopped_container(&reuse_name).await?;
+        (existing_id.is_some(), Some(reuse_name))
+    } else {
+        (false, None)
+    };
+
+    // For all modes (including --reuse): if a container with the project prefix is already
+    // running, prompt the user to attach or replace it.
     if let Some((existing_id, existing_name)) = runtime.find_running_container(&name_prefix).await?
     {
         match prompts::handle_existing_container(&existing_name)? {
@@ -429,10 +442,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 8. Generate container name
-    let short_hash: String = (0..6)
-        .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
-        .collect();
-    let container_name = format!("vibepod-{}-{}", project_name, short_hash);
+    let container_name = if let Some(override_name) = container_name_override {
+        override_name
+    } else {
+        let short_hash: String = (0..6)
+            .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
+            .collect();
+        format!("vibepod-{}-{}", project_name, short_hash)
+    };
 
     // 9. Auth: load token
     let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
@@ -496,5 +513,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         store,
         deferred_session,
         extra_mounts,
+        reuse: opts.reuse,
+        reuse_existing,
     }))
 }

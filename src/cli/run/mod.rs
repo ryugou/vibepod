@@ -21,6 +21,7 @@ pub struct RunOptions {
     pub worktree: bool,
     pub review: Option<String>,
     pub mount: Vec<String>,
+    pub reuse: bool,
 }
 
 pub(super) struct RunContext {
@@ -40,6 +41,10 @@ pub(super) struct RunContext {
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
+    /// `--reuse` flag was set
+    pub(super) reuse: bool,
+    /// An existing reuse container was found (skip setup, reconnect instead of `docker run`)
+    pub(super) reuse_existing: bool,
 }
 
 pub fn parse_mount_arg(arg: &str) -> anyhow::Result<(String, String)> {
@@ -211,6 +216,10 @@ pub(super) fn build_container_config(
         setup_cmd: ctx.setup_cmd.clone(),
         codex_auth: ctx.codex_auth.clone(),
         extra_mounts: ctx.extra_mounts.clone(),
+        reuse: ctx.reuse,
+        // Use idle entrypoint when creating a new reuse container so subsequent runs
+        // can `docker start` + `docker exec` without re-running setup.
+        reuse_entrypoint: ctx.reuse && !ctx.reuse_existing,
     }
 }
 
