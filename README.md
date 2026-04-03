@@ -88,8 +88,8 @@ vibepod rm --all
 
 | Argument | Description |
 |----------|-------------|
-| `<name>` | 削除するコンテナ名 |
-| `--all` | 全 VibePod コンテナを削除 |
+| `<name>` | Name of the container to remove |
+| `--all` | Remove all VibePod containers |
 
 ### `vibepod logs`
 
