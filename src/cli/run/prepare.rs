@@ -290,17 +290,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         (false, None)
     };
 
-    // For all modes (including --reuse): if a container with the project prefix is already
-    // running, prompt the user to attach or replace it.
-    if let Some((existing_id, existing_name)) = runtime.find_running_container(&name_prefix).await?
-    {
-        match prompts::handle_existing_container(&existing_name)? {
-            prompts::ExistingContainerAction::Attach => {
-                println!("  ◇  Attaching to {}...", existing_name);
-                runtime.stream_logs(&existing_id).await?;
-                return Ok(None);
-            }
-            prompts::ExistingContainerAction::Replace => {
+    // If a container with the project prefix is already running (and we're not reusing it),
+    // prompt the user to attach or replace it.
+    if !reuse_existing {
+        if let Some((existing_id, existing_name)) =
+            runtime.find_running_container(&name_prefix).await?
+        {
+            if !interactive {
+                // Non-interactive mode: skip prompt, just replace
                 let stop = Command::new("docker")
                     .args(["stop", "-t", "10", &existing_id])
                     .output()
@@ -323,9 +320,41 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                         String::from_utf8_lossy(&rm.stderr).trim()
                     );
                 }
-            }
+            } else {
+                match prompts::handle_existing_container(&existing_name)? {
+                    prompts::ExistingContainerAction::Attach => {
+                        println!("  ◇  Attaching to {}...", existing_name);
+                        runtime.stream_logs(&existing_id).await?;
+                        return Ok(None);
+                    }
+                    prompts::ExistingContainerAction::Replace => {
+                        let stop = Command::new("docker")
+                            .args(["stop", "-t", "10", &existing_id])
+                            .output()
+                            .context("Failed to run docker stop")?;
+                        if !stop.status.success() {
+                            bail!(
+                                "Failed to stop container {}: {}",
+                                existing_name,
+                                String::from_utf8_lossy(&stop.stderr).trim()
+                            );
+                        }
+                        let rm = Command::new("docker")
+                            .args(["rm", "-f", &existing_id])
+                            .output()
+                            .context("Failed to run docker rm")?;
+                        if !rm.status.success() {
+                            bail!(
+                                "Failed to remove container {}: {}",
+                                existing_name,
+                                String::from_utf8_lossy(&rm.stderr).trim()
+                            );
+                        }
+                    }
+                }
+            } // else (interactive)
         }
-    }
+    } // if !reuse_existing
 
     // 5. Project registration
     let mut projects = config::load_projects(&config_dir)?;

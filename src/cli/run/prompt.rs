@@ -293,14 +293,12 @@ async fn run_reuse_prompt(opts: &RunOptions, ctx: &RunContext, _mode_label: &str
     let _ = exec_child.kill().await;
     let _ = exec_child.wait().await;
 
-    // On Ctrl+C, stop the container (but preserve it) so the next run
-    // finds it as a stopped container rather than hitting the running-container prompt.
-    if ctrl_c_pressed {
-        Command::new("docker")
-            .args(["stop", "-t", "10", &ctx.container_name])
-            .output()
-            .ok();
-    }
+    // Stop the container (but preserve it) so the next run --reuse
+    // finds it as a stopped container and can quickly restart it.
+    Command::new("docker")
+        .args(["stop", "-t", "10", &ctx.container_name])
+        .output()
+        .ok();
     // Container is preserved (not removed) for the next vibepod run --reuse
 
     if opts.prompt.is_some() {
