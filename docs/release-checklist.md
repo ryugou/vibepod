@@ -19,9 +19,17 @@
 
 ### インタラクティブモード
 
-- [ ] `vibepod run` — コンテナが起動し、Claude Code の対話セッションに入れる
+- [ ] `vibepod run` — 初回: コンテナ作成 → setup → Claude Code セッション開始
+- [ ] `vibepod run` — 2回目: setup スキップ → 即座に Claude Code セッション開始（コンテナ再利用）
 - [ ] コンテナ内でファイル読み書きができる（/workspace にプロジェクトがマウントされている）
-- [ ] Ctrl+C でコンテナが停止・削除される
+- [ ] Ctrl+C でセッション終了（コンテナは保持される）
+
+### コンテナ管理
+
+- [ ] `vibepod stop <name>` — コンテナが停止する（削除されない）
+- [ ] `vibepod stop --all` — 全 VibePod コンテナが停止する
+- [ ] `vibepod run --new` — 既存コンテナを破棄して新規作成される
+- [ ] `vibepod run --new`（running 時）— エラーメッセージが表示される
 
 ### prompt モード
 
