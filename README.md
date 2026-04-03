@@ -220,9 +220,8 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 | **v1.0** | `init` + `run` (interactive / fire-and-forget), Claude Code support |
 | **v1.1** | Pre-installed plugins (superpowers, frontend-design), `--env-file` with 1Password integration |
 | **v1.2** | `vibepod restore` (git HEAD auto-recovery with session reports) |
-| **v1.3** | Slack bridge mode (`--bridge`), multi-provider LLM formatting |
-| **v1.4** | Stream output, `--worktree` isolation, `--lang` toolchain, `--review` Copilot flow, banner version display, `RunOptions` refactoring |
-| **v1.5** | `vibepod ps`, `vibepod logs`, `--mount`, `config.toml` unified config, `--review` evolution (Codex + Copilot), bridge removal, docker run unification, run.rs split |
+| **v1.3** | Slack bridge mode (removed in v1.4), multi-provider LLM formatting |
+| **v1.4** | Stream output, `--worktree` isolation, `--lang` toolchain, `--review` (Codex + Copilot), `vibepod ps`, `vibepod logs`, `--mount`, `--reuse`, `vibepod rm`, `config.toml` unified config, bridge removal, docker run unification, run.rs split |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
 | **v2.1+** | Gemini CLI / Codex as agent runtimes (not to be confused with `--review codex` which uses Codex for code review), multi-container execution |
 
