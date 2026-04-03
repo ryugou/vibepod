@@ -3,44 +3,43 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::process::Command;
 
+/// コンテナの状態を表す列挙型。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContainerStatus {
+    /// コンテナが存在しない
+    None,
+    /// コンテナが停止中（exited）
+    Stopped,
+    /// コンテナが実行中（running）
+    Running,
+}
+
 /// Docker CLI ラッパー。docker コマンドを通じてコンテナ操作を行う。
 pub struct DockerRuntime;
 
 /// コンテナ起動設定。`docker run` に渡す全パラメータを保持する。
+/// コンテナは常にアイドルエントリポイント（`tail -f /dev/null`）で起動し、
+/// Claude は `docker exec` で実行する。
 pub struct ContainerConfig {
     pub image: String,
     pub container_name: String,
     pub workspace_path: String,
     pub claude_json: Option<String>,
     pub gitconfig: Option<String>,
-    pub args: Vec<String>,
+    /// ユーザー環境変数（認証トークンを除く）
     pub env_vars: Vec<String>,
     pub network_disabled: bool,
-    pub setup_cmd: Option<String>,
     pub codex_auth: Option<String>,
     pub extra_mounts: Vec<(String, String)>,
-    /// When true, omit `--rm` from `docker run` (container persists after exit)
-    pub reuse: bool,
-    /// When true, run the container with an idle entrypoint (`tail -f /dev/null`) so it
-    /// stays alive for `docker exec`; setup_cmd runs first if present.
-    /// Used when creating a brand-new reuse container.
-    pub reuse_entrypoint: bool,
+    /// コンテナ作成時に付与するラベル（設定変更の検知に使用）
+    pub labels: HashMap<String, String>,
 }
 
 impl ContainerConfig {
-    pub fn to_docker_args(&self, interactive: bool) -> Vec<String> {
-        let mut args = vec!["run".to_string()];
-        if self.reuse_entrypoint {
-            // Creating a new reuse container: always detached, no --rm
-            args.push("-d".to_string());
-        } else if interactive {
-            args.push("-it".to_string());
-            if !self.reuse {
-                args.push("--rm".to_string());
-            }
-        } else {
-            args.push("-d".to_string());
-        }
+    /// `docker run -d` 用の引数を生成する。
+    /// コンテナは常にアイドルエントリポイント（`tail -f /dev/null`）で起動する。
+    pub fn to_create_args(&self) -> Vec<String> {
+        let mut args = vec!["run".to_string(), "-d".to_string()];
         args.push("--name".to_string());
         args.push(self.container_name.clone());
         args.push("-v".to_string());
@@ -78,31 +77,17 @@ impl ContainerConfig {
         args.push("-e".to_string());
         args.push("TERM=xterm-256color".to_string());
 
+        for (key, value) in &self.labels {
+            args.push("--label".to_string());
+            args.push(format!("{}={}", key, value));
+        }
+
         args.push(self.image.clone());
 
-        if self.reuse_entrypoint {
-            // Idle entrypoint: run setup (if any) then keep container alive
-            if let Some(ref setup) = self.setup_cmd {
-                args.push("sh".to_string());
-                args.push("-c".to_string());
-                args.push(format!(
-                    "{} && echo VIBEPOD_SETUP_DONE && tail -f /dev/null",
-                    setup
-                ));
-            } else {
-                args.push("tail".to_string());
-                args.push("-f".to_string());
-                args.push("/dev/null".to_string());
-            }
-        } else {
-            if let Some(ref setup) = self.setup_cmd {
-                args.push("sh".to_string());
-                args.push("-c".to_string());
-                args.push(format!("{} && exec \"$@\"", setup));
-                args.push("sh".to_string());
-            }
-            args.extend(self.args.clone());
-        }
+        // 常にアイドルエントリポイントで起動
+        args.push("tail".to_string());
+        args.push("-f".to_string());
+        args.push("/dev/null".to_string());
 
         args
     }
@@ -189,6 +174,75 @@ impl DockerRuntime {
         } else {
             anyhow::bail!("docker inspect failed: {}", stderr.trim())
         }
+    }
+
+    /// コンテナの状態（None / Stopped / Running）を返す。
+    pub async fn find_container_status(&self, name: &str) -> Result<ContainerStatus> {
+        let filter = format!("name={}", name);
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-a",
+                "--filter",
+                &filter,
+                "--format",
+                "{{.Names}}\t{{.Status}}",
+            ])
+            .output()
+            .await
+            .context("Failed to run docker ps")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker ps failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some((container_name, status)) = line.split_once('\t') {
+                if container_name == name {
+                    if status.starts_with("Up") || status.to_lowercase().contains("running") {
+                        return Ok(ContainerStatus::Running);
+                    } else {
+                        return Ok(ContainerStatus::Stopped);
+                    }
+                }
+            }
+        }
+        Ok(ContainerStatus::None)
+    }
+
+    /// コンテナのラベルを取得する。
+    pub async fn get_container_labels(&self, name: &str) -> Result<HashMap<String, String>> {
+        let output = Command::new("docker")
+            .args(["inspect", "--format", "{{json .Config.Labels}}", name])
+            .output()
+            .await
+            .context("Failed to run docker inspect")?;
+
+        if !output.status.success() {
+            return Ok(HashMap::new());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout == "null" || stdout.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let labels: HashMap<String, String> = serde_json::from_str(&stdout).unwrap_or_default();
+        Ok(labels)
+    }
+
+    /// `/.vibepod-setup-done` マーカーファイルの存在を確認する。
+    pub async fn check_setup_marker(&self, name: &str) -> Result<bool> {
+        let output = Command::new("docker")
+            .args(["exec", name, "test", "-f", "/.vibepod-setup-done"])
+            .output()
+            .await
+            .context("Failed to run docker exec test")?;
+        Ok(output.status.success())
     }
 
     pub async fn find_running_container(

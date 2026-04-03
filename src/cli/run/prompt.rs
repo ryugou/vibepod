@@ -1,42 +1,58 @@
 use anyhow::{bail, Context, Result};
 use std::process::Command;
 
-use crate::runtime::{format_stream_event, StreamEvent};
+use crate::runtime::{format_stream_event, ContainerStatus, DockerRuntime, StreamEvent};
 
 use super::{build_container_config, RunContext, RunOptions};
 
-/// For a new reuse container that has a `setup_cmd`, follow docker logs until
-/// `VIBEPOD_SETUP_DONE` appears.
-async fn wait_for_reuse_setup(container_name: &str) -> Result<()> {
-    use tokio::io::AsyncBufReadExt;
+/// コンテナを作成してセットアップを実行する（初回フロー）。
+/// セットアップ失敗時はコンテナを自動削除してエラーを返す。
+async fn create_and_setup(ctx: &RunContext, opts: &RunOptions) -> Result<()> {
+    let container_config =
+        build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
+    let create_args = container_config.to_create_args();
 
-    let mut child = tokio::process::Command::new("docker")
-        .args(["logs", "--follow", container_name])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("Failed to follow setup logs")?;
+    let output = Command::new("docker")
+        .args(&create_args)
+        .output()
+        .context("Failed to create container")?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .context("Failed to capture setup logs")?;
-    let reader = tokio::io::BufReader::new(stdout);
-    let mut lines = reader.lines();
-
-    let mut found_marker = false;
-    while let Ok(Some(line)) = lines.next_line().await {
-        println!("{}", line);
-        if line.contains("VIBEPOD_SETUP_DONE") {
-            found_marker = true;
-            break;
-        }
+    if !output.status.success() {
+        bail!(
+            "Failed to create container: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
-    let _ = child.kill().await;
-    if !found_marker {
-        bail!("Container setup failed: VIBEPOD_SETUP_DONE marker was not found. Check the setup output above for errors.");
+    // セットアップコマンドを実行してマーカーを作成する
+    let setup_result = if let Some(ref setup_cmd) = ctx.setup_cmd {
+        let full_cmd = format!("{} && touch /.vibepod-setup-done", setup_cmd);
+        Command::new("docker")
+            .args(["exec", &ctx.container_name, "sh", "-c", &full_cmd])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("Failed to run setup command")?
+    } else {
+        Command::new("docker")
+            .args(["exec", &ctx.container_name, "touch", "/.vibepod-setup-done"])
+            .status()
+            .context("Failed to create setup marker")?
+    };
+
+    if !setup_result.success() {
+        // セットアップ失敗: コンテナを自動削除
+        Command::new("docker")
+            .args(["rm", "-f", &ctx.container_name])
+            .output()
+            .ok();
+        bail!(
+            "Container setup failed. Container has been removed. \
+             Check the output above for errors."
+        );
     }
+
     Ok(())
 }
 
@@ -75,30 +91,44 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         println!("  │");
     }
 
-    // For reuse mode: ensure the container is running its idle entrypoint,
-    // then run claude via docker exec (output captured directly from exec stdout).
-    if ctx.reuse {
-        return run_reuse_prompt(opts, ctx, mode_label).await;
+    let runtime = DockerRuntime::new().await?;
+
+    // コンテナライフサイクルの管理
+    match ctx.container_status {
+        ContainerStatus::Running => {
+            // 実行中でもセットアップ完了マーカーを確認する
+            // （初回起動途中で中断された場合にセットアップ未完了のまま残ることがある）
+            if !runtime.check_setup_marker(&ctx.container_name).await? {
+                // マーカーなし: セットアップ未完了 → コンテナ削除して初回フローへ
+                runtime.remove_container(&ctx.container_name).await?;
+                create_and_setup(ctx, opts).await?;
+            }
+        }
+        ContainerStatus::Stopped => {
+            // 停止中のコンテナを起動してマーカー確認
+            let start = Command::new("docker")
+                .args(["start", &ctx.container_name])
+                .output()
+                .context("Failed to start container")?;
+            if !start.status.success() {
+                bail!(
+                    "Failed to start container: {}",
+                    String::from_utf8_lossy(&start.stderr).trim()
+                );
+            }
+            if !runtime.check_setup_marker(&ctx.container_name).await? {
+                // マーカーなし: セットアップ未完了 → コンテナ削除して初回フローへ
+                runtime.remove_container(&ctx.container_name).await?;
+                create_and_setup(ctx, opts).await?;
+            }
+        }
+        ContainerStatus::None => {
+            // コンテナなし: 新規作成してセットアップ
+            create_and_setup(ctx, opts).await?;
+        }
     }
 
-    let container_config =
-        build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
-    let docker_run_args = container_config.to_docker_args(false);
-
-    // Start container with docker run -d
-    let start_output = Command::new("docker")
-        .args(&docker_run_args)
-        .output()
-        .context("Failed to start container")?;
-
-    if !start_output.status.success() {
-        bail!(
-            "Failed to start container: {}",
-            String::from_utf8_lossy(&start_output.stderr).trim()
-        );
-    }
-
-    // Record session now that container has actually started
+    // セッションを記録
     ctx.store.add(ctx.deferred_session.clone())?;
 
     if opts.prompt.is_some() {
@@ -116,153 +146,36 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         println!("{}", separator);
     }
 
-    // Stream logs with docker logs --follow
-    let mut log_child = tokio::process::Command::new("docker")
-        .args(["logs", "--follow", &ctx.container_name])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("Failed to run docker logs")?;
-
-    let stdout = log_child
-        .stdout
-        .take()
-        .context("Failed to capture docker logs stdout")?;
-
-    let is_prompt = opts.prompt.is_some();
-    let reader = tokio::io::BufReader::new(stdout);
-    let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
-
-    let (result_text, ctrl_c_pressed): (Option<String>, bool) = tokio::select! {
-        r = async {
-            let mut rt: Option<String> = None;
-            while let Ok(Some(line)) = lines.next_line().await {
-                if is_prompt {
-                    match format_stream_event(&line) {
-                        StreamEvent::Display(s) => println!("{}", s),
-                        StreamEvent::Result(s) => rt = Some(s),
-                        StreamEvent::Skip => {}
-                        StreamEvent::PassThrough(s) => println!("{}", s),
-                    }
-                } else {
-                    println!("{}", line);
-                }
-            }
-            (rt, false)
-        } => r,
-        _ = tokio::signal::ctrl_c() => {
-            println!("\nStopping container...");
-            (None, true)
-        }
+    // ログファイルのセットアップ（--prompt モードのみ）
+    let log_file = if opts.prompt.is_some() {
+        let session_dir = std::path::Path::new(&ctx.effective_workspace)
+            .join(".vibepod")
+            .join("sessions")
+            .join(&ctx.deferred_session.id);
+        std::fs::create_dir_all(&session_dir)?;
+        let log_path = session_dir.join("logs.txt");
+        Some(std::fs::File::create(&log_path).context("Failed to create log file")?)
+    } else {
+        None
     };
 
-    // Kill the log child first so wait() doesn't block
-    let _ = log_child.kill().await;
-    let exit_status = log_child.wait().await;
-
-    // Check docker logs exit status — a non-zero exit that isn't from Ctrl+C is an error
-    if !ctrl_c_pressed {
-        if let Ok(status) = exit_status {
-            // Signal-killed processes (e.g., after our kill()) have no exit code on Unix
-            if let Some(code) = status.code() {
-                if code != 0 {
-                    bail!(
-                        "docker logs exited with code {} for container {}",
-                        code,
-                        ctx.container_name
-                    );
-                }
-            }
-            // No exit code (killed by signal) is expected after kill()
-        }
+    // docker exec -e TOKEN=... {name} bash --login -c 'exec claude "$@"' -- {args}
+    // bash --login でログインプロファイルをソースし、setup で設定した PATH を引き継ぐ
+    let mut exec_args = vec!["exec".to_string()];
+    for env_var in &ctx.exec_env_vars {
+        exec_args.push("-e".to_string());
+        exec_args.push(env_var.clone());
     }
+    exec_args.push(ctx.container_name.clone());
+    exec_args.push("bash".to_string());
+    exec_args.push("--login".to_string());
+    exec_args.push("-c".to_string());
+    exec_args.push(r#"exec claude "$@""#.to_string());
+    exec_args.push("--".to_string()); // $0 placeholder
+    exec_args.extend(ctx.claude_args.clone());
 
-    Command::new("docker")
-        .args(["stop", "-t", "10", &ctx.container_name])
-        .output()
-        .ok();
-    Command::new("docker")
-        .args(["rm", "-f", &ctx.container_name])
-        .output()
-        .ok();
-
-    if opts.prompt.is_some() {
-        println!("{}", separator);
-    }
-
-    // Clean up temp claude.json
-    if let Some(ref temp_cj) = ctx.temp_claude_json {
-        std::fs::remove_file(temp_cj).ok();
-    }
-
-    print_post_run_summary(opts, ctx, result_text.as_deref(), false);
-    Ok(())
-}
-
-/// Run fire-and-forget mode for a `--reuse` container.
-/// The container uses an idle entrypoint (`tail -f /dev/null`); claude is run
-/// via `docker exec` so that subsequent runs can reuse the same container without
-/// re-executing setup.
-async fn run_reuse_prompt(opts: &RunOptions, ctx: &RunContext, _mode_label: &str) -> Result<()> {
-    if ctx.reuse_existing {
-        // Container was stopped; restart its idle entrypoint
-        let start = Command::new("docker")
-            .args(["start", &ctx.container_name])
-            .output()
-            .context("Failed to start reuse container")?;
-        if !start.status.success() {
-            bail!(
-                "Failed to start reuse container: {}",
-                String::from_utf8_lossy(&start.stderr).trim()
-            );
-        }
-    } else {
-        // First run: create the container with an idle entrypoint
-        let container_config =
-            build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
-        let docker_run_args = container_config.to_docker_args(false);
-
-        let start_output = Command::new("docker")
-            .args(&docker_run_args)
-            .output()
-            .context("Failed to start container")?;
-
-        if !start_output.status.success() {
-            bail!(
-                "Failed to start container: {}",
-                String::from_utf8_lossy(&start_output.stderr).trim()
-            );
-        }
-
-        // Wait for setup to finish before running claude
-        if ctx.setup_cmd.is_some() {
-            wait_for_reuse_setup(&ctx.container_name).await?;
-        }
-    }
-
-    ctx.store.add(ctx.deferred_session.clone())?;
-
-    if opts.prompt.is_some() {
-        println!("Container started: {}", ctx.container_name);
-        println!("Press Ctrl+C to stop the container.");
-        println!();
-    } else {
-        println!("  ◇  Container started: {}", ctx.container_name);
-        println!("  │  Press Ctrl+C to stop the container.");
-        println!("  └\n");
-    }
-
-    let separator = "────────────────────────────────────────────────────────";
-    if opts.prompt.is_some() {
-        println!("{}", separator);
-    }
-
-    // Run claude via docker exec and capture output directly
     let mut exec_child = tokio::process::Command::new("docker")
-        .arg("exec")
-        .arg(&ctx.container_name)
-        .arg("claude")
-        .args(&ctx.claude_args)
+        .args(&exec_args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
         .spawn()
@@ -277,10 +190,16 @@ async fn run_reuse_prompt(opts: &RunOptions, ctx: &RunContext, _mode_label: &str
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
 
-    let (result_text, _ctrl_c_pressed): (Option<String>, bool) = tokio::select! {
+    let (result_text, ctrl_c_pressed): (Option<String>, bool) = tokio::select! {
         r = async {
             let mut rt: Option<String> = None;
+            let mut log = log_file;
             while let Ok(Some(line)) = lines.next_line().await {
+                // ログファイルに書き出し
+                if let Some(ref mut f) = log {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{}", line);
+                }
                 if is_prompt {
                     match format_stream_event(&line) {
                         StreamEvent::Display(s) => println!("{}", s),
@@ -300,27 +219,52 @@ async fn run_reuse_prompt(opts: &RunOptions, ctx: &RunContext, _mode_label: &str
         }
     };
 
-    let _ = exec_child.kill().await;
-    let _ = exec_child.wait().await;
-
-    // Stop the container (but preserve it) so the next run --reuse
-    // finds it as a stopped container and can quickly restart it.
-    Command::new("docker")
-        .args(["stop", "-t", "10", &ctx.container_name])
-        .output()
-        .ok();
-    // Container is preserved (not removed) for the next vibepod run --reuse
+    // exec の終了ステータスを確認する（Ctrl+C でなければ）
+    if ctrl_c_pressed {
+        let _ = exec_child.kill().await;
+        let _ = exec_child.wait().await;
+    } else {
+        // プロセスはすでに終了しているので kill 不要
+        if let Ok(status) = exec_child.wait().await {
+            if let Some(code) = status.code() {
+                // 非ゼロ終了かつ結果なしはコンテナ起動失敗の可能性
+                if code != 0 && result_text.is_none() {
+                    eprintln!(
+                        "Warning: docker exec exited with code {} (container may have failed to \
+                         start Claude). Use `vibepod logs {}` to inspect.",
+                        code, ctx.container_name
+                    );
+                }
+            }
+        }
+    }
 
     if opts.prompt.is_some() {
         println!("{}", separator);
     }
 
-    // Clean up temp claude.json
-    if let Some(ref temp_cj) = ctx.temp_claude_json {
-        std::fs::remove_file(temp_cj).ok();
+    // コンテナの後処理
+    if ctx.is_disposable {
+        // 使い捨てコンテナ（--worktree）: 削除
+        Command::new("docker")
+            .args(["rm", "-f", &ctx.container_name])
+            .output()
+            .ok();
+        // 使い捨てコンテナのみ temp claude.json を削除する
+        // 永続コンテナは次回起動時に bind mount が必要なため削除しない
+        if let Some(ref temp_cj) = ctx.temp_claude_json {
+            std::fs::remove_file(temp_cj).ok();
+        }
+    } else if ctx.container_status != ContainerStatus::Running {
+        // 停止中または新規作成したコンテナ: 停止して保持
+        Command::new("docker")
+            .args(["stop", "-t", "10", &ctx.container_name])
+            .output()
+            .ok();
     }
+    // 元から実行中だったコンテナは停止しない
 
-    print_post_run_summary(opts, ctx, result_text.as_deref(), true);
+    print_post_run_summary(opts, ctx, result_text.as_deref(), ctx.is_disposable);
     Ok(())
 }
 
@@ -328,12 +272,14 @@ fn print_post_run_summary(
     opts: &RunOptions,
     ctx: &RunContext,
     result_text: Option<&str>,
-    reuse: bool,
+    disposable: bool,
 ) {
-    let stopped_msg = if reuse {
-        "Container stopped (reuse mode: container preserved)."
-    } else {
+    let stopped_msg = if disposable {
         "Container stopped and removed."
+    } else if ctx.container_status == ContainerStatus::Running {
+        "Disconnected from container (still running)."
+    } else {
+        "Container stopped (container preserved for next run)."
     };
 
     if opts.prompt.is_some() {

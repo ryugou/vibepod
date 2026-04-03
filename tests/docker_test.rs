@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use vibepod::runtime::{ContainerConfig, DockerRuntime};
 
 /// These tests require Docker to be running. Run with:
@@ -25,52 +26,41 @@ fn base_config() -> ContainerConfig {
         workspace_path: "/tmp/workspace".to_string(),
         claude_json: None,
         gitconfig: None,
-        args: vec!["claude".to_string()],
         env_vars: vec![],
         network_disabled: false,
-        setup_cmd: None,
         codex_auth: None,
         extra_mounts: vec![],
-        reuse: false,
-        reuse_entrypoint: false,
+        labels: HashMap::new(),
     }
 }
 
-// --- to_docker_args tests ---
+// --- to_create_args tests ---
 
 #[test]
-fn test_to_docker_args_interactive() {
+fn test_to_create_args_always_detached() {
     let config = base_config();
-    let args = config.to_docker_args(true);
-    assert!(args.contains(&"-it".to_string()));
-    assert!(args.contains(&"--rm".to_string()));
-    assert!(!args.contains(&"-d".to_string()));
-}
-
-#[test]
-fn test_to_docker_args_detached() {
-    let config = base_config();
-    let args = config.to_docker_args(false);
+    let args = config.to_create_args();
+    // コンテナ作成は常に -d（デタッチ）
     assert!(args.contains(&"-d".to_string()));
     assert!(!args.contains(&"-it".to_string()));
-}
-
-#[test]
-fn test_to_docker_args_reuse() {
-    let mut config = base_config();
-    config.reuse = true;
-    config.container_name = "vibepod-myproject-reuse".to_string();
-    let args = config.to_docker_args(true);
-    // --rm must not be present in reuse mode
     assert!(!args.contains(&"--rm".to_string()));
-    assert!(config.container_name.contains("-reuse"));
 }
 
 #[test]
-fn test_to_docker_args_env_vars() {
+fn test_to_create_args_idle_entrypoint() {
+    let config = base_config();
+    let args = config.to_create_args();
+    // 常に idle エントリポイント（tail -f /dev/null）
+    assert!(args.contains(&"tail".to_string()));
+    assert!(args.contains(&"-f".to_string()));
+    assert!(args.contains(&"/dev/null".to_string()));
+}
+
+#[test]
+fn test_to_create_args_env_vars() {
     let mut config = base_config();
     config.env_vars = vec!["FOO=bar".to_string(), "BAZ=qux".to_string()];
-    let args = config.to_docker_args(false);
+    let args = config.to_create_args();
     // Each env var should be preceded by -e
     let e_positions: Vec<usize> = args
         .iter()
@@ -87,16 +77,34 @@ fn test_to_docker_args_env_vars() {
 }
 
 #[test]
-fn test_to_docker_args_setup_cmd() {
+fn test_to_create_args_no_setup_cmd() {
+    // セットアップは docker exec で行うため、to_create_args には sh -c が含まれない
+    let config = base_config();
+    let args = config.to_create_args();
+    assert!(!args.contains(&"sh".to_string()));
+    assert!(!args.contains(&"-c".to_string()));
+}
+
+#[test]
+fn test_to_create_args_labels() {
     let mut config = base_config();
-    config.setup_cmd = Some("apt-get install -y curl".to_string());
-    let args = config.to_docker_args(false);
-    // setup_cmd wraps with sh -c
-    assert!(args.contains(&"sh".to_string()));
-    assert!(args.contains(&"-c".to_string()));
-    let sh_c_idx = args.iter().position(|a| a == "-c").unwrap();
-    let cmd_str = &args[sh_c_idx + 1];
-    assert!(cmd_str.contains("apt-get install -y curl"));
+    config
+        .labels
+        .insert("vibepod.lang".to_string(), "rust".to_string());
+    let args = config.to_create_args();
+    assert!(args.contains(&"--label".to_string()));
+    let label_idx = args.iter().position(|a| a == "--label").unwrap();
+    assert_eq!(args[label_idx + 1], "vibepod.lang=rust");
+}
+
+#[test]
+fn test_to_create_args_network_disabled() {
+    let mut config = base_config();
+    config.network_disabled = true;
+    let args = config.to_create_args();
+    assert!(args.contains(&"--network".to_string()));
+    let net_idx = args.iter().position(|a| a == "--network").unwrap();
+    assert_eq!(args[net_idx + 1], "none");
 }
 
 // --- vibepod rm prefix validation test ---
@@ -104,6 +112,16 @@ fn test_to_docker_args_setup_cmd() {
 #[tokio::test]
 async fn test_rm_rejects_non_vibepod_prefix() {
     let result = vibepod::cli::rm::execute(Some("mycontainer".to_string()), false).await;
+    assert!(result.is_err());
+    let msg = format!("{}", result.unwrap_err());
+    assert!(msg.contains("not a VibePod container"));
+}
+
+// --- vibepod stop prefix validation test ---
+
+#[tokio::test]
+async fn test_stop_rejects_non_vibepod_prefix() {
+    let result = vibepod::cli::stop::execute(Some("mycontainer".to_string()), false).await;
     assert!(result.is_err());
     let msg = format!("{}", result.unwrap_err());
     assert!(msg.contains("not a VibePod container"));

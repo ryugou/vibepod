@@ -1,16 +1,88 @@
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::process::Command;
 
 use crate::config::{self, ProjectEntry};
 use crate::git;
-use crate::runtime::DockerRuntime;
+use crate::runtime::{ContainerStatus, DockerRuntime};
 use crate::session::{self, SessionStore};
 use crate::ui::{banner, prompts};
 
 use super::{
-    build_review_prompt, detect_languages, get_lang_install_cmd, parse_mount_arg,
+    build_review_prompt, detect_languages, get_lang_install_cmd, hash_env_vars, parse_mount_arg,
     resolve_reviewers, RunContext, RunOptions, VALID_REVIEWERS,
 };
+
+/// プロジェクトパスの SHA256 先頭 8 文字（hex）を返す。
+fn path_hash_8(path: &str) -> String {
+    let hash = Sha256::digest(path.as_bytes());
+    let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    hex[..8].to_string()
+}
+
+/// 設定ラベルの差分を検出して警告を表示する。
+fn warn_config_changes(
+    stored: &std::collections::HashMap<String, String>,
+    current: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    // ネットワーク設定の変更を確認: --no-network が要求されているが既存コンテナにはない場合はエラー
+    let stored_network = stored
+        .get("vibepod.network")
+        .map(|s| s.as_str())
+        .unwrap_or("false");
+    let current_network = current
+        .get("vibepod.network")
+        .map(|s| s.as_str())
+        .unwrap_or("false");
+    if current_network == "true" && stored_network != "true" {
+        anyhow::bail!(
+            "Network isolation (--no-network) was requested but the existing container was \
+             created with network access. Run with --new to recreate the container with the \
+             correct network configuration."
+        );
+    }
+
+    let mut changes: Vec<String> = Vec::new();
+
+    for key in &[
+        "vibepod.lang",
+        "vibepod.network",
+        "vibepod.mounts",
+        "vibepod.codex_auth",
+        "vibepod.env_hash",
+    ] {
+        let label_name = key.strip_prefix("vibepod.").unwrap_or(key);
+        let stored_val = stored.get(*key).map(|s| s.as_str()).unwrap_or("");
+        let current_val = current.get(*key).map(|s| s.as_str()).unwrap_or("");
+        if stored_val != current_val {
+            changes.push(format!(
+                "{}: {} → {}",
+                label_name,
+                if stored_val.is_empty() {
+                    "(none)"
+                } else {
+                    stored_val
+                },
+                if current_val.is_empty() {
+                    "(none)"
+                } else {
+                    current_val
+                }
+            ));
+        }
+    }
+
+    if !changes.is_empty() {
+        eprintln!(
+            "Warning: Container configuration has changed ({}).",
+            changes.join(", ")
+        );
+        eprintln!("Run with --new to recreate the container.");
+        eprintln!("Continuing with existing container...");
+    }
+
+    Ok(())
+}
 
 pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
     let interactive = !opts.resume && opts.prompt.is_none();
@@ -20,7 +92,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     if !git::is_git_repo(&cwd) {
         bail!("Not a git repository. Run this command inside a git-initialized directory.");
     }
-    let cwd_str = cwd.to_string_lossy().to_string();
+    // シンボリックリンクや `.` を解決して安定したパス文字列を得る
+    // コンテナ名ハッシュの元になるため、パス表記の違いで異なるコンテナが作られないよう正規化する
+    let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+    let cwd_str = cwd_canonical.to_string_lossy().to_string();
 
     if opts.worktree && opts.prompt.is_none() {
         bail!("--worktree requires --prompt");
@@ -77,7 +152,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     };
 
     // Session recording is deferred until the container actually starts.
-    // We prepare the data here but call store.add() later in each run_* function.
     let session_id = session::generate_session_id();
     let deferred_session = session::Session {
         id: session_id.clone(),
@@ -89,7 +163,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         restored: false,
     };
 
-    let project_name = cwd
+    // プロジェクト名はシンボリックリンク解決後のパスから取得する
+    // ハッシュも正規化パスから計算するため、両方が一致しないと symlink 経由アクセス時に
+    // 異なるコンテナが作られてしまう
+    let project_name = cwd_canonical
         .file_name()
         .context("Cannot determine project name")?
         .to_string_lossy()
@@ -122,6 +199,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // Worktree creation
+    // --worktree: 使い捨てコンテナ（実行後削除）、コンテナ名はランダムハッシュ
+    let is_disposable = opts.worktree;
     let (effective_workspace, worktree_branch_name, worktree_dir_name) = if opts.worktree {
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let branch_name = format!("vibepod/prompt-{}", ts);
@@ -244,8 +323,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                 setup_parts.push("curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs".to_string());
             }
             setup_parts.push("sudo npm install -g @openai/codex".to_string());
-            // Fix ownership of ~/.codex/ dir (Docker creates it as root when bind-mounting auth.json)
-            // Only chown the directory itself, not -R (auth.json is read-only bind-mount)
+            // Fix ownership of ~/.codex/ dir
             setup_parts.push(
                 "(if [ -d \"$HOME/.codex\" ]; then sudo chown $(id -u):$(id -g) \"$HOME/.codex\" 2>/dev/null || true; fi)".to_string(),
             );
@@ -277,46 +355,49 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         );
     }
 
-    // 4. Check for existing container
-    let name_prefix = format!("vibepod-{}", project_name);
-
-    // --reuse: use a fixed container name and detect stopped containers for reconnection.
-    // Running reuse containers are handled below by the normal running-container prompt.
-    let (reuse_existing, container_name_override) = if opts.reuse {
-        let reuse_name = format!("vibepod-{}-reuse", project_name);
-        let existing_id = runtime.find_stopped_container(&reuse_name).await?;
-        (existing_id.is_some(), Some(reuse_name))
+    // 4. Compute container name
+    // --worktree: ランダムハッシュ（使い捨て）
+    // それ以外: プロジェクトパスの SHA256 先頭 8 文字（永続）
+    let container_name = if opts.worktree {
+        let short_hash: String = (0..6)
+            .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
+            .collect();
+        format!("vibepod-{}-{}", project_name, short_hash)
     } else {
-        (false, None)
+        let hash = path_hash_8(&cwd_str);
+        format!("vibepod-{}-{}", project_name, hash)
     };
 
-    // If a container with the project prefix is already running (and we're not reusing it),
-    // prompt the user to attach or replace it.
-    if !reuse_existing {
-        if let Some((existing_id, existing_name)) =
-            runtime.find_running_container(&name_prefix).await?
-        {
-            if !interactive {
-                // Non-interactive mode: skip prompt, just replace
-                runtime.stop_container(&existing_id, 10).await?;
-                runtime.remove_container(&existing_id).await?;
-            } else {
-                match prompts::handle_existing_container(&existing_name)? {
-                    prompts::ExistingContainerAction::Attach => {
-                        println!("  ◇  Attaching to {}...", existing_name);
-                        runtime.stream_logs(&existing_id).await?;
-                        return Ok(None);
-                    }
-                    prompts::ExistingContainerAction::Replace => {
-                        runtime.stop_container(&existing_id, 10).await?;
-                        runtime.remove_container(&existing_id).await?;
-                    }
-                }
-            } // else (interactive)
-        }
-    } // if !reuse_existing
+    // 5. Check container status and handle --new flag
+    let mut container_status = if opts.worktree {
+        // ワークツリーはランダム名なので常に None
+        ContainerStatus::None
+    } else {
+        runtime.find_container_status(&container_name).await?
+    };
 
-    // 5. Project registration
+    if opts.new_container {
+        match container_status {
+            ContainerStatus::Running => {
+                bail!("Container is running. Stop it with `vibepod stop` or `vibepod rm` first.");
+            }
+            ContainerStatus::Stopped => {
+                runtime.remove_container(&container_name).await?;
+                container_status = ContainerStatus::None;
+            }
+            ContainerStatus::None => {}
+        }
+    }
+
+    // 6. 既存コンテナのラベルを取得（設定変更の検知に使用）
+    // env ファイルのパースより前に取得し、env ハッシュとの比較は step 9 後に行う
+    let stored_labels_opt = if container_status != ContainerStatus::None && !opts.worktree {
+        Some(runtime.get_container_labels(&container_name).await?)
+    } else {
+        None
+    };
+
+    // 7. Project registration
     let mut projects = config::load_projects(&config_dir)?;
     let should_register = if !config::is_project_registered(&projects, &cwd_str) {
         if interactive {
@@ -340,7 +421,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         config::save_projects(&projects, &config_dir)?;
     }
 
-    // 6. Build claude args
+    // 8. Build claude args
     let mut claude_args: Vec<String> = Vec::new();
     if !interactive {
         claude_args.push("--dangerously-skip-permissions".to_string());
@@ -357,7 +438,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         claude_args.push("--verbose".to_string());
     }
 
-    // 7. Resolve env file if provided
+    // 9. Resolve env file if provided
     let mut resolved_env_vars = opts.env_vars.clone();
     if let Some(ref env_file_path) = opts.env_file {
         let content = std::fs::read_to_string(env_file_path)
@@ -430,17 +511,39 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
-    // 8. Generate container name
-    let container_name = if let Some(override_name) = container_name_override {
-        override_name
-    } else {
-        let short_hash: String = (0..6)
-            .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
-            .collect();
-        format!("vibepod-{}-{}", project_name, short_hash)
-    };
+    // 9b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
+    if let Some(stored_labels) = stored_labels_opt {
+        let mut mounts_parts: Vec<String> = Vec::new();
+        for arg in &opts.mount {
+            if let Ok((h, c)) = parse_mount_arg(arg) {
+                mounts_parts.push(format!("{}:{}", h, c));
+            }
+        }
+        mounts_parts.sort();
 
-    // 9. Auth: load token
+        let current_lang = lang_display
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+
+        // env ファイル解決後の resolved_env_vars をハッシュ化（env ファイルの変更も検知）
+        let current_env_hash = hash_env_vars(&resolved_env_vars);
+
+        let mut current_labels = std::collections::HashMap::new();
+        // codex auth: 解決済みの codex_auth 変数を使用（config 経由の reviewer も考慮）
+        let has_codex_auth = codex_auth.is_some();
+
+        current_labels.insert("vibepod.mounts".to_string(), mounts_parts.join("|"));
+        current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
+        current_labels.insert("vibepod.lang".to_string(), current_lang);
+        current_labels.insert("vibepod.codex_auth".to_string(), has_codex_auth.to_string());
+        current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
+
+        warn_config_changes(&stored_labels, &current_labels)?;
+    }
+
+    // 10. Auth: load token
     let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
     let home = crate::config::home_dir()?;
     let claude_json = home.join(".claude.json");
@@ -453,15 +556,16 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         bail!("Token expires soon. Please run `vibepod login` to renew.");
     }
 
-    // Add token as environment variable
-    resolved_env_vars.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", token_data.token));
+    // 認証トークンは exec_env_vars に格納（コンテナ作成時ではなく毎回 exec で渡す）
+    let mut exec_env_vars = Vec::new();
+    exec_env_vars.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", token_data.token));
 
     // GitHub token: gh auth token でホスト側のトークンを自動取得
     if let Ok(output) = Command::new("gh").args(["auth", "token"]).output() {
         if output.status.success() {
             let gh_token = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !gh_token.is_empty() {
-                resolved_env_vars.push(format!("GH_TOKEN={}", gh_token));
+                exec_env_vars.push(format!("GH_TOKEN={}", gh_token));
             }
         }
     }
@@ -490,6 +594,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         effective_workspace,
         claude_args,
         resolved_env_vars,
+        exec_env_vars,
         setup_cmd,
         temp_claude_json,
         global_config,
@@ -502,7 +607,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         store,
         deferred_session,
         extra_mounts,
-        reuse: opts.reuse,
-        reuse_existing,
+        container_status,
+        is_disposable,
+        no_network: opts.no_network,
     }))
 }
