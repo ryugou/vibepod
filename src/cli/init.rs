@@ -50,7 +50,51 @@ pub async fn execute() -> Result<()> {
         }
     }
 
-    // 4. Save config
+    // 4. イメージ再ビルド後に既存のコンテナを全削除する（config 保存前に行う）
+    //    running コンテナがある場合は確認プロンプトを表示（非インタラクティブ時は強制削除）
+    let containers = runtime.list_vibepod_containers().await?;
+    if !containers.is_empty() {
+        let running_count = containers
+            .iter()
+            .filter(|(_, status)| {
+                status.starts_with("Up") || status.to_lowercase().contains("running")
+            })
+            .count();
+
+        let should_remove =
+            if running_count > 0 && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                // インタラクティブ: 確認プロンプト
+                prompts::confirm_remove_all_containers(containers.len(), running_count)?
+            } else {
+                // 非インタラクティブまたは停止済みのみ: 強制削除
+                if running_count > 0 {
+                    eprintln!(
+                        "  Warning: Forcibly removing {} running container(s) \
+                     (non-interactive mode).",
+                        running_count
+                    );
+                }
+                true
+            };
+
+        if should_remove {
+            println!("  Removing {} existing container(s)...", containers.len());
+            for (container_name, _) in &containers {
+                runtime.remove_container(container_name).await?;
+            }
+            println!("  Removed {} container(s).", containers.len());
+        } else {
+            // ユーザーがコンテナ削除を拒否 → config を更新しない（旧コンテナが旧イメージのまま残る）
+            eprintln!(
+                "  Skipping config update: existing containers were not removed. \
+                 Re-run `vibepod init` and remove containers to apply the new image."
+            );
+            return Ok(());
+        }
+    }
+
+    // 5. Save config（コンテナ削除後に保存することで、削除キャンセル時に旧イメージが残ったまま
+    //    config が更新される問題を回避する）
     let config_dir = config::default_config_dir()?;
     let config = GlobalConfig {
         default_agent: agent,

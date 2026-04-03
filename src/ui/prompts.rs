@@ -56,3 +56,14 @@ pub enum ExistingContainerAction {
     Attach,
     Replace,
 }
+
+pub fn confirm_remove_all_containers(total: usize, running: usize) -> Result<bool> {
+    let result = Confirm::new()
+        .with_prompt(format!(
+            "{} VibePod container(s) exist ({} running). Remove all for fresh start?",
+            total, running
+        ))
+        .default(true)
+        .interact()?;
+    Ok(result)
+}
