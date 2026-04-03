@@ -24,14 +24,19 @@ async fn wait_for_reuse_setup(container_name: &str) -> Result<()> {
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = reader.lines();
 
+    let mut found_marker = false;
     while let Ok(Some(line)) = lines.next_line().await {
         println!("{}", line);
         if line.contains("VIBEPOD_SETUP_DONE") {
+            found_marker = true;
             break;
         }
     }
 
     let _ = child.kill().await;
+    if !found_marker {
+        bail!("Container setup failed: VIBEPOD_SETUP_DONE marker was not found. Check the setup output above for errors.");
+    }
     Ok(())
 }
 
@@ -104,6 +109,12 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
         if !status.success() {
             // Claude exited with non-zero, which is fine (e.g., user quit)
         }
+
+        // Stop the container so next --reuse finds it as stopped
+        Command::new("docker")
+            .args(["stop", "-t", "10", &ctx.container_name])
+            .output()
+            .ok();
     } else {
         let container_config =
             build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
