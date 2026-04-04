@@ -5,6 +5,7 @@ use crate::runtime::{ContainerConfig, ContainerStatus};
 use crate::session::SessionStore;
 
 mod interactive;
+pub mod lock;
 mod prepare;
 mod prompt;
 
