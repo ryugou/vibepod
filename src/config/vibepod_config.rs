@@ -17,6 +17,7 @@ pub struct ReviewConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct RunConfig {
     pub lang: Option<String>,
+    pub prompt_idle_timeout: Option<u64>,
 }
 
 impl VibepodConfig {
@@ -47,6 +48,11 @@ impl VibepodConfig {
                     .as_ref()
                     .and_then(|r| r.lang.clone())
                     .or(g.run.as_ref().and_then(|r| r.lang.clone()));
+                let prompt_idle_timeout = p
+                    .run
+                    .as_ref()
+                    .and_then(|r| r.prompt_idle_timeout)
+                    .or(g.run.as_ref().and_then(|r| r.prompt_idle_timeout));
 
                 VibepodConfig {
                     review: if p.review.is_some() || g.review.is_some() {
@@ -55,7 +61,10 @@ impl VibepodConfig {
                         None
                     },
                     run: if p.run.is_some() || g.run.is_some() {
-                        Some(RunConfig { lang })
+                        Some(RunConfig {
+                            lang,
+                            prompt_idle_timeout,
+                        })
                     } else {
                         None
                     },
@@ -76,5 +85,12 @@ impl VibepodConfig {
 
     pub fn lang(&self) -> Option<String> {
         self.run.as_ref().and_then(|r| r.lang.clone())
+    }
+
+    pub fn prompt_idle_timeout(&self) -> u64 {
+        self.run
+            .as_ref()
+            .and_then(|r| r.prompt_idle_timeout)
+            .unwrap_or(300)
     }
 }

@@ -160,3 +160,43 @@ fn test_reviewers_default_empty() {
     let config = vibepod::config::VibepodConfig::default();
     assert!(config.reviewers().is_empty());
 }
+
+#[test]
+fn test_prompt_idle_timeout_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = vibepod::config::VibepodConfig::load(dir.path(), config_dir.path()).unwrap();
+    assert_eq!(config.prompt_idle_timeout(), 300);
+}
+
+#[test]
+fn test_prompt_idle_timeout_custom() {
+    let dir = tempfile::tempdir().unwrap();
+    let vibepod_dir = dir.path().join(".vibepod");
+    std::fs::create_dir_all(&vibepod_dir).unwrap();
+    std::fs::write(
+        vibepod_dir.join("config.toml"),
+        "[run]\nprompt_idle_timeout = 600\n",
+    )
+    .unwrap();
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = vibepod::config::VibepodConfig::load(dir.path(), config_dir.path()).unwrap();
+    assert_eq!(config.prompt_idle_timeout(), 600);
+}
+
+#[test]
+fn test_prompt_idle_timeout_zero_disables() {
+    let dir = tempfile::tempdir().unwrap();
+    let vibepod_dir = dir.path().join(".vibepod");
+    std::fs::create_dir_all(&vibepod_dir).unwrap();
+    std::fs::write(
+        vibepod_dir.join("config.toml"),
+        "[run]\nprompt_idle_timeout = 0\n",
+    )
+    .unwrap();
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = vibepod::config::VibepodConfig::load(dir.path(), config_dir.path()).unwrap();
+    assert_eq!(config.prompt_idle_timeout(), 0);
+}
