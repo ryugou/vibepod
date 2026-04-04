@@ -456,4 +456,31 @@ impl DockerRuntime {
         }
         Ok(())
     }
+
+    /// コンテナ内で claude プロセスが実行中かどうかを確認する。
+    pub async fn has_claude_process(&self, container_name: &str) -> Result<bool> {
+        let output = Command::new("docker")
+            .args(["top", container_name, "-o", "cmd"])
+            .output()
+            .await
+            .context("Failed to run docker top")?;
+
+        if !output.status.success() {
+            return Ok(false);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_docker_top_for_claude(&stdout))
+    }
+}
+
+/// `docker top` 出力から claude プロセスを検出する。
+pub fn parse_docker_top_for_claude(output: &str) -> bool {
+    for line in output.lines().skip(1) {
+        let line_lower = line.to_lowercase();
+        if line_lower.contains("/claude") || line_lower.split_whitespace().any(|w| w == "claude") {
+            return true;
+        }
+    }
+    false
 }

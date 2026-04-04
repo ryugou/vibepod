@@ -287,6 +287,23 @@ pub async fn execute(opts: RunOptions) -> Result<()> {
         return Ok(());
     };
 
+    // 排他チェック: --prompt が絡む場合は他セッションと排他
+    let vibepod_dir = std::path::PathBuf::from(&ctx.effective_workspace).join(".vibepod");
+    if let Some(pid) = lock::PromptLock::check(&vibepod_dir) {
+        anyhow::bail!(
+            "セッション実行中です (PID: {})\n停止するには: vibepod stop",
+            pid
+        );
+    }
+
+    // --prompt 開始時: interactive セッションが実行中かも確認
+    if !interactive {
+        let runtime = crate::runtime::DockerRuntime::new().await?;
+        if let Ok(true) = runtime.has_claude_process(&ctx.container_name).await {
+            anyhow::bail!("セッション実行中です\n停止するには: vibepod stop");
+        }
+    }
+
     if interactive {
         interactive::run_interactive(&opts, &ctx).await
     } else {
