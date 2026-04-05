@@ -61,9 +61,23 @@
 
 - [ ] `vibepod run --env-file .env` — 環境変数がコンテナ内に渡される
 
+### セッション排他制御（v1.4.1）
+
+- [ ] `vibepod run --prompt "..."` 実行中に別ターミナルで `vibepod run` → 「セッション実行中です (PID: ...)」エラー
+- [ ] `vibepod run --prompt "..."` 実行中に別ターミナルで `vibepod run --prompt "..."` → 同上
+- [ ] `vibepod run` (interactive) 実行中に `vibepod run --prompt "..."` → 「セッション実行中です」エラー
+- [ ] プロセスを kill -9 後、次の `vibepod run --prompt` が stale ロックを自動検出して起動できる
+
+### グローバル設定マウント（v1.4.1）
+
+- [ ] `~/.claude/CLAUDE.md` が存在する場合、コンテナ内で `/home/vibepod/.claude/CLAUDE.md` が読める
+- [ ] `~/.claude/skills/` が存在する場合、コンテナ内で `/home/vibepod/.claude/skills/` が読める
+- [ ] `~/.claude/agents/` が存在する場合、コンテナ内で `/home/vibepod/.claude/agents/` が読める
+
 ### ps / logs
 
-- [ ] `vibepod ps` — コンテナ一覧が表示される（CONTAINER / PROJECT / STATUS の列が正しい）
+- [ ] `vibepod ps` — コンテナ一覧が表示される（CONTAINER / PROJECT / ELAPSED / LAST OUTPUT / STATUS の列が正しい）
+- [ ] `vibepod ps` — `--prompt` 実行中のコンテナで ELAPSED と LAST OUTPUT が表示される
 - [ ] `vibepod logs <container>` — コンテナのログが表示される
 
 ### 認証
