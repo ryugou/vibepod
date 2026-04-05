@@ -322,7 +322,7 @@ pub async fn execute(opts: RunOptions) -> Result<()> {
         return Ok(());
     };
 
-    // 排他チェック: --prompt が絡む場合は他セッションと排他
+    // 排他チェック: prompt.lock が有効なら（= --prompt セッション実行中）全モードで拒否
     let vibepod_dir = std::path::PathBuf::from(&ctx.effective_workspace).join(".vibepod");
     if let Some(pid) = lock::PromptLock::check(&vibepod_dir) {
         anyhow::bail!(
