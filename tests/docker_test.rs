@@ -28,7 +28,6 @@ fn base_config() -> ContainerConfig {
         gitconfig: None,
         env_vars: vec![],
         network_disabled: false,
-        codex_auth: None,
         extra_mounts: vec![],
         labels: HashMap::new(),
     }

@@ -52,10 +52,6 @@ pub enum Commands {
         /// Run in an isolated git worktree (for --prompt mode)
         #[arg(long)]
         worktree: bool,
-        /// Auto-review after implementation. Uses config reviewers if no value specified.
-        /// Possible values: copilot, codex
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        review: Option<String>,
         /// Mount host file/directory into container (read-only). Repeatable.
         /// Format: <host-path>:<container-path> or <host-path> (mounted to /mnt/<filename>)
         #[arg(long, num_args = 1)]

@@ -10,7 +10,7 @@ Please report security vulnerabilities via [GitHub Private Vulnerability Reporti
 
 The container communicates with Claude's API as part of normal operation. This is not "offline" — network requests are made by Claude Code inside the container. No additional data is sent to external services by VibePod itself in standard mode.
 
-**Exception — `--review`:** When `--review codex` or `--review copilot` is used, repository content may reach additional external services. `codex` runs `codex review` inside the container (OpenAI API); `copilot` creates a GitHub PR and triggers GitHub Copilot review (GitHub API). Treat `--review`-enabled runs accordingly.
+**Note on external data transmission:** VibePod mounts host files into the container (`~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/` as read-only) and injects `GH_TOKEN` when available. Additionally, plugins pre-installed in the Docker image (e.g., Codex, superpowers) may invoke external APIs. If your CLAUDE.md instructions or these plugins trigger external review tools, repository content may reach additional external services via these credentials and configurations.
 
 ### GH_TOKEN automatic injection
 

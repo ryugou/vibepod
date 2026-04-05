@@ -26,7 +26,6 @@ async fn main() -> Result<()> {
             env_file,
             lang,
             worktree,
-            review,
             mount,
             new,
         } => {
@@ -38,7 +37,6 @@ async fn main() -> Result<()> {
                 env_file,
                 lang,
                 worktree,
-                review,
                 mount,
                 new_container: new,
             })

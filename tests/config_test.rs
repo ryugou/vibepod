@@ -107,14 +107,10 @@ fn test_load_vibepod_config_global_only() {
     fs::create_dir_all(&project_dir).unwrap();
     let global_dir = tmp.path().join("global");
     fs::create_dir_all(&global_dir).unwrap();
-    fs::write(
-        global_dir.join("config.toml"),
-        "[review]\nreviewers = [\"copilot\"]\n",
-    )
-    .unwrap();
+    fs::write(global_dir.join("config.toml"), "[run]\nlang = \"go\"\n").unwrap();
 
     let config = vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap();
-    assert_eq!(config.reviewers(), vec!["copilot".to_string()]);
+    assert_eq!(config.lang(), Some("go".to_string()));
 }
 
 #[test]
@@ -129,17 +125,11 @@ fn test_load_vibepod_config_merge_priority() {
     .unwrap();
     let global_dir = tmp.path().join("global");
     fs::create_dir_all(&global_dir).unwrap();
-    fs::write(
-        global_dir.join("config.toml"),
-        "[run]\nlang = \"python\"\n[review]\nreviewers = [\"codex\"]\n",
-    )
-    .unwrap();
+    fs::write(global_dir.join("config.toml"), "[run]\nlang = \"python\"\n").unwrap();
 
     let config = vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap();
     // project overrides global for lang
     assert_eq!(config.lang(), Some("node".to_string()));
-    // global fills in reviewers that project doesn't have
-    assert_eq!(config.reviewers(), vec!["codex".to_string()]);
 }
 
 #[test]
@@ -152,13 +142,6 @@ fn test_load_vibepod_config_none() {
 
     let config = vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap();
     assert_eq!(config.lang(), None);
-    assert!(config.reviewers().is_empty());
-}
-
-#[test]
-fn test_reviewers_default_empty() {
-    let config = vibepod::config::VibepodConfig::default();
-    assert!(config.reviewers().is_empty());
 }
 
 #[test]
