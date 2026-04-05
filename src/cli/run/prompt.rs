@@ -197,12 +197,17 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
 
+    // タイムアウトリセット用: セッション開始前のダーティ状態を記録
+    let was_dirty_before =
+        crate::git::has_uncommitted_changes(std::path::Path::new(&ctx.effective_workspace));
+
     // ストリーム途絶監視用の共有状態
     let last_event_at = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let idle_timeout_secs = ctx.prompt_idle_timeout;
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // 監視タスク（idle_timeout > 0 の場合のみ）
+    let container_name_for_monitor = ctx.container_name.clone();
     let monitor_handle = if idle_timeout_secs > 0 {
         let last_event = last_event_at.clone();
         let timed_out_flag = timed_out.clone();
@@ -215,11 +220,18 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
                 let elapsed = last_event.lock().unwrap().elapsed();
                 if elapsed > timeout {
                     timed_out_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // ローカルの docker exec プロセスを終了
                     if let Some(pid) = child_id {
                         unsafe {
                             libc::kill(pid as i32, libc::SIGTERM);
                         }
                     }
+                    // コンテナ内の claude プロセスも停止（ワークスペースへの書き込みを止める）
+                    tokio::process::Command::new("docker")
+                        .args(["exec", &container_name_for_monitor, "pkill", "-f", "claude"])
+                        .output()
+                        .await
+                        .ok();
                     break;
                 }
             }
@@ -297,10 +309,15 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         // uncommitted changes だけでなく、コミットが進んでいるかも確認
         // （エージェントが commit した後にタイムアウトするケース）
         let current_head = crate::git::get_head_hash(workspace_path).unwrap_or_default();
-        let needs_reset = current_head != ctx.deferred_session.head_before
-            || crate::git::has_uncommitted_changes(workspace_path);
+        let head_advanced = current_head != ctx.deferred_session.head_before;
 
-        if needs_reset {
+        // HEAD が進んでいれば reset --hard で戻す
+        if head_advanced {
+            crate::git::reset_hard(workspace_path, &ctx.deferred_session.head_before)?;
+        }
+        // git clean -fd はセッション開始前にクリーンだった場合のみ実行
+        // （ユーザーの既存 dirty changes を消さないよう保護）
+        if !was_dirty_before {
             crate::git::reset_hard(workspace_path, &ctx.deferred_session.head_before)?;
             crate::git::clean_fd(workspace_path)?;
         }
@@ -316,10 +333,15 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             "⚠ ストリーム無出力が {} を超えたため、セッションを中断しました。",
             timeout_display
         );
-        if needs_reset {
+        if head_advanced || !was_dirty_before {
             eprintln!(
                 "  作業ディレクトリを {} にリセットしました。",
                 &ctx.deferred_session.head_before[..8.min(ctx.deferred_session.head_before.len())]
+            );
+        }
+        if was_dirty_before {
+            eprintln!(
+                "  注意: セッション開始前に未コミットの変更がありました。エージェントの変更と混在している可能性があります。"
             );
         }
     }
