@@ -32,7 +32,27 @@ impl PromptLock {
             last_event_at: now,
         };
         let json = serde_json::to_string_pretty(&data)?;
-        fs::write(&path, json).context("Failed to write prompt.lock")?;
+        // create_new でアトミックに作成（同時起動時の TOCTOU を防止）
+        use std::io::Write;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(json.as_bytes())
+                    .context("Failed to write prompt.lock")?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // ファイルが既に存在する: 別プロセスが同時にロックを取得した
+                anyhow::bail!(
+                    "セッション実行中です（ロックファイルが既に存在します）\n停止するには: vibepod stop"
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(e).context("Failed to create prompt.lock"));
+            }
+        }
 
         Ok(Self { path })
     }

@@ -208,7 +208,7 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         let child_id = exec_child.id();
         Some(tokio::spawn(async move {
             let timeout = std::time::Duration::from_secs(idle_timeout_secs);
-            let check_interval = std::time::Duration::from_secs(30);
+            let check_interval = std::time::Duration::from_secs(idle_timeout_secs.min(30));
             loop {
                 tokio::time::sleep(check_interval).await;
                 let elapsed = last_event.lock().unwrap().elapsed();

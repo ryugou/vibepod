@@ -512,12 +512,19 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 9b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
+    // ~/.claude/ マウントも含めるため、home を先に解決する
+    let home_early_for_mounts = crate::config::home_dir()?;
+    let claude_config_mounts_for_label = super::build_claude_config_mounts(&home_early_for_mounts);
+
     if let Some(stored_labels) = stored_labels_opt {
         let mut mounts_parts: Vec<String> = Vec::new();
         for arg in &opts.mount {
             if let Ok((h, c)) = parse_mount_arg(arg) {
                 mounts_parts.push(format!("{}:{}", h, c));
             }
+        }
+        for (h, c) in &claude_config_mounts_for_label {
+            mounts_parts.push(format!("{}:{}", h, c));
         }
         mounts_parts.sort();
 
