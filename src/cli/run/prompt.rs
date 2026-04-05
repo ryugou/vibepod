@@ -97,17 +97,22 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         println!("  │");
     }
 
-    // ロックを取得（コンテナ起動・セッション記録より前に取得し、
-    // 同時起動時に片方がコンテナ状態を変更してしまうのを防ぐ）
+    // ロックと idle 監視は --prompt 時のみ有効。
+    // --resume は stream-json 出力ではないため JSONL 途絶検知の対象外。
+    let is_prompt_mode = opts.prompt.is_some();
     let vibepod_dir = std::path::PathBuf::from(&ctx.effective_workspace).join(".vibepod");
-    let prompt_text = opts
-        .prompt
-        .as_deref()
-        .unwrap_or("--resume")
-        .chars()
-        .take(200)
-        .collect::<String>();
-    let lock = super::lock::PromptLock::acquire(vibepod_dir, prompt_text)?;
+    let lock = if is_prompt_mode {
+        let prompt_text = opts
+            .prompt
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect::<String>();
+        Some(super::lock::PromptLock::acquire(vibepod_dir, prompt_text)?)
+    } else {
+        None
+    };
 
     let runtime = DockerRuntime::new().await?;
 
@@ -206,9 +211,9 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     let idle_timeout_secs = ctx.prompt_idle_timeout;
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // 監視タスク（idle_timeout > 0 の場合のみ）
+    // 監視タスク（--prompt かつ idle_timeout > 0 の場合のみ）
     let container_name_for_monitor = ctx.container_name.clone();
-    let monitor_handle = if idle_timeout_secs > 0 {
+    let monitor_handle = if is_prompt_mode && idle_timeout_secs > 0 {
         let last_event = last_event_at.clone();
         let timed_out_flag = timed_out.clone();
         let child_id = exec_child.id();
@@ -227,8 +232,9 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
                         }
                     }
                     // コンテナ内の claude プロセスも停止（ワークスペースへの書き込みを止める）
+                    // -x: 完全一致（/.claude/ パス等を誤 kill しない）
                     tokio::process::Command::new("docker")
-                        .args(["exec", &container_name_for_monitor, "pkill", "-f", "claude"])
+                        .args(["exec", &container_name_for_monitor, "pkill", "-x", "claude"])
                         .output()
                         .await
                         .ok();
@@ -250,7 +256,9 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
 
                 // ロックファイルの last_event_at を約 30 秒ごとに更新（vibepod ps 用）
                 if last_lock_update.elapsed().as_secs() >= 30 {
-                    lock.update_last_event().ok();
+                    if let Some(ref l) = lock {
+                        l.update_last_event().ok();
+                    }
                     last_lock_update = std::time::Instant::now();
                 }
 
@@ -343,6 +351,9 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         if was_dirty_before {
             eprintln!(
                 "  注意: セッション開始前に未コミットの変更がありました。エージェントの変更と混在している可能性があります。"
+            );
+            eprintln!(
+                "  未追跡ファイルが残っている可能性があります。`git status` で確認してください。"
             );
         }
     }
