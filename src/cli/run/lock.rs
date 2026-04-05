@@ -62,7 +62,15 @@ impl PromptLock {
     pub fn check(vibepod_dir: &PathBuf) -> Option<u32> {
         let path = vibepod_dir.join("prompt.lock");
         let content = fs::read_to_string(&path).ok()?;
-        let data: LockData = serde_json::from_str(&content).ok()?;
+        let data: LockData = match serde_json::from_str(&content) {
+            Ok(d) => d,
+            Err(_) => {
+                // パース失敗（破損ファイル）: stale として削除
+                // update_last_event() 中の SIGKILL で truncated JSON が残るケースに対応
+                fs::remove_file(&path).ok();
+                return None;
+            }
+        };
 
         if is_process_alive(data.pid) {
             Some(data.pid)

@@ -96,3 +96,18 @@ fn test_lock_update_last_event() {
             .unwrap();
     assert!(content["last_event_at"].as_str().is_some());
 }
+
+#[test]
+fn test_lock_check_corrupted_file_auto_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let vibepod_dir = dir.path().join(".vibepod");
+    fs::create_dir_all(&vibepod_dir).unwrap();
+    let lock_path = vibepod_dir.join("prompt.lock");
+
+    // 破損した JSON（SIGKILL で truncated された想定）
+    fs::write(&lock_path, "{\"pid\": 123, \"start").unwrap();
+
+    let result = vibepod::cli::run::lock::PromptLock::check(&vibepod_dir);
+    assert!(result.is_none());
+    assert!(!lock_path.exists());
+}

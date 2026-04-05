@@ -97,6 +97,18 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         println!("  │");
     }
 
+    // ロックを取得（コンテナ起動・セッション記録より前に取得し、
+    // 同時起動時に片方がコンテナ状態を変更してしまうのを防ぐ）
+    let vibepod_dir = std::path::PathBuf::from(&ctx.effective_workspace).join(".vibepod");
+    let prompt_text = opts
+        .prompt
+        .as_deref()
+        .unwrap_or("--resume")
+        .chars()
+        .take(200)
+        .collect::<String>();
+    let lock = super::lock::PromptLock::acquire(vibepod_dir, prompt_text)?;
+
     let runtime = DockerRuntime::new().await?;
 
     match ctx.container_status {
@@ -128,17 +140,6 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     }
 
     ctx.store.add(ctx.deferred_session.clone())?;
-
-    // ロックを取得
-    let vibepod_dir = std::path::PathBuf::from(&ctx.effective_workspace).join(".vibepod");
-    let prompt_text = opts
-        .prompt
-        .as_deref()
-        .unwrap_or("--resume")
-        .chars()
-        .take(200)
-        .collect::<String>();
-    let lock = super::lock::PromptLock::acquire(vibepod_dir, prompt_text)?;
 
     if opts.prompt.is_some() {
         println!("Container started: {}", ctx.container_name);

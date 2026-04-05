@@ -142,4 +142,9 @@ fn test_has_claude_process_parses_output() {
     let output_exec =
         "UID  PID  PPID  CMD\nvibepod  10  1  bash --login -c exec claude \"$@\" -- -p test\n";
     assert!(parse_docker_top_for_claude(output_exec));
+
+    // ~/.claude/ パスを含むプロセスは誤検知しない
+    let output_claude_dir =
+        "UID  PID  PPID  CMD\nvibepod  10  1  cat /home/vibepod/.claude/CLAUDE.md\n";
+    assert!(!parse_docker_top_for_claude(output_claude_dir));
 }

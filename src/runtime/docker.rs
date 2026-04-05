@@ -475,10 +475,15 @@ impl DockerRuntime {
 }
 
 /// `docker top` 出力から claude プロセスを検出する。
+/// マッチ条件: コマンドラインのトークンに `claude` が単語として含まれる。
+/// `/.claude/` パス（マウントされた設定ディレクトリ）を誤検知しないよう、
+/// 単語境界でのみマッチする。
 pub fn parse_docker_top_for_claude(output: &str) -> bool {
     for line in output.lines().skip(1) {
-        let line_lower = line.to_lowercase();
-        if line_lower.contains("/claude") || line_lower.split_whitespace().any(|w| w == "claude") {
+        if line
+            .split_whitespace()
+            .any(|w| w == "claude" || w.ends_with("/bin/claude"))
+        {
             return true;
         }
     }
