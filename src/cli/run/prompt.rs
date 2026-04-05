@@ -244,13 +244,14 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         r = async {
             let mut rt: Option<String> = None;
             let mut log = log_file;
-            let mut event_count: u64 = 0;
+            let mut last_lock_update = std::time::Instant::now();
             while let Ok(Some(line)) = lines.next_line().await {
                 *last_event_at.lock().unwrap() = std::time::Instant::now();
 
-                event_count += 1;
-                if event_count.is_multiple_of(30) {
+                // ロックファイルの last_event_at を約 30 秒ごとに更新（vibepod ps 用）
+                if last_lock_update.elapsed().as_secs() >= 30 {
                     lock.update_last_event().ok();
+                    last_lock_update = std::time::Instant::now();
                 }
 
                 if let Some(ref mut f) = log {
