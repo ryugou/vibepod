@@ -610,5 +610,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         container_status,
         is_disposable,
         no_network: opts.no_network,
+        prompt_idle_timeout: vibepod_config.prompt_idle_timeout(),
     }))
 }

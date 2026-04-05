@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::process::Command;
 
 use crate::runtime::{format_stream_event, ContainerStatus, DockerRuntime, StreamEvent};
+use libc;
 
 use super::{build_container_config, RunContext, RunOptions};
 
@@ -98,19 +99,14 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
 
     let runtime = DockerRuntime::new().await?;
 
-    // コンテナライフサイクルの管理
     match ctx.container_status {
         ContainerStatus::Running => {
-            // 実行中でもセットアップ完了マーカーを確認する
-            // （初回起動途中で中断された場合にセットアップ未完了のまま残ることがある）
             if !runtime.check_setup_marker(&ctx.container_name).await? {
-                // マーカーなし: セットアップ未完了 → コンテナ削除して初回フローへ
                 runtime.remove_container(&ctx.container_name).await?;
                 create_and_setup(ctx, opts).await?;
             }
         }
         ContainerStatus::Stopped => {
-            // 停止中のコンテナを起動してマーカー確認
             let start = Command::new("docker")
                 .args(["start", &ctx.container_name])
                 .output()
@@ -122,19 +118,27 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
                 );
             }
             if !runtime.check_setup_marker(&ctx.container_name).await? {
-                // マーカーなし: セットアップ未完了 → コンテナ削除して初回フローへ
                 runtime.remove_container(&ctx.container_name).await?;
                 create_and_setup(ctx, opts).await?;
             }
         }
         ContainerStatus::None => {
-            // コンテナなし: 新規作成してセットアップ
             create_and_setup(ctx, opts).await?;
         }
     }
 
-    // セッションを記録
     ctx.store.add(ctx.deferred_session.clone())?;
+
+    // ロックを取得
+    let vibepod_dir = std::path::PathBuf::from(&ctx.effective_workspace).join(".vibepod");
+    let prompt_text = opts
+        .prompt
+        .as_deref()
+        .unwrap_or("--resume")
+        .chars()
+        .take(200)
+        .collect::<String>();
+    let lock = super::lock::PromptLock::acquire(vibepod_dir, prompt_text)?;
 
     if opts.prompt.is_some() {
         println!("Container started: {}", ctx.container_name);
@@ -151,7 +155,6 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         println!("{}", separator);
     }
 
-    // ログファイルのセットアップ（--prompt モードのみ）
     let log_file = if opts.prompt.is_some() {
         let session_dir = std::path::Path::new(&ctx.effective_workspace)
             .join(".vibepod")
@@ -164,8 +167,6 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         None
     };
 
-    // docker exec -e TOKEN=... {name} bash --login -c 'exec claude "$@"' -- {args}
-    // bash --login でログインプロファイルをソースし、setup で設定した PATH を引き継ぐ
     let mut exec_args = vec!["exec".to_string()];
     for env_var in &ctx.exec_env_vars {
         exec_args.push("-e".to_string());
@@ -176,7 +177,7 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     exec_args.push("--login".to_string());
     exec_args.push("-c".to_string());
     exec_args.push(r#"exec claude "$@""#.to_string());
-    exec_args.push("--".to_string()); // $0 placeholder
+    exec_args.push("--".to_string());
     exec_args.extend(ctx.claude_args.clone());
 
     let mut exec_child = tokio::process::Command::new("docker")
@@ -195,12 +196,50 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
 
+    // ストリーム途絶監視用の共有状態
+    let last_event_at = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let idle_timeout_secs = ctx.prompt_idle_timeout;
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // 監視タスク（idle_timeout > 0 の場合のみ）
+    let monitor_handle = if idle_timeout_secs > 0 {
+        let last_event = last_event_at.clone();
+        let timed_out_flag = timed_out.clone();
+        let child_id = exec_child.id();
+        Some(tokio::spawn(async move {
+            let timeout = std::time::Duration::from_secs(idle_timeout_secs);
+            let check_interval = std::time::Duration::from_secs(30);
+            loop {
+                tokio::time::sleep(check_interval).await;
+                let elapsed = last_event.lock().unwrap().elapsed();
+                if elapsed > timeout {
+                    timed_out_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(pid) = child_id {
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGTERM);
+                        }
+                    }
+                    break;
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
     let (result_text, ctrl_c_pressed): (Option<String>, bool) = tokio::select! {
         r = async {
             let mut rt: Option<String> = None;
             let mut log = log_file;
+            let mut event_count: u64 = 0;
             while let Ok(Some(line)) = lines.next_line().await {
-                // ログファイルに書き出し
+                *last_event_at.lock().unwrap() = std::time::Instant::now();
+
+                event_count += 1;
+                if event_count.is_multiple_of(30) {
+                    lock.update_last_event().ok();
+                }
+
                 if let Some(ref mut f) = log {
                     use std::io::Write;
                     let _ = writeln!(f, "{}", line);
@@ -224,15 +263,18 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         }
     };
 
-    // exec の終了ステータスを確認する（Ctrl+C でなければ）
-    if ctrl_c_pressed {
+    if let Some(handle) = monitor_handle {
+        handle.abort();
+    }
+
+    let was_timed_out = timed_out.load(std::sync::atomic::Ordering::SeqCst);
+
+    if ctrl_c_pressed || was_timed_out {
         let _ = exec_child.kill().await;
         let _ = exec_child.wait().await;
     } else {
-        // プロセスはすでに終了しているので kill 不要
         if let Ok(status) = exec_child.wait().await {
             if let Some(code) = status.code() {
-                // 非ゼロ終了かつ結果なしはコンテナ起動失敗の可能性
                 if code != 0 && result_text.is_none() {
                     eprintln!(
                         "Warning: docker exec exited with code {} (container may have failed to \
@@ -248,28 +290,58 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         println!("{}", separator);
     }
 
+    // タイムアウト時の自動リセット
+    if was_timed_out {
+        let workspace_path = std::path::Path::new(&ctx.effective_workspace);
+        if crate::git::has_uncommitted_changes(workspace_path) {
+            crate::git::reset_hard(workspace_path, &ctx.deferred_session.head_before)?;
+            crate::git::clean_fd(workspace_path)?;
+        }
+        ctx.store.mark_restored(&ctx.deferred_session.id)?;
+
+        let timeout_display = if idle_timeout_secs >= 60 {
+            format!("{} 分", idle_timeout_secs / 60)
+        } else {
+            format!("{} 秒", idle_timeout_secs)
+        };
+        eprintln!();
+        eprintln!(
+            "⚠ ストリーム無出力が {} を超えたため、セッションを中断しました。",
+            timeout_display
+        );
+        if crate::git::has_uncommitted_changes(workspace_path) {
+            eprintln!("  警告: 作業ディレクトリにまだ変更が残っています。");
+        } else {
+            eprintln!(
+                "  作業ディレクトリを {} にリセットしました。",
+                &ctx.deferred_session.head_before[..8.min(ctx.deferred_session.head_before.len())]
+            );
+        }
+    }
+
+    // ロック解放
+    drop(lock);
+
     // コンテナの後処理
     if ctx.is_disposable {
-        // 使い捨てコンテナ（--worktree）: 削除
         Command::new("docker")
             .args(["rm", "-f", &ctx.container_name])
             .output()
             .ok();
-        // 使い捨てコンテナのみ temp claude.json を削除する
-        // 永続コンテナは次回起動時に bind mount が必要なため削除しない
         if let Some(ref temp_cj) = ctx.temp_claude_json {
             std::fs::remove_file(temp_cj).ok();
         }
     } else if ctx.container_status != ContainerStatus::Running {
-        // 停止中または新規作成したコンテナ: 停止して保持
         Command::new("docker")
             .args(["stop", "-t", "10", &ctx.container_name])
             .output()
             .ok();
     }
-    // 元から実行中だったコンテナは停止しない
 
-    print_post_run_summary(opts, ctx, result_text.as_deref(), ctx.is_disposable);
+    if !was_timed_out {
+        print_post_run_summary(opts, ctx, result_text.as_deref(), ctx.is_disposable);
+    }
+
     Ok(())
 }
 

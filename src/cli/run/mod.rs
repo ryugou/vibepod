@@ -52,6 +52,8 @@ pub(super) struct RunContext {
     pub(super) is_disposable: bool,
     /// ネットワーク無効フラグ（ラベル生成に使用）
     pub(super) no_network: bool,
+    /// ストリーム途絶タイムアウト（秒）。0 = 無効
+    pub(super) prompt_idle_timeout: u64,
 }
 
 /// 環境変数のリストを正規化してハッシュ化する（値の変更も検知するため）。
