@@ -5,6 +5,7 @@ use crate::runtime::{ContainerConfig, ContainerStatus};
 use crate::session::SessionStore;
 
 mod interactive;
+pub mod lock;
 mod prepare;
 mod prompt;
 
@@ -51,6 +52,8 @@ pub(super) struct RunContext {
     pub(super) is_disposable: bool,
     /// ネットワーク無効フラグ（ラベル生成に使用）
     pub(super) no_network: bool,
+    /// ストリーム途絶タイムアウト（秒）。0 = 無効
+    pub(super) prompt_idle_timeout: u64,
 }
 
 /// 環境変数のリストを正規化してハッシュ化する（値の変更も検知するため）。
@@ -206,6 +209,39 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
     )
 }
 
+/// `~/.claude/` 配下のグローバル設定ファイル・ディレクトリのマウント定義を構築する。
+/// 存在するもののみ含まれる。read-only でマウントされる。
+pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String)> {
+    let claude_dir = home.join(".claude");
+    let mut mounts = Vec::new();
+
+    let claude_md = claude_dir.join("CLAUDE.md");
+    if claude_md.is_file() {
+        mounts.push((
+            claude_md.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/CLAUDE.md".to_string(),
+        ));
+    }
+
+    let skills_dir = claude_dir.join("skills");
+    if skills_dir.is_dir() {
+        mounts.push((
+            skills_dir.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/skills".to_string(),
+        ));
+    }
+
+    let agents_dir = claude_dir.join("agents");
+    if agents_dir.is_dir() {
+        mounts.push((
+            agents_dir.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/agents".to_string(),
+        ));
+    }
+
+    mounts
+}
+
 pub(super) fn build_container_config(
     ctx: &RunContext,
     image: String,
@@ -285,6 +321,32 @@ pub async fn execute(opts: RunOptions) -> Result<()> {
     let Some(ctx) = prepare::prepare_context(&opts).await? else {
         return Ok(());
     };
+
+    // 排他チェック: prompt.lock が有効なら（= --prompt セッション実行中）全モードで拒否
+    let vibepod_dir = std::path::PathBuf::from(&ctx.effective_workspace).join(".vibepod");
+    if let Some(pid) = lock::PromptLock::check(&vibepod_dir) {
+        anyhow::bail!(
+            "セッション実行中です (PID: {})\n停止するには: vibepod stop",
+            pid
+        );
+    }
+
+    // --prompt 開始時: interactive セッションが実行中かも確認
+    if !interactive {
+        let runtime = crate::runtime::DockerRuntime::new().await?;
+        let has_running_session = runtime
+            .has_claude_process(&ctx.container_name)
+            .await
+            .with_context(|| {
+                format!(
+                    "実行中セッションの確認に失敗しました (container: {})",
+                    ctx.container_name
+                )
+            })?;
+        if has_running_session {
+            anyhow::bail!("セッション実行中です\n停止するには: vibepod stop");
+        }
+    }
 
     if interactive {
         interactive::run_interactive(&opts, &ctx).await

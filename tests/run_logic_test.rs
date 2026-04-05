@@ -1,6 +1,6 @@
 use vibepod::cli::run::{
-    build_review_prompt, detect_languages, get_lang_install_cmd, parse_mount_arg,
-    resolve_reviewers, validate_slack_channel_id,
+    build_claude_config_mounts, build_review_prompt, detect_languages, get_lang_install_cmd,
+    parse_mount_arg, resolve_reviewers, validate_slack_channel_id,
 };
 
 // --- detect_languages ---
@@ -184,6 +184,51 @@ fn test_parse_mount_arg_custom_container_path() {
         result,
         ("/foo/bar.txt".to_string(), "/custom/path.txt".to_string())
     );
+}
+
+// --- build_claude_config_mounts ---
+
+#[test]
+fn test_claude_config_mounts_constructed() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(claude_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(claude_dir.join("agents")).unwrap();
+    std::fs::write(claude_dir.join("CLAUDE.md"), "# test").unwrap();
+
+    let mounts = build_claude_config_mounts(dir.path());
+    assert_eq!(mounts.len(), 3);
+
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/CLAUDE.md"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/skills"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/agents"));
+}
+
+#[test]
+fn test_claude_config_mounts_missing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mounts = build_claude_config_mounts(dir.path());
+    assert!(mounts.is_empty());
+}
+
+#[test]
+fn test_claude_config_mounts_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(claude_dir.join("CLAUDE.md"), "# test").unwrap();
+
+    let mounts = build_claude_config_mounts(dir.path());
+    assert_eq!(mounts.len(), 1);
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/CLAUDE.md"));
 }
 
 // --- validate_slack_channel_id ---

@@ -512,12 +512,19 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 9b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
+    // ~/.claude/ マウントも含めるため、home を先に解決する
+    let home_early_for_mounts = crate::config::home_dir()?;
+    let claude_config_mounts_for_label = super::build_claude_config_mounts(&home_early_for_mounts);
+
     if let Some(stored_labels) = stored_labels_opt {
         let mut mounts_parts: Vec<String> = Vec::new();
         for arg in &opts.mount {
             if let Ok((h, c)) = parse_mount_arg(arg) {
                 mounts_parts.push(format!("{}:{}", h, c));
             }
+        }
+        for (h, c) in &claude_config_mounts_for_label {
+            mounts_parts.push(format!("{}:{}", h, c));
         }
         mounts_parts.sort();
 
@@ -589,6 +596,12 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         extra_mounts.push(parsed);
     }
 
+    // ~/.claude/ 配下のグローバル設定をマウント対象に追加（存在する場合のみ）
+    let claude_config_mounts = super::build_claude_config_mounts(&home);
+    for (host, container) in &claude_config_mounts {
+        extra_mounts.push((host.clone(), container.clone()));
+    }
+
     Ok(Some(RunContext {
         container_name,
         effective_workspace,
@@ -610,5 +623,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         container_status,
         is_disposable,
         no_network: opts.no_network,
+        prompt_idle_timeout: vibepod_config.prompt_idle_timeout(),
     }))
 }
