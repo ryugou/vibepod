@@ -216,7 +216,7 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
     let mut mounts = Vec::new();
 
     let claude_md = claude_dir.join("CLAUDE.md");
-    if claude_md.exists() {
+    if claude_md.is_file() {
         mounts.push((
             claude_md.to_string_lossy().to_string(),
             "/home/vibepod/.claude/CLAUDE.md".to_string(),
@@ -334,7 +334,16 @@ pub async fn execute(opts: RunOptions) -> Result<()> {
     // --prompt 開始時: interactive セッションが実行中かも確認
     if !interactive {
         let runtime = crate::runtime::DockerRuntime::new().await?;
-        if let Ok(true) = runtime.has_claude_process(&ctx.container_name).await {
+        let has_running_session = runtime
+            .has_claude_process(&ctx.container_name)
+            .await
+            .with_context(|| {
+                format!(
+                    "実行中セッションの確認に失敗しました (container: {})",
+                    ctx.container_name
+                )
+            })?;
+        if has_running_session {
             anyhow::bail!("セッション実行中です\n停止するには: vibepod stop");
         }
     }

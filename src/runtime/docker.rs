@@ -466,7 +466,17 @@ impl DockerRuntime {
             .context("Failed to run docker top")?;
 
         if !output.status.success() {
-            return Ok(false);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // コンテナ停止/不存在は期待される失敗 → プロセスなし
+            if stderr.contains("No such container") || stderr.contains("is not running") {
+                return Ok(false);
+            }
+            // その他のエラー（権限不足等）は判定不能 → Err にして排他を安全側に倒す
+            anyhow::bail!(
+                "docker top failed for container {}: {}",
+                container_name,
+                stderr.trim()
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);

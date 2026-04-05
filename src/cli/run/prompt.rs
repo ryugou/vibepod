@@ -320,16 +320,25 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         let current_head = crate::git::get_head_hash(workspace_path).unwrap_or_default();
         let head_advanced = current_head != ctx.deferred_session.head_before;
 
-        // HEAD が進んでいれば reset --hard で戻す
-        if head_advanced {
+        if head_advanced && was_dirty_before {
+            // コミットは進んでいるが開始前から dirty: --mixed で HEAD だけ戻し、
+            // working tree はそのまま保持（ユーザーの事前変更を消さない）
+            std::process::Command::new("git")
+                .args(["reset", "--mixed", &ctx.deferred_session.head_before])
+                .current_dir(workspace_path)
+                .output()
+                .ok();
+        } else if head_advanced {
+            // コミットが進んでいて開始前はクリーン: --hard で完全復元
             crate::git::reset_hard(workspace_path, &ctx.deferred_session.head_before)?;
-        }
-        // git clean -fd はセッション開始前にクリーンだった場合のみ実行
-        // （ユーザーの既存 dirty changes を消さないよう保護）
-        if !was_dirty_before {
+            crate::git::clean_fd(workspace_path)?;
+        } else if !was_dirty_before {
+            // HEAD は同じだが開始前クリーン: uncommitted changes を --hard で消す
             crate::git::reset_hard(workspace_path, &ctx.deferred_session.head_before)?;
             crate::git::clean_fd(workspace_path)?;
         }
+        // was_dirty_before && !head_advanced: 開始前から dirty で HEAD 変更なし
+        // → ユーザーの変更とエージェントの変更が混在。リセットしない（警告���み）
         ctx.store.mark_restored(&ctx.deferred_session.id)?;
 
         let timeout_display = if idle_timeout_secs >= 60 {

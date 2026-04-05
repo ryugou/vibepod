@@ -112,8 +112,16 @@ impl Drop for PromptLock {
 
 fn is_process_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) はシグナルを送らず、プロセスの存在確認のみを行う。
-    // 戻り値が 0 であればプロセスが存在する（またはアクセス可能）。
     // 制約: PID 再利用により、元のプロセスが死んで別プロセスが同じ PID を取得した場合に
     // 誤って「生存」と判定する可能性がある。発生頻度は極めて低く、実用上は許容する。
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    let rc = unsafe { libc::kill(pid as i32, 0) };
+    if rc == 0 {
+        true
+    } else {
+        // EPERM: プロセスは存在するが権限不足 → 生存として扱う
+        matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        )
+    }
 }
