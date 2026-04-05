@@ -114,7 +114,6 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
 | `--lang <name>` | Install language toolchain in container (`rust`, `node`, `python`, `go`, `java`). Auto-detected from project files if omitted |
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
-| `--review [reviewer]` | Auto-create PR and request code review after implementation (requires `--prompt`). Reviewer (`codex` or `copilot`) can be specified or falls back to `config.toml` |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 | `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
 
@@ -125,7 +124,6 @@ Runs an AI coding agent inside a container, mounting your project directory.
 - **`vibepod run`** (interactive) — day-to-day development. You get a normal Claude Code session safely inside a Docker container. Permission prompts work normally — no bypass mode. The container persists for instant reconnection.
 - **`--prompt`** (fire-and-forget) — when the spec is already written and you want to kick off autonomous execution with `--dangerously-skip-permissions`. Great for running overnight or during meetings. Pair with a spec file in your repo: `vibepod run --prompt "Follow specs/login.md and implement"`.
 - **`--prompt --worktree`** — same as above, but runs in an isolated git worktree. Your working tree stays untouched. Review the changes before merging. Always creates a fresh container.
-- **`--prompt --review`** — runs autonomously, then creates a PR and requests code review from configured reviewers (Codex, Copilot). Fixes review feedback and pushes updates automatically.
 
 #### Passing secrets with 1Password
 
@@ -152,7 +150,6 @@ VibePod provides 3-layer isolation:
    - `~/.claude.json` → container via **temporary copy** (read-write): onboarding state; the host file is never written directly
    - `~/.gitconfig` → `/home/vibepod/.gitconfig` (read-only): git user name and email
    - `--mount`-specified paths (read-only): additional host paths you explicitly opt in
-   - `~/.codex/auth.json` (read-only, when `--review codex` is used): Codex authentication
    - `GH_TOKEN` injected from `gh auth token` when available, for GitHub CLI access inside the container
 3. **Git safety net** — your project is git-managed, so any unwanted changes can be reverted with `git reset --hard`
 
@@ -232,9 +229,9 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 | **v1.1** | Pre-installed plugins (superpowers, frontend-design), `--env-file` with 1Password integration |
 | **v1.2** | `vibepod restore` (git HEAD auto-recovery with session reports) |
 | **v1.3** | Slack bridge mode (removed in v1.4), multi-provider LLM formatting |
-| **v1.4** | Stream output, `--worktree` isolation, `--lang` toolchain, `--review` (Codex + Copilot), `vibepod ps`, `vibepod logs`, `vibepod stop`, `--mount`, `--new`, default container reuse, `vibepod rm`, `config.toml` unified config, bridge removal, docker run unification, run.rs split |
+| **v1.4** | Stream output, `--worktree` isolation, `--lang` toolchain, `vibepod ps`, `vibepod logs`, `vibepod stop`, `--mount`, `--new`, default container reuse, `vibepod rm`, `config.toml` unified config, bridge removal, docker run unification, run.rs split |
 | **v2** | Dashboard (Web UI), execution logs, progress monitoring |
-| **v2.1+** | Gemini CLI / Codex as agent runtimes (not to be confused with `--review codex` which uses Codex for code review), multi-container execution |
+| **v2.1+** | Gemini CLI / Codex as agent runtimes, multi-container execution |
 
 ## License
 

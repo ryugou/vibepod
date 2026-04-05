@@ -29,7 +29,6 @@ pub struct ContainerConfig {
     /// ユーザー環境変数（認証トークンを除く）
     pub env_vars: Vec<String>,
     pub network_disabled: bool,
-    pub codex_auth: Option<String>,
     pub extra_mounts: Vec<(String, String)>,
     /// コンテナ作成時に付与するラベル（設定変更の検知に使用）
     pub labels: HashMap<String, String>,
@@ -58,11 +57,6 @@ impl ContainerConfig {
         if let Some(ref claude_json) = self.claude_json {
             args.push("-v".to_string());
             args.push(format!("{}:/home/vibepod/.claude.json", claude_json));
-        }
-
-        if let Some(ref codex_auth) = self.codex_auth {
-            args.push("-v".to_string());
-            args.push(format!("{}:/home/vibepod/.codex/auth.json:ro", codex_auth));
         }
 
         if self.network_disabled {

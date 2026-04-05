@@ -9,8 +9,7 @@ use crate::session::{self, SessionStore};
 use crate::ui::{banner, prompts};
 
 use super::{
-    build_review_prompt, detect_languages, get_lang_install_cmd, hash_env_vars, parse_mount_arg,
-    resolve_reviewers, RunContext, RunOptions, VALID_REVIEWERS,
+    detect_languages, get_lang_install_cmd, hash_env_vars, parse_mount_arg, RunContext, RunOptions,
 };
 
 /// プロジェクトパスの SHA256 先頭 8 文字（hex）を返す。
@@ -48,7 +47,6 @@ fn warn_config_changes(
         "vibepod.lang",
         "vibepod.network",
         "vibepod.mounts",
-        "vibepod.codex_auth",
         "vibepod.env_hash",
     ] {
         let label_name = key.strip_prefix("vibepod.").unwrap_or(key);
@@ -99,9 +97,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     if opts.worktree && opts.prompt.is_none() {
         bail!("--worktree requires --prompt");
-    }
-    if opts.review.is_some() && opts.prompt.is_none() {
-        bail!("--review requires --prompt");
     }
 
     // Record session for restore
@@ -261,73 +256,11 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         (Vec::new(), String::new())
     };
 
-    // Resolve reviewers (before setup_cmd so codex can extend it)
-    let config_reviewers = vibepod_config.reviewers();
-    let review_explicit = opts
-        .review
-        .as_deref()
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    if review_explicit {
-        if let Some(ref v) = opts.review {
-            if !VALID_REVIEWERS.contains(&v.as_str()) {
-                bail!(
-                    "Unknown reviewer '{}'. Valid values: {}",
-                    v,
-                    VALID_REVIEWERS.join(", ")
-                );
-            }
-        }
-    }
-    let mut reviewers = resolve_reviewers(&opts.review, &config_reviewers);
-
-    // Codex CLI availability check
-    if reviewers.contains(&"codex".to_string()) {
-        let codex_available = Command::new("which")
-            .arg("codex")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if !codex_available {
-            if review_explicit {
-                bail!("Codex CLI is not installed. Install it with: npm install -g @openai/codex");
-            } else {
-                eprintln!("Warning: Codex CLI not found, skipping codex review");
-                reviewers.retain(|r| r != "codex");
-            }
-        }
-    }
-
-    // Codex auth mount path
-    let home_early = config::home_dir()?;
-    let codex_auth = if reviewers.contains(&"codex".to_string()) {
-        let codex_auth_path = home_early.join(".codex/auth.json");
-        if codex_auth_path.exists() {
-            Some(codex_auth_path.to_string_lossy().to_string())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
     let setup_cmd: Option<String> = {
-        let mut setup_parts: Vec<String> = lang_names
+        let setup_parts: Vec<String> = lang_names
             .iter()
             .filter_map(|l| get_lang_install_cmd(l).map(|s| s.to_string()))
             .collect();
-        if reviewers.contains(&"codex".to_string()) {
-            let setup_cmd_contains_node = lang_names.contains(&"node".to_string());
-            if !setup_cmd_contains_node {
-                setup_parts.push("curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - && sudo apt-get install -y nodejs".to_string());
-            }
-            setup_parts.push("sudo npm install -g @openai/codex".to_string());
-            // Fix ownership of ~/.codex/ dir
-            setup_parts.push(
-                "(if [ -d \"$HOME/.codex\" ]; then sudo chown $(id -u):$(id -g) \"$HOME/.codex\" 2>/dev/null || true; fi)".to_string(),
-            );
-        }
         if setup_parts.is_empty() {
             None
         } else {
@@ -430,9 +363,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         claude_args.push("--resume".to_string());
     }
     if let Some(ref p) = opts.prompt {
-        let effective_prompt = build_review_prompt(p, &reviewers);
         claude_args.push("-p".to_string());
-        claude_args.push(effective_prompt);
+        claude_args.push(p.clone());
         claude_args.push("--output-format".to_string());
         claude_args.push("stream-json".to_string());
         claude_args.push("--verbose".to_string());
@@ -538,13 +470,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         let current_env_hash = hash_env_vars(&resolved_env_vars);
 
         let mut current_labels = std::collections::HashMap::new();
-        // codex auth: 解決済みの codex_auth 変数を使用（config 経由の reviewer も考慮）
-        let has_codex_auth = codex_auth.is_some();
 
         current_labels.insert("vibepod.mounts".to_string(), mounts_parts.join("|"));
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
-        current_labels.insert("vibepod.codex_auth".to_string(), has_codex_auth.to_string());
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
 
         warn_config_changes(&stored_labels, &current_labels)?;
@@ -615,8 +544,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         worktree_branch_name,
         worktree_dir_name,
         lang_display,
-        reviewers,
-        codex_auth,
         store,
         deferred_session,
         extra_mounts,

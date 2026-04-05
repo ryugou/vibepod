@@ -20,7 +20,6 @@ pub struct RunOptions {
     pub env_file: Option<String>,
     pub lang: Option<String>,
     pub worktree: bool,
-    pub review: Option<String>,
     pub mount: Vec<String>,
     /// `--new` フラグ: 既存コンテナを破棄して新規作成する
     pub new_container: bool,
@@ -41,8 +40,6 @@ pub(super) struct RunContext {
     pub(super) worktree_branch_name: Option<String>,
     pub(super) worktree_dir_name: Option<String>,
     pub(super) lang_display: String,
-    pub(super) reviewers: Vec<String>,
-    pub(super) codex_auth: Option<String>,
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
@@ -123,92 +120,6 @@ pub fn validate_slack_channel_id(id: &str) -> bool {
     (id.starts_with('C') || id.starts_with('G')) && id.len() >= 9
 }
 
-pub(super) const VALID_REVIEWERS: &[&str] = &["copilot", "codex"];
-
-pub fn resolve_reviewers(review_arg: &Option<String>, config: &[String]) -> Vec<String> {
-    match review_arg {
-        None => vec![],
-        Some(explicit) if !explicit.is_empty() => {
-            if VALID_REVIEWERS.contains(&explicit.as_str()) {
-                vec![explicit.clone()]
-            } else {
-                vec![]
-            }
-        }
-        Some(_) => config
-            .iter()
-            .filter(|r| VALID_REVIEWERS.contains(&r.as_str()))
-            .cloned()
-            .collect(),
-    }
-}
-
-pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
-    if reviewers.is_empty() {
-        return prompt.to_string();
-    }
-
-    let has_codex = reviewers.contains(&"codex".to_string());
-    let has_copilot = reviewers.contains(&"copilot".to_string());
-
-    if !has_codex && !has_copilot {
-        return prompt.to_string();
-    }
-
-    let mut sections: Vec<String> = Vec::new();
-
-    sections.push(
-        "## 共通準備\n\
-- 現在のブランチが main の場合は `git checkout -b <適切なブランチ名>` で新しいブランチを作成する"
-            .to_string(),
-    );
-
-    // Codex review フェーズ（ローカル、コミット前）
-    if has_codex {
-        sections.push(
-            "## Codex Review（ローカル、コミット前）\n\
-以下を指摘がなくなるまで繰り返す（最大 5 回）:\n\
-1. Bash ツールで `codex review -c sandbox_mode=danger-full-access -c approval_policy=never` を実行する（timeout: 600000 を必ず指定すること。デフォルトの 120 秒ではタイムアウトする）\n\
-   （重要: Claude Code の内蔵レビュー機能やスキルではなく、Codex CLI コマンドを Bash で直接実行すること。コンテナ内では Linux namespace が使えないため sandbox を無効化し、非対話実行のため approval も無効化する）\n\
-2. 出力を確認する。「指摘なし」「no issues」等であればこのフェーズ完了\n\
-3. 指摘があれば該当箇所を修正する\n\
-4. 手順 1 に戻る"
-                .to_string(),
-        );
-    }
-
-    // コミット + push + PR 作成
-    sections.push(
-        "## コミットと PR 作成\n\
-1. 変更内容をコミットする（Conventional Commits 準拠）\n\
-2. `git push -u origin <ブランチ名>` でリモートに push する\n\
-3. `gh pr create --base main` で PR を作成する"
-            .to_string(),
-    );
-
-    // Copilot review フェーズ（PR 上、1ラウンドのみ。API での re-review は未サポート）
-    if has_copilot {
-        sections.push(
-            "## Copilot Review（PR 上、1ラウンド）\n\
-1. `gh pr edit <PR番号> --add-reviewer copilot` で Copilot レビューを依頼する\n\
-2. 30 秒間隔で最大 10 回 `gh api repos/{owner}/{repo}/pulls/{number}/reviews` をポーリングする\n\
-   （重要: `gh pr review` や `gh pr comment` 等の書き込み系コマンドは絶対に使わないこと）\n\
-3. レビュー結果を確認する。インラインコメントは `gh api repos/{owner}/{repo}/pulls/{number}/comments` で取得する\n\
-4. 指摘があれば修正し、コミットして `git push` する\n\
-注意: Copilot の re-review は API から自動でリクエストできないため、1ラウンドで終了する"
-                .to_string(),
-        );
-    }
-
-    sections.push("## 完了\n- 最終的な PR の URL を出力する".to_string());
-
-    format!(
-        "{}\n\n---\n\n【必須】上記の作業が終わったら、以下のレビューフローを必ず最後まで実行すること。レビューフローを省略してはならない。\n\n{}",
-        prompt,
-        sections.join("\n\n")
-    )
-}
-
 /// `~/.claude/` 配下のグローバル設定ファイル・ディレクトリのマウント定義を構築する。
 /// 存在するもののみ含まれる。read-only でマウントされる。
 pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String)> {
@@ -263,7 +174,6 @@ pub(super) fn build_container_config(
         },
         env_vars: ctx.resolved_env_vars.clone(),
         network_disabled: no_network,
-        codex_auth: ctx.codex_auth.clone(),
         extra_mounts: ctx.extra_mounts.clone(),
         labels: build_config_labels(ctx),
     }
@@ -299,12 +209,6 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     labels.insert(
         "vibepod.workspace".to_string(),
         ctx.effective_workspace.clone(),
-    );
-
-    // codex auth マウントの有無を保存（--review codex の有無を追跡）
-    labels.insert(
-        "vibepod.codex_auth".to_string(),
-        ctx.codex_auth.is_some().to_string(),
     );
 
     // ユーザー環境変数のハッシュを保存（--env 値の変更を検知するため値もハッシュ化）

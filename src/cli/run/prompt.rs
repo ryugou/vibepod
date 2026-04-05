@@ -79,9 +79,6 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         if !ctx.lang_display.is_empty() {
             println!("Language: {}", ctx.lang_display);
         }
-        if !ctx.reviewers.is_empty() {
-            println!("Review: enabled ({})", ctx.reviewers.join(", "));
-        }
         println!();
     } else {
         println!("  ◇  Starting container...");

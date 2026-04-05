@@ -5,13 +5,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Deserialize, Default)]
 /// プロジェクト設定とグローバル設定をマージした結果を保持する。プロジェクト設定が優先される。
 pub struct VibepodConfig {
-    pub review: Option<ReviewConfig>,
     pub run: Option<RunConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct ReviewConfig {
-    pub reviewers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -38,11 +32,6 @@ impl VibepodConfig {
         match (project, global) {
             (Some(p), Some(g)) => {
                 // フィールド単位でディープマージ（プロジェクト優先、なければグローバル）
-                let reviewers = p
-                    .review
-                    .as_ref()
-                    .and_then(|r| r.reviewers.clone())
-                    .or(g.review.as_ref().and_then(|r| r.reviewers.clone()));
                 let lang = p
                     .run
                     .as_ref()
@@ -55,11 +44,6 @@ impl VibepodConfig {
                     .or(g.run.as_ref().and_then(|r| r.prompt_idle_timeout));
 
                 VibepodConfig {
-                    review: if p.review.is_some() || g.review.is_some() {
-                        Some(ReviewConfig { reviewers })
-                    } else {
-                        None
-                    },
                     run: if p.run.is_some() || g.run.is_some() {
                         Some(RunConfig {
                             lang,
@@ -74,13 +58,6 @@ impl VibepodConfig {
             (None, Some(g)) => g,
             (None, None) => Self::default(),
         }
-    }
-
-    pub fn reviewers(&self) -> Vec<String> {
-        self.review
-            .as_ref()
-            .and_then(|r| r.reviewers.clone())
-            .unwrap_or_default()
     }
 
     pub fn lang(&self) -> Option<String> {

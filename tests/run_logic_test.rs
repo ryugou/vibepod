@@ -1,6 +1,6 @@
 use vibepod::cli::run::{
-    build_claude_config_mounts, build_review_prompt, detect_languages, get_lang_install_cmd,
-    parse_mount_arg, resolve_reviewers, validate_slack_channel_id,
+    build_claude_config_mounts, detect_languages, get_lang_install_cmd, parse_mount_arg,
+    validate_slack_channel_id,
 };
 
 // --- detect_languages ---
@@ -54,95 +54,6 @@ fn test_lang_install_cmd_rust() {
 fn test_lang_install_cmd_unknown() {
     let cmd = get_lang_install_cmd("unknown");
     assert!(cmd.is_none());
-}
-
-// --- build_review_prompt ---
-
-#[test]
-fn test_review_prompt_copilot() {
-    let reviewers = vec!["copilot".to_string()];
-    let result = build_review_prompt("my prompt", &reviewers);
-    assert!(result.starts_with("my prompt"));
-    assert!(result.contains("レビューフロー"));
-    assert!(result.contains("gh pr create"));
-    assert!(result.contains("add-reviewer copilot"));
-    // 1ラウンドのみ（re-review 未サポート）
-    assert!(result.contains("1ラウンド"));
-    // インラインコメント取得 API
-    assert!(result.contains("pulls/{number}/comments"));
-}
-
-#[test]
-fn test_review_prompt_codex() {
-    let reviewers = vec!["codex".to_string()];
-    let result = build_review_prompt("my prompt", &reviewers);
-    assert!(result.starts_with("my prompt"));
-    assert!(result
-        .contains("codex review -c sandbox_mode=danger-full-access -c approval_policy=never",));
-    assert!(result.contains("timeout: 600000"));
-    assert!(result.contains("gh pr create"));
-    // Codex ループ
-    assert!(result.contains("指摘がなくなるまで"));
-}
-
-#[test]
-fn test_review_prompt_both() {
-    let reviewers = vec!["codex".to_string(), "copilot".to_string()];
-    let result = build_review_prompt("my prompt", &reviewers);
-    assert!(result.contains("Codex Review"));
-    assert!(result.contains("Copilot Review"));
-    // PR 作成は1回だけ
-    assert_eq!(result.matches("gh pr create").count(), 1);
-}
-
-#[test]
-fn test_no_review_prompt_unchanged() {
-    let result = build_review_prompt("my prompt", &[]);
-    assert_eq!(result, "my prompt");
-}
-
-// --- resolve_reviewers ---
-
-#[test]
-fn test_resolve_reviewers_none() {
-    let config = vec!["copilot".to_string()];
-    let result = resolve_reviewers(&None, &config);
-    assert!(result.is_empty());
-}
-
-#[test]
-fn test_resolve_reviewers_explicit() {
-    let config = vec!["copilot".to_string()];
-    let result = resolve_reviewers(&Some("codex".to_string()), &config);
-    assert_eq!(result, vec!["codex".to_string()]);
-}
-
-#[test]
-fn test_resolve_reviewers_from_config() {
-    let config = vec!["copilot".to_string()];
-    let result = resolve_reviewers(&Some("".to_string()), &config);
-    assert_eq!(result, vec!["copilot".to_string()]);
-}
-
-#[test]
-fn test_resolve_reviewers_empty_config() {
-    let config: Vec<String> = vec![];
-    let result = resolve_reviewers(&Some("".to_string()), &config);
-    assert!(result.is_empty());
-}
-
-#[test]
-fn test_resolve_reviewers_unknown_explicit_filtered() {
-    let config = vec!["copilot".to_string()];
-    let result = resolve_reviewers(&Some("unknown_tool".to_string()), &config);
-    assert!(result.is_empty());
-}
-
-#[test]
-fn test_resolve_reviewers_unknown_in_config_filtered() {
-    let config = vec!["copilot".to_string(), "unknown_tool".to_string()];
-    let result = resolve_reviewers(&Some("".to_string()), &config);
-    assert_eq!(result, vec!["copilot".to_string()]);
 }
 
 // --- parse_mount_arg ---
