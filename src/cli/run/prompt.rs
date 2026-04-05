@@ -294,7 +294,13 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     // タイムアウト時の自動リセット
     if was_timed_out {
         let workspace_path = std::path::Path::new(&ctx.effective_workspace);
-        if crate::git::has_uncommitted_changes(workspace_path) {
+        // uncommitted changes だけでなく、コミットが進んでいるかも確認
+        // （エージェントが commit した後にタイムアウトするケース）
+        let current_head = crate::git::get_head_hash(workspace_path).unwrap_or_default();
+        let needs_reset = current_head != ctx.deferred_session.head_before
+            || crate::git::has_uncommitted_changes(workspace_path);
+
+        if needs_reset {
             crate::git::reset_hard(workspace_path, &ctx.deferred_session.head_before)?;
             crate::git::clean_fd(workspace_path)?;
         }
@@ -310,18 +316,13 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             "⚠ ストリーム無出力が {} を超えたため、セッションを中断しました。",
             timeout_display
         );
-        if crate::git::has_uncommitted_changes(workspace_path) {
-            eprintln!("  警告: 作業ディレクトリにまだ変更が残っています。");
-        } else {
+        if needs_reset {
             eprintln!(
                 "  作業ディレクトリを {} にリセットしました。",
                 &ctx.deferred_session.head_before[..8.min(ctx.deferred_session.head_before.len())]
             );
         }
     }
-
-    // ロック解放
-    drop(lock);
 
     // コンテナの後処理
     if ctx.is_disposable {
@@ -338,6 +339,10 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             .output()
             .ok();
     }
+
+    // ロック解放（コンテナ後処理が完了してから解放し、
+    // 次の起動がコンテナ停止中に走る競合を防ぐ）
+    drop(lock);
 
     if !was_timed_out {
         print_post_run_summary(opts, ctx, result_text.as_deref(), ctx.is_disposable);

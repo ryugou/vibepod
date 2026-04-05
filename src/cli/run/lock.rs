@@ -86,7 +86,12 @@ impl PromptLock {
             serde_json::from_str(&content).context("Failed to parse prompt.lock")?;
         data.last_event_at = chrono::Local::now().to_rfc3339();
         let json = serde_json::to_string_pretty(&data)?;
-        fs::write(&self.path, json).context("Failed to update prompt.lock")?;
+        // アトミックに書き換え: 一時ファイルに書いてからリネーム
+        // fs::write は truncate → write の 2 ステップで、途中で check() が読むと
+        // パース失敗 → stale 扱いでロックが消える競合が起きる
+        let tmp_path = self.path.with_extension("lock.tmp");
+        fs::write(&tmp_path, json).context("Failed to write prompt.lock.tmp")?;
+        fs::rename(&tmp_path, &self.path).context("Failed to rename prompt.lock.tmp")?;
         Ok(())
     }
 
