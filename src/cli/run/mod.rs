@@ -209,6 +209,39 @@ pub fn build_review_prompt(prompt: &str, reviewers: &[String]) -> String {
     )
 }
 
+/// `~/.claude/` 配下のグローバル設定ファイル・ディレクトリのマウント定義を構築する。
+/// 存在するもののみ含まれる。read-only でマウントされる。
+pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String)> {
+    let claude_dir = home.join(".claude");
+    let mut mounts = Vec::new();
+
+    let claude_md = claude_dir.join("CLAUDE.md");
+    if claude_md.exists() {
+        mounts.push((
+            claude_md.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/CLAUDE.md".to_string(),
+        ));
+    }
+
+    let skills_dir = claude_dir.join("skills");
+    if skills_dir.is_dir() {
+        mounts.push((
+            skills_dir.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/skills".to_string(),
+        ));
+    }
+
+    let agents_dir = claude_dir.join("agents");
+    if agents_dir.is_dir() {
+        mounts.push((
+            agents_dir.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/agents".to_string(),
+        ));
+    }
+
+    mounts
+}
+
 pub(super) fn build_container_config(
     ctx: &RunContext,
     image: String,

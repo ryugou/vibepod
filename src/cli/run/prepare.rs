@@ -589,6 +589,12 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         extra_mounts.push(parsed);
     }
 
+    // ~/.claude/ 配下のグローバル設定をマウント対象に追加（存在する場合のみ）
+    let claude_config_mounts = super::build_claude_config_mounts(&home);
+    for (host, container) in &claude_config_mounts {
+        extra_mounts.push((host.clone(), container.clone()));
+    }
+
     Ok(Some(RunContext {
         container_name,
         effective_workspace,
