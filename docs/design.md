@@ -244,6 +244,19 @@ image = "vibepod-claude:latest"
 > **`~/.claude` をマウントしない理由**: `~/.claude` 全体をマウントすると、プラグインキャッシュ等の
 > 読み込みで Claude Code がハングする。認証は環境変数で渡すため、マウント不要。
 
+#### ホスト Claude 環境の取り込み
+
+ユーザーがホストで使っている Claude Code 環境（プラグイン・skill・agent・グローバル CLAUDE.md・settings）をコンテナ内でも使えるように、`~/.claude/` 配下のサブディレクトリを選択的に read-only でマウントする。`~/.claude/` 全体のマウントは過去にハングが観測されたため禁止する（詳細は `docs/superpowers/specs/2026-03-23-vibepod-auth-design.md` を参照）。
+
+マウント対象:
+- `~/.claude/CLAUDE.md` → `/home/vibepod/.claude/CLAUDE.md`
+- `~/.claude/skills/` → `/home/vibepod/.claude/skills`
+- `~/.claude/agents/` → `/home/vibepod/.claude/agents`
+- `~/.claude/plugins/` → `/home/vibepod/.claude/plugins` および `<host_home>/.claude/plugins`（二重マウント）
+- `~/.claude/settings.json` → `/home/vibepod/.claude/settings.json`（sanitize 済みコピー）
+
+plugins の二重マウントは、`installed_plugins.json` の `installPath` フィールドがホスト絶対パスを持つことへの対処。settings.json のサニタイズでは、ホストスクリプトを絶対パスで参照する `hooks` と `statusLine` フィールドを除去する。サニタイズ済みコピーは `~/.config/vibepod/runtime/<container_name>/settings.json` に書き出される。
+
 **認証情報の受け渡し：**
 
 `vibepod login` で `claude setup-token` を実行し、1 年有効の長期 OAuth トークンを取得する。

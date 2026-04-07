@@ -149,6 +149,9 @@ VibePod provides 3-layer isolation:
    - `$(pwd)` → `/workspace` (read-write): your project files
    - `~/.claude.json` → container via **temporary copy** (read-write): onboarding state; the host file is never written directly
    - `~/.gitconfig` → `/home/vibepod/.gitconfig` (read-only): git user name and email
+   - `~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/` (read-only, when present): your personal Claude Code instructions, skills, and agents
+   - `~/.claude/plugins/` (read-only, when present): your installed Claude Code plugins — mounted at both `/home/vibepod/.claude/plugins` and the host absolute path to resolve `installed_plugins.json` entries
+   - `~/.claude/settings.json` via **sanitized copy** (read-only, when present): a per-container copy with `hooks` and `statusLine` stripped, written to `~/.config/vibepod/runtime/<container>/settings.json`
    - `--mount`-specified paths (read-only): additional host paths you explicitly opt in
    - `GH_TOKEN` injected from `gh auth token` when available, for GitHub CLI access inside the container
 3. **Git safety net** — your project is git-managed, so any unwanted changes can be reverted with `git reset --hard`
