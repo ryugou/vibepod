@@ -1,6 +1,6 @@
 use vibepod::cli::run::{
     build_claude_config_mounts, detect_languages, get_lang_install_cmd, parse_mount_arg,
-    sanitize_settings_json, validate_slack_channel_id,
+    prepare_sanitized_settings_mount, sanitize_settings_json, validate_slack_channel_id,
 };
 
 // --- detect_languages ---
@@ -293,4 +293,59 @@ fn test_sanitize_settings_empty_object() {
 fn test_sanitize_settings_invalid_json_errors() {
     let result = sanitize_settings_json("not valid json {");
     assert!(result.is_err(), "invalid JSON should return an error");
+}
+
+// --- prepare_sanitized_settings_mount ---
+
+#[test]
+fn test_prepare_sanitized_settings_mount_writes_and_returns_entry() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+
+    // Create a fake ~/.claude/settings.json with hooks to be stripped
+    let claude_dir = home_dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"env":{"X":"1"},"hooks":{"Notification":[]}}"#,
+    )
+    .unwrap();
+
+    let result =
+        prepare_sanitized_settings_mount(home_dir.path(), config_dir.path(), "vibepod-test-abc123")
+            .unwrap();
+
+    let (host_path, container_path) = result.expect("should return a mount entry");
+
+    assert_eq!(container_path, "/home/vibepod/.claude/settings.json");
+    assert!(
+        host_path.contains("vibepod-test-abc123"),
+        "host path should include container name: {}",
+        host_path
+    );
+
+    // Verify the file was written and is sanitized
+    let written = std::fs::read_to_string(&host_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+    assert!(
+        parsed.get("hooks").is_none(),
+        "hooks should be stripped in written file"
+    );
+    assert!(parsed.get("env").is_some(), "env should be preserved");
+}
+
+#[test]
+fn test_prepare_sanitized_settings_mount_no_host_settings() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    // No .claude/settings.json on host
+
+    let result =
+        prepare_sanitized_settings_mount(home_dir.path(), config_dir.path(), "vibepod-test-none")
+            .unwrap();
+
+    assert!(
+        result.is_none(),
+        "should return None when host settings.json is absent"
+    );
 }

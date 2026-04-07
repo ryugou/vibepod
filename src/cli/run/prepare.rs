@@ -458,6 +458,15 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         for (h, c) in &claude_config_mounts_for_label {
             mounts_parts.push(format!("{}:{}", h, c));
         }
+        // Sanitized settings: include only container destination in the label so
+        // regenerated host-side runtime files do not trigger a spurious recreate
+        let host_settings_exists = home_early_for_mounts
+            .join(".claude")
+            .join("settings.json")
+            .is_file();
+        if host_settings_exists {
+            mounts_parts.push(":/home/vibepod/.claude/settings.json".to_string());
+        }
         mounts_parts.sort();
 
         let current_lang = lang_display
@@ -529,6 +538,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     let claude_config_mounts = super::build_claude_config_mounts(&home);
     for (host, container) in &claude_config_mounts {
         extra_mounts.push((host.clone(), container.clone()));
+    }
+
+    // ホスト ~/.claude/settings.json をサニタイズしてマウント対象に追加
+    if let Some((host, container)) =
+        super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
+    {
+        extra_mounts.push((host, container));
     }
 
     Ok(Some(RunContext {

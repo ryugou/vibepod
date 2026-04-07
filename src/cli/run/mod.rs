@@ -193,6 +193,41 @@ pub fn sanitize_settings_json(input: &str) -> anyhow::Result<String> {
     serde_json::to_string_pretty(&value).context("Failed to serialize sanitized settings.json")
 }
 
+/// ホストの `~/.claude/settings.json` をサニタイズしたコピーを生成し、
+/// コンテナにマウントするためのマウントエントリを返す。
+///
+/// サニタイズ済み JSON は `<config_dir>/runtime/<container_name>/settings.json`
+/// に書き出される。この場所は vibepod が書き込み許可を持つ唯一の場所である。
+///
+/// ホスト側の `settings.json` が存在しない場合は `None` を返す（マウント追加不要）。
+pub fn prepare_sanitized_settings_mount(
+    home: &std::path::Path,
+    config_dir: &std::path::Path,
+    container_name: &str,
+) -> anyhow::Result<Option<(String, String)>> {
+    let host_settings = home.join(".claude").join("settings.json");
+    if !host_settings.is_file() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&host_settings)
+        .with_context(|| format!("Failed to read {}", host_settings.display()))?;
+    let sanitized = sanitize_settings_json(&raw)?;
+
+    let runtime_dir = config_dir.join("runtime").join(container_name);
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("Failed to create {}", runtime_dir.display()))?;
+
+    let target = runtime_dir.join("settings.json");
+    std::fs::write(&target, sanitized)
+        .with_context(|| format!("Failed to write {}", target.display()))?;
+
+    Ok(Some((
+        target.to_string_lossy().to_string(),
+        "/home/vibepod/.claude/settings.json".to_string(),
+    )))
+}
+
 pub(super) fn build_container_config(
     ctx: &RunContext,
     image: String,
