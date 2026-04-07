@@ -11,21 +11,24 @@ on:
     tags-ignore:
       - 'v*'
     paths-ignore:
-      - '**.md'
+      - '*.md'
+      - '**/*.md'
       - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
       - '.claudeignore'
   pull_request:
     paths-ignore:
-      - '**.md'
+      - '*.md'
+      - '**/*.md'
       - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
       - '.claudeignore'
 
 # Cancel any in-progress run for the same branch when a new commit is pushed,
-# so back-to-back pushes don't pile up wasted matrix runs.
+# so back-to-back pushes don't pile up superseded runs (both the PR `test`
+# job and any post-merge `build` matrix runs benefit from this).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
