@@ -33,17 +33,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Opt into Node.js 24 for JavaScript actions ahead of the 2026-06-02 default
-# switch, silencing the deprecation warning emitted by actions/checkout@v4 etc.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
@@ -71,7 +66,7 @@ jobs:
             use_cross: true
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
