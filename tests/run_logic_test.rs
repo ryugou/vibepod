@@ -1,6 +1,6 @@
 use vibepod::cli::run::{
     build_claude_config_mounts, detect_languages, get_lang_install_cmd, parse_mount_arg,
-    validate_slack_channel_id,
+    sanitize_settings_json, validate_slack_channel_id,
 };
 
 // --- detect_languages ---
@@ -210,4 +210,87 @@ fn test_valid_slack_private_channel_id() {
 #[test]
 fn test_invalid_slack_channel_id_too_short() {
     assert!(!validate_slack_channel_id("C123"));
+}
+
+// --- sanitize_settings_json ---
+
+#[test]
+fn test_sanitize_settings_strips_hooks() {
+    let input = r#"{
+        "env": {"FOO": "bar"},
+        "permissions": {"allow": ["Bash(ls:*)"]},
+        "hooks": {
+            "Notification": [
+                {"matcher": "", "hooks": [{"type": "command", "command": "/Users/x/.claude/hooks/n.sh"}]}
+            ]
+        },
+        "enabledPlugins": {"codex@openai-codex": true}
+    }"#;
+
+    let sanitized = sanitize_settings_json(input).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+
+    assert!(parsed.get("hooks").is_none(), "hooks should be stripped");
+    assert!(parsed.get("env").is_some(), "env should be preserved");
+    assert!(
+        parsed.get("permissions").is_some(),
+        "permissions should be preserved"
+    );
+    assert!(
+        parsed.get("enabledPlugins").is_some(),
+        "enabledPlugins should be preserved"
+    );
+    assert_eq!(
+        parsed["enabledPlugins"]["codex@openai-codex"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+#[test]
+fn test_sanitize_settings_strips_status_line() {
+    let input = r#"{
+        "env": {},
+        "statusLine": {"type": "command", "command": "/Users/x/.claude/bin/status.sh"}
+    }"#;
+
+    let sanitized = sanitize_settings_json(input).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+
+    assert!(
+        parsed.get("statusLine").is_none(),
+        "statusLine should be stripped"
+    );
+    assert!(parsed.get("env").is_some(), "env should be preserved");
+}
+
+#[test]
+fn test_sanitize_settings_preserves_unknown_fields() {
+    let input = r#"{
+        "env": {"X": "1"},
+        "teammateMode": "tmux",
+        "extraKnownMarketplaces": {"foo": {"source": {"source": "github", "repo": "a/b"}}}
+    }"#;
+
+    let sanitized = sanitize_settings_json(input).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+
+    assert_eq!(
+        parsed["teammateMode"],
+        serde_json::Value::String("tmux".to_string())
+    );
+    assert!(parsed.get("extraKnownMarketplaces").is_some());
+}
+
+#[test]
+fn test_sanitize_settings_empty_object() {
+    let sanitized = sanitize_settings_json("{}").unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+    assert!(parsed.is_object());
+    assert_eq!(parsed.as_object().unwrap().len(), 0);
+}
+
+#[test]
+fn test_sanitize_settings_invalid_json_errors() {
+    let result = sanitize_settings_json("not valid json {");
+    assert!(result.is_err(), "invalid JSON should return an error");
 }

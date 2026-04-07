@@ -172,6 +172,27 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
     mounts
 }
 
+/// ホストの `~/.claude/settings.json` を読み、コンテナに持ち込めない
+/// ホスト固有フィールドを除去した JSON 文字列を返す。
+///
+/// 除去対象:
+/// - `hooks` — 絶対パスでホストスクリプトを参照するため
+/// - `statusLine` — 同様にホストスクリプトを参照する可能性があるため
+///
+/// その他のフィールド（`env`, `permissions`, `enabledPlugins`,
+/// `extraKnownMarketplaces`, `teammateMode` 等）はそのまま保持する。
+pub fn sanitize_settings_json(input: &str) -> anyhow::Result<String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(input).context("Failed to parse settings.json")?;
+
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("hooks");
+        obj.remove("statusLine");
+    }
+
+    serde_json::to_string_pretty(&value).context("Failed to serialize sanitized settings.json")
+}
+
 pub(super) fn build_container_config(
     ctx: &RunContext,
     image: String,
