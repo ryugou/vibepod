@@ -120,6 +120,15 @@ pub fn validate_slack_channel_id(id: &str) -> bool {
     (id.starts_with('C') || id.starts_with('G')) && id.len() >= 9
 }
 
+/// コンテナ内 Claude Code が `$HOME/.claude/plugins` として読むデフォルトパス。
+const DEFAULT_PLUGINS_CONTAINER_PATH: &str = "/home/vibepod/.claude/plugins";
+
+/// ラベル中で「サニタイズ済み settings.json が有効」であることを示すマーカー。
+/// 形式が `host:container` の通常マウント表現と衝突しないように
+/// 専用 prefix を付けている。
+pub(super) const SANITIZED_SETTINGS_LABEL_MARKER: &str =
+    "sanitized_settings=/home/vibepod/.claude/settings.json";
+
 /// `~/.claude/` 配下のグローバル設定ファイル・ディレクトリのマウント定義を構築する。
 /// 存在するもののみ含まれる。read-only でマウントされる。
 ///
@@ -157,19 +166,36 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
 
     let plugins_dir = claude_dir.join("plugins");
     if plugins_dir.is_dir() {
-        let plugins_host = plugins_dir.to_string_lossy().to_string();
-        // (1) Claude Code が $HOME/.claude/plugins として読む先
-        mounts.push((
-            plugins_host.clone(),
-            "/home/vibepod/.claude/plugins".to_string(),
-        ));
-        // (2) installed_plugins.json の installPath フィールドはホスト絶対パスを
-        //     保持しているため、同じ絶対パスに再マウントして解決する
-        let absolute_container_path = format!("{}/.claude/plugins", home.to_string_lossy());
-        mounts.push((plugins_host, absolute_container_path));
+        mounts.extend(plugins_mount_entries(&plugins_dir.to_string_lossy(), home));
     }
 
     mounts
+}
+
+/// plugins ディレクトリに対応する 2 重マウントエントリを返す（ファイル存在チェック
+/// は呼び出し側の責務）。
+///
+/// ホスト HOME が `/home/vibepod` の場合、(1) と (2) のコンテナ側パスが一致する
+/// ため (2) を追加せず 1 本だけ返す（docker run -v が同一マウント先を拒否する）。
+pub fn plugins_mount_entries(plugins_host: &str, home: &std::path::Path) -> Vec<(String, String)> {
+    let mut entries = Vec::with_capacity(2);
+    // (1) Claude Code が $HOME/.claude/plugins として読む先
+    entries.push((
+        plugins_host.to_string(),
+        DEFAULT_PLUGINS_CONTAINER_PATH.to_string(),
+    ));
+    // (2) installed_plugins.json の installPath フィールドはホスト絶対パスを
+    //     保持しているため、同じ絶対パスに再マウントして解決する。
+    //     ただし `home` がコンテナ側 HOME `/home/vibepod` と一致する場合は
+    //     (1) と重複するため追加しない。
+    let absolute_container = home.join(".claude").join("plugins");
+    if absolute_container != std::path::Path::new(DEFAULT_PLUGINS_CONTAINER_PATH) {
+        entries.push((
+            plugins_host.to_string(),
+            absolute_container.to_string_lossy().to_string(),
+        ));
+    }
+    entries
 }
 
 /// ホストの `~/.claude/settings.json` を読み、コンテナに持ち込めない
@@ -221,6 +247,19 @@ pub fn prepare_sanitized_settings_mount(
     let target = runtime_dir.join("settings.json");
     std::fs::write(&target, sanitized)
         .with_context(|| format!("Failed to write {}", target.display()))?;
+
+    // サニタイズ済みファイルにはホスト設定値（env、permissions 等）が含まれうるため、
+    // token.json と同様に Unix では所有者のみ読み書き可能に制限する。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&target)
+            .with_context(|| format!("Failed to read metadata of {}", target.display()))?
+            .permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&target, perms)
+            .with_context(|| format!("Failed to set permissions on {}", target.display()))?;
+    }
 
     Ok(Some((
         target.to_string_lossy().to_string(),
