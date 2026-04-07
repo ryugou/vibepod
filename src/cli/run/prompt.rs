@@ -371,12 +371,10 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             .output()
             .ok();
         // 使い捨てコンテナは runtime ディレクトリを丸ごと削除
-        // （temp .claude.json と sanitized settings.json をまとめて掃除）
-        if let Some(ref temp_cj) = ctx.temp_claude_json {
-            if let Some(runtime_dir) = temp_cj.parent() {
-                std::fs::remove_dir_all(runtime_dir).ok();
-            }
-        }
+        // （temp .claude.json と sanitized settings.json をまとめて掃除）。
+        // ctx.runtime_dir は prepare.rs で必ず作成されるため、temp_claude_json
+        // や sanitized settings.json の存在に関係なく確実に cleanup できる。
+        std::fs::remove_dir_all(&ctx.runtime_dir).ok();
     } else if ctx.container_status != ContainerStatus::Running {
         Command::new("docker")
             .args(["stop", "-t", "10", &ctx.container_name])
