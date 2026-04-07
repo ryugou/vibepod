@@ -1,6 +1,7 @@
 use vibepod::cli::run::{
     build_claude_config_mounts, detect_languages, get_lang_install_cmd, parse_mount_arg,
-    prepare_sanitized_settings_mount, sanitize_settings_json, validate_slack_channel_id,
+    plugins_mount_entries, prepare_sanitized_settings_mount, sanitize_settings_json,
+    validate_slack_channel_id,
 };
 
 // --- detect_languages ---
@@ -190,6 +191,72 @@ fn test_claude_config_mounts_skips_plugins_when_missing() {
     );
 }
 
+#[test]
+fn test_plugins_mount_entries_non_colliding_home_returns_two() {
+    // 通常のホスト（HOME != /home/vibepod）では二重マウントの (1) と (2) の
+    // コンテナ側パスが異なり、2 本のエントリが返る。
+    let home = std::path::PathBuf::from("/Users/alice");
+    let entries = plugins_mount_entries("/Users/alice/.claude/plugins", &home);
+    assert_eq!(entries.len(), 2, "expected two entries, got {:?}", entries);
+    assert_eq!(
+        entries[0],
+        (
+            "/Users/alice/.claude/plugins".to_string(),
+            "/home/vibepod/.claude/plugins".to_string(),
+        )
+    );
+    assert_eq!(
+        entries[1],
+        (
+            "/Users/alice/.claude/plugins".to_string(),
+            "/Users/alice/.claude/plugins".to_string(),
+        )
+    );
+}
+
+#[test]
+fn test_plugins_mount_entries_colliding_home_dedupes_to_one() {
+    // Linux のユーザー名が `vibepod` で HOME が `/home/vibepod` の場合、
+    // (1) と (2) のコンテナ側パスが一致するため 1 本だけ返す。
+    // （docker run -v が同一マウント先を拒否するのを避けるガード）
+    let home = std::path::PathBuf::from("/home/vibepod");
+    let entries = plugins_mount_entries("/home/vibepod/.claude/plugins", &home);
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected dedup to 1 entry, got {:?}",
+        entries
+    );
+    assert_eq!(
+        entries[0],
+        (
+            "/home/vibepod/.claude/plugins".to_string(),
+            "/home/vibepod/.claude/plugins".to_string(),
+        )
+    );
+}
+
+#[test]
+fn test_claude_config_mounts_includes_plugins_via_helper() {
+    // `build_claude_config_mounts` が plugins ディレクトリを検出したら
+    // `plugins_mount_entries` の結果をそのまま組み込むことを確認する。
+    let dir = tempfile::tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+
+    let mounts = build_claude_config_mounts(dir.path());
+    let plugin_entries: Vec<_> = mounts
+        .iter()
+        .filter(|(_, dst)| dst.ends_with("/.claude/plugins"))
+        .collect();
+    assert_eq!(
+        plugin_entries.len(),
+        2,
+        "tempdir home should produce two plugin mounts, got {:?}",
+        plugin_entries
+    );
+}
+
 // --- validate_slack_channel_id ---
 
 #[test]
@@ -332,6 +399,18 @@ fn test_prepare_sanitized_settings_mount_writes_and_returns_entry() {
         "hooks should be stripped in written file"
     );
     assert!(parsed.get("env").is_some(), "env should be preserved");
+
+    // Unix: 所有者のみ読み書き可能（0o600）に制限されていることを検証する
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&host_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "sanitized settings.json should have 0600 permissions, got {:o}",
+            mode
+        );
+    }
 }
 
 #[test]

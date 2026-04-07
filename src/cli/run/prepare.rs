@@ -19,6 +19,24 @@ fn path_hash_8(path: &str) -> String {
     hex[..8].to_string()
 }
 
+/// v1.4.3 未満で作成されたコンテナは、サニタイズ済み settings.json マーカーを
+/// `:/home/vibepod/.claude/settings.json` という `host:container` 形式の空 host
+/// で保存していた。v1.4.3 以降は `sanitized_settings=/home/vibepod/.claude/settings.json`
+/// という専用 prefix 形式に変更している。後方互換のため、比較前に旧形式を新形式へ
+/// 正規化する。
+fn normalize_mounts_label_legacy(raw: &str) -> String {
+    raw.split('|')
+        .map(|part| {
+            if part == ":/home/vibepod/.claude/settings.json" {
+                super::SANITIZED_SETTINGS_LABEL_MARKER
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 /// 設定ラベルの差分を検出して警告を表示する。
 fn warn_config_changes(
     stored: &std::collections::HashMap<String, String>,
@@ -50,19 +68,32 @@ fn warn_config_changes(
         "vibepod.env_hash",
     ] {
         let label_name = key.strip_prefix("vibepod.").unwrap_or(key);
-        let stored_val = stored.get(*key).map(|s| s.as_str()).unwrap_or("");
-        let current_val = current.get(*key).map(|s| s.as_str()).unwrap_or("");
+        let raw_stored = stored.get(*key).map(|s| s.as_str()).unwrap_or("");
+        let raw_current = current.get(*key).map(|s| s.as_str()).unwrap_or("");
+        // vibepod.mounts だけ、stored 側（既存コンテナに記録されている旧形式）の
+        // みを新形式に正規化する。current 側も正規化してしまうと、ユーザーが
+        // `--mount :/home/vibepod/.claude/settings.json` のように空ホストで
+        // マウント指定した場合に意図せずマーカーへ置換され、設定変更の検知が
+        // マスクされるため。
+        let (stored_val, current_val): (String, String) = if *key == "vibepod.mounts" {
+            (
+                normalize_mounts_label_legacy(raw_stored),
+                raw_current.to_string(),
+            )
+        } else {
+            (raw_stored.to_string(), raw_current.to_string())
+        };
         if stored_val != current_val {
             changes.push(format!(
                 "{}: {} → {}",
                 label_name,
                 if stored_val.is_empty() {
-                    "(none)"
+                    "(none)".to_string()
                 } else {
                     stored_val
                 },
                 if current_val.is_empty() {
-                    "(none)"
+                    "(none)".to_string()
                 } else {
                     current_val
                 }
@@ -459,13 +490,16 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             mounts_parts.push(format!("{}:{}", h, c));
         }
         // Sanitized settings: include only container destination in the label so
-        // regenerated host-side runtime files do not trigger a spurious recreate
+        // regenerated host-side runtime files do not trigger a spurious recreate.
+        // Use a dedicated prefix (SANITIZED_SETTINGS_LABEL_MARKER) so this
+        // label-only marker cannot collide with a user-provided mount serialized
+        // as "{host}:{container}".
         let host_settings_exists = home_early_for_mounts
             .join(".claude")
             .join("settings.json")
             .is_file();
         if host_settings_exists {
-            mounts_parts.push(":/home/vibepod/.claude/settings.json".to_string());
+            mounts_parts.push(super::SANITIZED_SETTINGS_LABEL_MARKER.to_string());
         }
         mounts_parts.sort();
 
@@ -568,4 +602,44 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         no_network: opts.no_network,
         prompt_idle_timeout: vibepod_config.prompt_idle_timeout(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_mounts_label_legacy_rewrites_old_marker() {
+        // v1.4.3 未満で作成されたコンテナが持つ旧形式マーカーを新形式に書き換える
+        let input =
+            "/Users/a/.claude/skills:/home/vibepod/.claude/skills|:/home/vibepod/.claude/settings.json";
+        let normalized = normalize_mounts_label_legacy(input);
+        assert!(
+            normalized.contains(super::super::SANITIZED_SETTINGS_LABEL_MARKER),
+            "expected new marker in: {}",
+            normalized
+        );
+        assert!(
+            !normalized.contains(":/home/vibepod/.claude/settings.json|")
+                && !normalized.ends_with(":/home/vibepod/.claude/settings.json"),
+            "old marker should be gone: {}",
+            normalized
+        );
+    }
+
+    #[test]
+    fn test_normalize_mounts_label_legacy_preserves_non_marker_entries() {
+        // マーカー以外のマウントエントリはそのまま残す
+        let input = "/Users/a/.claude/agents:/home/vibepod/.claude/agents";
+        let normalized = normalize_mounts_label_legacy(input);
+        assert_eq!(normalized, input);
+    }
+
+    #[test]
+    fn test_normalize_mounts_label_legacy_already_new_format_is_identity() {
+        // すでに新形式のラベルは変更しない
+        let input = super::super::SANITIZED_SETTINGS_LABEL_MARKER;
+        let normalized = normalize_mounts_label_legacy(input);
+        assert_eq!(normalized, input);
+    }
 }
