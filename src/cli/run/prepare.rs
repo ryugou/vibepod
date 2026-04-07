@@ -549,12 +549,27 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
-    // Copy .claude.json to temp file to protect host file from container writes
+    // Per-container runtime directory: all vibepod-managed runtime files for
+    // this container (temp claude.json copy, sanitized settings.json, etc.)
+    // live under ~/.config/vibepod/runtime/<container_name>/. Created up-front
+    // so disposable cleanup can target it unconditionally regardless of which
+    // artifacts ended up being created.
+    let runtime_dir = config_dir.join("runtime").join(&container_name);
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("Failed to create runtime dir: {}", runtime_dir.display()))?;
+
+    // Copy .claude.json to a per-container runtime file so the host file is
+    // protected from container writes. Lives alongside any sanitized
+    // settings.json under the same per-container runtime dir.
     let temp_claude_json = if claude_json.exists() {
-        let temp_dir = std::env::temp_dir().join("vibepod-run");
-        std::fs::create_dir_all(&temp_dir)?;
-        let temp_path = temp_dir.join("claude.json");
-        std::fs::copy(&claude_json, &temp_path)?;
+        let temp_path = runtime_dir.join(".claude.json");
+        std::fs::copy(&claude_json, &temp_path).with_context(|| {
+            format!(
+                "Failed to copy {} to {}",
+                claude_json.display(),
+                temp_path.display()
+            )
+        })?;
         Some(temp_path)
     } else {
         None
@@ -589,6 +604,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         exec_env_vars,
         setup_cmd,
         temp_claude_json,
+        runtime_dir,
         global_config,
         home,
         worktree_branch_name,

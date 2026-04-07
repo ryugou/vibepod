@@ -35,6 +35,12 @@ pub(super) struct RunContext {
     pub(super) exec_env_vars: Vec<String>,
     pub(super) setup_cmd: Option<String>,
     pub(super) temp_claude_json: Option<std::path::PathBuf>,
+    /// Per-container runtime directory under
+    /// `<config_dir>/runtime/<container_name>/`. All vibepod-managed runtime
+    /// files for this container (temp claude.json copy, sanitized
+    /// settings.json, etc.) live under this path. Used for cleanup of
+    /// disposable containers regardless of which artifacts were created.
+    pub(super) runtime_dir: std::path::PathBuf,
     pub(super) global_config: config::GlobalConfig,
     pub(super) home: std::path::PathBuf,
     pub(super) worktree_branch_name: Option<String>,

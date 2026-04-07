@@ -140,11 +140,12 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
             .args(["rm", "-f", &ctx.container_name])
             .output()
             .ok();
-        // 使い捨てコンテナのみ temp claude.json を削除する
-        // 永続コンテナは次回起動時に bind mount が必要なため削除しない
-        if let Some(ref temp_cj) = ctx.temp_claude_json {
-            std::fs::remove_file(temp_cj).ok();
-        }
+        // 使い捨てコンテナのみ runtime ディレクトリを丸ごと削除する
+        // （temp .claude.json と sanitized settings.json をまとめて掃除）。
+        // ctx.runtime_dir は prepare.rs で必ず作成されるため、temp_claude_json
+        // や sanitized settings.json の存在に関係なく確実に cleanup できる。
+        // 永続コンテナは次回起動時に bind mount が必要なため削除しない。
+        std::fs::remove_dir_all(&ctx.runtime_dir).ok();
         println!("  Container stopped and removed.");
     } else if ctx.container_status == ContainerStatus::Running {
         // 元から実行中だったコンテナ: 停止しない（並行 exec の他セッションが残る可能性）
