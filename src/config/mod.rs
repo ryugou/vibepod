@@ -33,7 +33,7 @@ pub(crate) fn save_unified(config: &UnifiedConfig, config_dir: &Path) -> Result<
     std::fs::create_dir_all(config_dir)?;
     let path = config_dir.join("config.toml");
 
-    // Load existing TOML as raw table to preserve unknown sections (e.g. [review], [run])
+    // Load existing TOML as raw table to preserve unknown sections (e.g. [run])
     let mut table: toml::value::Table = if path.exists() {
         let content = std::fs::read_to_string(&path)?;
         toml::from_str::<toml::value::Table>(&content).with_context(|| {

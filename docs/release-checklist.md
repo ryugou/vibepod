@@ -37,11 +37,6 @@
 - [ ] 実行完了後に Result が表示される
 - [ ] コンテナが自動的に停止・削除される
 
-### prompt + review
-
-- [ ] `vibepod run --prompt "..." --review codex` — codex review が実行される（タイムアウトしない）
-- [ ] codex review の結果に応じてコミット・push・PR 作成が行われる
-
 ### worktree
 
 - [ ] `vibepod run --prompt "..." --worktree` — .worktrees/ 配下に隔離されたワークツリーが作成される
