@@ -241,8 +241,23 @@ image = "vibepod-claude:latest"
 | `~/.codex/auth.json` | `/home/vibepod/.codex/auth.json` | read-only | Codex 使用時の認証情報 |
 | `GH_TOKEN`（環境変数） | コンテナ環境変数 | — | `gh auth token` で自動取得して注入 |
 
-> **`~/.claude` をマウントしない理由**: `~/.claude` 全体をマウントすると、プラグインキャッシュ等の
-> 読み込みで Claude Code がハングする。認証は環境変数で渡すため、マウント不要。
+> **`~/.claude` 全体はマウントしない理由**: `~/.claude` 全体をマウントすると、プラグインキャッシュ等の
+> 読み込みで Claude Code がハングする（過去事例）。認証は環境変数で渡すため、認証ファイルのマウントは不要。
+> 代わりに、必要なサブディレクトリ（CLAUDE.md / skills / agents / plugins / settings.json）のみを
+> read-only で選択的にマウントする。詳細は下記「ホスト Claude 環境の取り込み」を参照。
+
+#### ホスト Claude 環境の取り込み
+
+ユーザーがホストで使っている Claude Code 環境（プラグイン・skill・agent・グローバル CLAUDE.md・settings）をコンテナ内でも使えるように、`~/.claude/` 配下のサブディレクトリを選択的に read-only でマウントする。`~/.claude/` 全体のマウントは過去にハングが観測されたため禁止する（詳細は `docs/superpowers/specs/2026-03-23-vibepod-auth-design.md` を参照）。
+
+マウント対象:
+- `~/.claude/CLAUDE.md` → `/home/vibepod/.claude/CLAUDE.md`
+- `~/.claude/skills/` → `/home/vibepod/.claude/skills`
+- `~/.claude/agents/` → `/home/vibepod/.claude/agents`
+- `~/.claude/plugins/` → `/home/vibepod/.claude/plugins` および `<host_home>/.claude/plugins`（二重マウント）
+- `~/.claude/settings.json` → `/home/vibepod/.claude/settings.json`（sanitize 済みコピー）
+
+plugins の二重マウントは、`installed_plugins.json` の `installPath` フィールドがホスト絶対パスを持つことへの対処。settings.json のサニタイズでは、ホストスクリプトを絶対パスで参照する `hooks` と `statusLine` フィールドを除去する。サニタイズ済みコピーは `~/.config/vibepod/runtime/<container_name>/settings.json` に書き出される。
 
 **認証情報の受け渡し：**
 
@@ -328,8 +343,8 @@ registered_at = "2026-03-22T10:00:00Z"
 ### 安全性の根拠
 
 - **Anthropic 公式推奨**: `--dangerously-skip-permissions` はコンテナ内での使用を推奨
-- **最小マウント**: プロジェクトディレクトリ、`.claude.json`（一時コピー経由）、`.gitconfig`（read-only）のみ。`--mount` で明示追加可
-- **認証情報の分離**: OAuth トークンは環境変数で渡す。`~/.claude` はマウントしない（ハングの原因になるため）
+- **最小マウント**: プロジェクトディレクトリ、`.claude.json`（一時コピー経由）、`.gitconfig`（read-only）、`~/.claude/` の一部サブディレクトリ（CLAUDE.md / skills / agents / plugins / settings.json、全て read-only）のみ。`--mount` で明示追加可
+- **認証情報の分離**: OAuth トークンは環境変数で渡す。`~/.claude` 全体はマウントしない（過去にハングが観測されたため）
 - **git によるリカバリ**: プロジェクトは git 管理前提。壊れたら `git reset --hard` で復帰可能
 - **コンテナ停止**: `Ctrl+C` または `docker stop` でいつでも停止可能
 
@@ -363,7 +378,7 @@ registered_at = "2026-03-22T10:00:00Z"
 
 > **コンテナはデフォルトで再利用**: プロジェクトごとに 1 つのコンテナが永続し、`vibepod run` のたびに再利用される。
 > `--new` を指定した場合や `--worktree` 使用時は使い捨てコンテナが作成・削除される。
-> `~/.claude` はマウントしないため、コンテナ内のセッション情報は永続化されない。
+> `~/.claude/sessions` や `~/.claude/projects` といったランタイム状態はマウントしないため、コンテナ内のセッション情報は永続化されない。
 
 ---
 

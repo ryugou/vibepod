@@ -122,6 +122,11 @@ pub fn validate_slack_channel_id(id: &str) -> bool {
 
 /// `~/.claude/` 配下のグローバル設定ファイル・ディレクトリのマウント定義を構築する。
 /// 存在するもののみ含まれる。read-only でマウントされる。
+///
+/// `plugins/` は特殊で、2 つのマウント先を返す:
+/// 1. `/home/vibepod/.claude/plugins` — Claude Code が $HOME 経由で読む先
+/// 2. `<host_home>/.claude/plugins` — `installed_plugins.json` 内の `installPath`
+///    フィールドがホスト絶対パスを持つため、同じ絶対パスに再マウントして解決する
 pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String)> {
     let claude_dir = home.join(".claude");
     let mut mounts = Vec::new();
@@ -150,7 +155,77 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
         ));
     }
 
+    let plugins_dir = claude_dir.join("plugins");
+    if plugins_dir.is_dir() {
+        let plugins_host = plugins_dir.to_string_lossy().to_string();
+        // (1) Claude Code が $HOME/.claude/plugins として読む先
+        mounts.push((
+            plugins_host.clone(),
+            "/home/vibepod/.claude/plugins".to_string(),
+        ));
+        // (2) installed_plugins.json の installPath フィールドはホスト絶対パスを
+        //     保持しているため、同じ絶対パスに再マウントして解決する
+        let absolute_container_path = format!("{}/.claude/plugins", home.to_string_lossy());
+        mounts.push((plugins_host, absolute_container_path));
+    }
+
     mounts
+}
+
+/// ホストの `~/.claude/settings.json` を読み、コンテナに持ち込めない
+/// ホスト固有フィールドを除去した JSON 文字列を返す。
+///
+/// 除去対象:
+/// - `hooks` — 絶対パスでホストスクリプトを参照するため
+/// - `statusLine` — 同様にホストスクリプトを参照する可能性があるため
+///
+/// その他のフィールド（`env`, `permissions`, `enabledPlugins`,
+/// `extraKnownMarketplaces`, `teammateMode` 等）はそのまま保持する。
+pub fn sanitize_settings_json(input: &str) -> anyhow::Result<String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(input).context("Failed to parse settings.json")?;
+
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("hooks");
+        obj.remove("statusLine");
+    }
+
+    serde_json::to_string_pretty(&value).context("Failed to serialize sanitized settings.json")
+}
+
+/// ホストの `~/.claude/settings.json` をサニタイズしたコピーを生成し、
+/// コンテナにマウントするためのマウントエントリを返す。
+///
+/// サニタイズ済み JSON は `<config_dir>/runtime/<container_name>/settings.json`
+/// に書き出される。この場所は vibepod が書き込み許可を持つ唯一の場所である。
+///
+/// ホスト側の `settings.json` が存在しない場合は `None` を返す（マウント追加不要）。
+pub fn prepare_sanitized_settings_mount(
+    home: &std::path::Path,
+    config_dir: &std::path::Path,
+    container_name: &str,
+) -> anyhow::Result<Option<(String, String)>> {
+    let host_settings = home.join(".claude").join("settings.json");
+    if !host_settings.is_file() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&host_settings)
+        .with_context(|| format!("Failed to read {}", host_settings.display()))?;
+    let sanitized = sanitize_settings_json(&raw)?;
+
+    let runtime_dir = config_dir.join("runtime").join(container_name);
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("Failed to create {}", runtime_dir.display()))?;
+
+    let target = runtime_dir.join("settings.json");
+    std::fs::write(&target, sanitized)
+        .with_context(|| format!("Failed to write {}", target.display()))?;
+
+    Ok(Some((
+        target.to_string_lossy().to_string(),
+        "/home/vibepod/.claude/settings.json".to_string(),
+    )))
 }
 
 pub(super) fn build_container_config(
