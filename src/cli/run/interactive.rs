@@ -140,10 +140,13 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
             .args(["rm", "-f", &ctx.container_name])
             .output()
             .ok();
-        // 使い捨てコンテナのみ temp claude.json を削除する
-        // 永続コンテナは次回起動時に bind mount が必要なため削除しない
+        // 使い捨てコンテナのみ runtime ディレクトリを丸ごと削除する
+        // （temp .claude.json と sanitized settings.json をまとめて掃除）。
+        // 永続コンテナは次回起動時に bind mount が必要なため削除しない。
         if let Some(ref temp_cj) = ctx.temp_claude_json {
-            std::fs::remove_file(temp_cj).ok();
+            if let Some(runtime_dir) = temp_cj.parent() {
+                std::fs::remove_dir_all(runtime_dir).ok();
+            }
         }
         println!("  Container stopped and removed.");
     } else if ctx.container_status == ContainerStatus::Running {

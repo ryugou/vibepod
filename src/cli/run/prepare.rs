@@ -549,12 +549,23 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
-    // Copy .claude.json to temp file to protect host file from container writes
+    // Copy .claude.json to a per-container runtime file under
+    // ~/.config/vibepod/runtime/<container_name>/.claude.json so the host file
+    // is protected from container writes. This keeps all vibepod-managed
+    // runtime files under ~/.config/vibepod/ (the only location vibepod is
+    // permitted to write into) instead of the system-wide temp dir.
     let temp_claude_json = if claude_json.exists() {
-        let temp_dir = std::env::temp_dir().join("vibepod-run");
-        std::fs::create_dir_all(&temp_dir)?;
-        let temp_path = temp_dir.join("claude.json");
-        std::fs::copy(&claude_json, &temp_path)?;
+        let runtime_dir = config_dir.join("runtime").join(&container_name);
+        std::fs::create_dir_all(&runtime_dir)
+            .with_context(|| format!("Failed to create runtime dir: {}", runtime_dir.display()))?;
+        let temp_path = runtime_dir.join(".claude.json");
+        std::fs::copy(&claude_json, &temp_path).with_context(|| {
+            format!(
+                "Failed to copy {} to {}",
+                claude_json.display(),
+                temp_path.display()
+            )
+        })?;
         Some(temp_path)
     } else {
         None

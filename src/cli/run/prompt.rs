@@ -370,8 +370,12 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             .args(["rm", "-f", &ctx.container_name])
             .output()
             .ok();
+        // 使い捨てコンテナは runtime ディレクトリを丸ごと削除
+        // （temp .claude.json と sanitized settings.json をまとめて掃除）
         if let Some(ref temp_cj) = ctx.temp_claude_json {
-            std::fs::remove_file(temp_cj).ok();
+            if let Some(runtime_dir) = temp_cj.parent() {
+                std::fs::remove_dir_all(runtime_dir).ok();
+            }
         }
     } else if ctx.container_status != ContainerStatus::Running {
         Command::new("docker")
