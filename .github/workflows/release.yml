@@ -8,16 +8,11 @@ on:
 permissions:
   contents: write
 
-# Opt into Node.js 24 for JavaScript actions ahead of the 2026-06-02 default
-# switch, silencing the deprecation warning emitted by actions/checkout@v4 etc.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test
       - run: cargo clippy -- -D warnings
@@ -39,7 +34,7 @@ jobs:
             use_cross: true
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -62,7 +57,7 @@ jobs:
           cd ../../..
           shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vibepod-${{ matrix.target }}
           path: |
@@ -73,9 +68,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - name: Create GitHub Release
@@ -90,7 +85,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
         run: cargo publish 2>&1 | tee /tmp/cargo-publish.log || { grep -q 'already exists' /tmp/cargo-publish.log && echo "Version already published, skipping" || exit 1; }
