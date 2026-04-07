@@ -70,11 +70,15 @@ fn warn_config_changes(
         let label_name = key.strip_prefix("vibepod.").unwrap_or(key);
         let raw_stored = stored.get(*key).map(|s| s.as_str()).unwrap_or("");
         let raw_current = current.get(*key).map(|s| s.as_str()).unwrap_or("");
-        // vibepod.mounts だけ旧形式を新形式に正規化してから比較する（後方互換）
+        // vibepod.mounts だけ、stored 側（既存コンテナに記録されている旧形式）の
+        // みを新形式に正規化する。current 側も正規化してしまうと、ユーザーが
+        // `--mount :/home/vibepod/.claude/settings.json` のように空ホストで
+        // マウント指定した場合に意図せずマーカーへ置換され、設定変更の検知が
+        // マスクされるため。
         let (stored_val, current_val): (String, String) = if *key == "vibepod.mounts" {
             (
                 normalize_mounts_label_legacy(raw_stored),
-                normalize_mounts_label_legacy(raw_current),
+                raw_current.to_string(),
             )
         } else {
             (raw_stored.to_string(), raw_current.to_string())
