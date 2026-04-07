@@ -142,6 +142,54 @@ fn test_claude_config_mounts_partial() {
         .any(|(_, dst)| dst == "/home/vibepod/.claude/CLAUDE.md"));
 }
 
+#[test]
+fn test_claude_config_mounts_includes_plugins_at_both_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(claude_dir.join("plugins")).unwrap();
+
+    let mounts = build_claude_config_mounts(dir.path());
+
+    let plugins_host = claude_dir.join("plugins").to_string_lossy().to_string();
+    let host_home_str = dir.path().to_string_lossy().to_string();
+    let absolute_container_path = format!("{}/.claude/plugins", host_home_str);
+
+    // Mount at /home/vibepod/.claude/plugins (where $HOME/.claude/plugins is read)
+    assert!(
+        mounts
+            .iter()
+            .any(|(src, dst)| src == &plugins_host && dst == "/home/vibepod/.claude/plugins"),
+        "expected plugins mounted at /home/vibepod/.claude/plugins, got {:?}",
+        mounts
+    );
+
+    // Mount at host-absolute path (where installed_plugins.json installPath points)
+    assert!(
+        mounts
+            .iter()
+            .any(|(src, dst)| src == &plugins_host && dst == &absolute_container_path),
+        "expected plugins mounted at {}, got {:?}",
+        absolute_container_path,
+        mounts
+    );
+}
+
+#[test]
+fn test_claude_config_mounts_skips_plugins_when_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    // Intentionally no plugins/ directory
+
+    let mounts = build_claude_config_mounts(dir.path());
+
+    assert!(
+        !mounts.iter().any(|(_, dst)| dst.ends_with("/plugins")),
+        "expected no plugins mounts when ~/.claude/plugins is absent, got {:?}",
+        mounts
+    );
+}
+
 // --- validate_slack_channel_id ---
 
 #[test]

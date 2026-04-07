@@ -122,6 +122,11 @@ pub fn validate_slack_channel_id(id: &str) -> bool {
 
 /// `~/.claude/` 配下のグローバル設定ファイル・ディレクトリのマウント定義を構築する。
 /// 存在するもののみ含まれる。read-only でマウントされる。
+///
+/// `plugins/` は特殊で、2 つのマウント先を返す:
+/// 1. `/home/vibepod/.claude/plugins` — Claude Code が $HOME 経由で読む先
+/// 2. `<host_home>/.claude/plugins` — `installed_plugins.json` 内の `installPath`
+///    フィールドがホスト絶対パスを持つため、同じ絶対パスに再マウントして解決する
 pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String)> {
     let claude_dir = home.join(".claude");
     let mut mounts = Vec::new();
@@ -148,6 +153,20 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
             agents_dir.to_string_lossy().to_string(),
             "/home/vibepod/.claude/agents".to_string(),
         ));
+    }
+
+    let plugins_dir = claude_dir.join("plugins");
+    if plugins_dir.is_dir() {
+        let plugins_host = plugins_dir.to_string_lossy().to_string();
+        // (1) Claude Code が $HOME/.claude/plugins として読む先
+        mounts.push((
+            plugins_host.clone(),
+            "/home/vibepod/.claude/plugins".to_string(),
+        ));
+        // (2) installed_plugins.json の installPath フィールドはホスト絶対パスを
+        //     保持しているため、同じ絶対パスに再マウントして解決する
+        let absolute_container_path = format!("{}/.claude/plugins", home.to_string_lossy());
+        mounts.push((plugins_host, absolute_container_path));
     }
 
     mounts
