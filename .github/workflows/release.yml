@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# Opt into Node.js 24 for JavaScript actions ahead of the 2026-06-02 default
+# switch, silencing the deprecation warning emitted by actions/checkout@v4 etc.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
