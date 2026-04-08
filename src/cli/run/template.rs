@@ -106,6 +106,21 @@ pub fn build_template_mounts(
 
     let plugins_dir = template_dir.join("plugins");
     if plugins_dir.is_dir() {
+        // Phase 2 note: template の plugins は単一マウントで
+        // /home/vibepod/.claude/plugins にのみ配置する。host mode の
+        // `plugins_mount_entries` が行う「絶対パス (`installed_plugins.json` の
+        // `installPath`) への二重マウント」は行わない。
+        //
+        // template 配布物に `installed_plugins.json` が含まれ、その `installPath`
+        // が build-time の絶対パスだった場合、container 内では解決できない。
+        // Phase 3/4 で embed 機構と実 template を入れた際に以下のいずれかで解決する予定:
+        //   a) template 配布前に `installed_plugins.json` の `installPath` を
+        //      コンテナ側の固定パス (/home/vibepod/.claude/plugins/cache/...) に
+        //      normalize する
+        //   b) template メタデータで必要な plugin set を宣言し、container 内で
+        //      再 install する
+        //
+        // Phase 2 の時点では実 template 内容が無いので runtime 影響なし。
         mounts.push((
             plugins_dir.to_string_lossy().to_string(),
             "/home/vibepod/.claude/plugins".to_string(),

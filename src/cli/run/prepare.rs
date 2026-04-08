@@ -478,12 +478,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 9b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
     // vibepod v2 の mode 切り替え mechanism: --template 指定時は template
-    // mount、未指定時は従来の host mount を使う。label 計算もこの分岐を
-    // 同じように辿る必要がある。
-    let home_early_for_mounts = crate::config::home_dir()?;
+    // mount、未指定時は従来の host mount を使う。label 計算と実 mount 構築
+    // の両方で同じ分岐結果を使うため、ここで一度だけ resolve する。
+    let home = crate::config::home_dir()?;
     let effective_template = super::template::effective_template_name(opts);
 
-    let (claude_config_mounts_for_label, host_settings_exists) =
+    // claude_config_mounts / host_settings_exists は label 計算（9b）と
+    // extra_mounts 構築（下部）の両方で共有される。1 度だけ計算して使い回す。
+    let (claude_config_mounts, host_settings_exists) =
         if let Some(ref template_name) = effective_template {
             // template mode: vibepod 管理の template 配下のみ。
             // host の sanitized settings.json はマウントしない
@@ -491,11 +493,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             (mounts, false)
         } else {
             // host mode: v1.4.3 互換挙動
-            let mounts = super::build_claude_config_mounts(&home_early_for_mounts);
-            let exists = home_early_for_mounts
-                .join(".claude")
-                .join("settings.json")
-                .is_file();
+            let mounts = super::build_claude_config_mounts(&home);
+            let exists = home.join(".claude").join("settings.json").is_file();
             (mounts, exists)
         };
 
@@ -506,7 +505,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                 mounts_parts.push(format!("{}:{}", h, c));
             }
         }
-        for (h, c) in &claude_config_mounts_for_label {
+        for (h, c) in &claude_config_mounts {
             mounts_parts.push(format!("{}:{}", h, c));
         }
         // Sanitized settings: include only container destination in the label so
@@ -540,7 +539,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 10. Auth: load token
     let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
-    let home = crate::config::home_dir()?;
     let claude_json = home.join(".claude.json");
 
     let token_data = auth_manager
@@ -599,24 +597,16 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         extra_mounts.push(parsed);
     }
 
-    // Mode 分岐: --template 指定時は vibepod 管理の template を、
-    // 未指定時は host の ~/.claude/ 配下を mount する。
-    // `effective_template` は 9b の label 計算時に既に解決済み。
-    if let Some(ref template_name) = effective_template {
-        // Template mode: vibepod 管理の template を mount
-        let template_mounts = super::template::build_template_mounts(template_name, &config_dir)?;
-        for (host, container) in &template_mounts {
-            extra_mounts.push((host.clone(), container.clone()));
-        }
-    } else {
-        // Host mode (v1.4.3 互換): ~/.claude/ 配下のグローバル設定を
-        // マウント対象に追加（存在する場合のみ）
-        let claude_config_mounts = super::build_claude_config_mounts(&home);
-        for (host, container) in &claude_config_mounts {
-            extra_mounts.push((host.clone(), container.clone()));
-        }
+    // `claude_config_mounts` は 9b の分岐で既に解決済み（template mode なら
+    // template mount、host mode なら host mount）。ここで再計算せずに
+    // そのまま `extra_mounts` に積む。
+    for (host, container) in &claude_config_mounts {
+        extra_mounts.push((host.clone(), container.clone()));
+    }
 
-        // ホスト ~/.claude/settings.json をサニタイズしてマウント対象に追加
+    // Host mode の場合だけ sanitized settings.json を実際に生成してマウント
+    // に追加する。template mode では host の settings.json は触らない。
+    if effective_template.is_none() {
         if let Some((host, container)) =
             super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
         {
