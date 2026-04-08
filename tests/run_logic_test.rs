@@ -1385,8 +1385,50 @@ setup_commands = ["rustup component add rust-analyzer", ""]
     .unwrap();
     let err = read_template_metadata(dir.path()).unwrap_err();
     assert!(
-        err.to_string().contains("setup_commands[1] is empty"),
+        err.to_string().contains("setup_commands[1]"),
         "expected empty-entry rejection at index 1, got: {}",
+        err
+    );
+    assert!(
+        err.to_string().contains("empty or whitespace-only"),
+        "expected empty-or-whitespace message, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_whitespace_only_setup_command() {
+    // literal "" だけでなく、空白だけの entry も reject する。
+    // そのままだと `sh -c "... &&    && ..."` になって runtime で失敗する。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+setup_commands = ["   "]
+"#,
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("empty or whitespace-only"),
+        "expected whitespace-only rejection, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_tab_only_setup_command() {
+    // tab のみの entry も reject される
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        "[runtime]\nsetup_commands = [\"\\t\\t\"]\n",
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("empty or whitespace-only"),
+        "expected tab-only rejection, got: {}",
         err
     );
 }

@@ -909,10 +909,16 @@ pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
     // redirects, variable expansion).
     const SETUP_COMMAND_MAX_LEN: usize = 2048;
     for (idx, cmd) in metadata.runtime.setup_commands.iter().enumerate() {
-        if cmd.is_empty() {
+        if cmd.trim().is_empty() {
+            // Reject both literal "" and whitespace-only ("   ") entries.
+            // A whitespace-only entry would concatenate into
+            // `sh -c "... &&    && ..."` and fail at container setup
+            // time with a shell syntax error that is hard to trace
+            // back to the metadata file.
             bail!(
-                "Template metadata {}: setup_commands[{}] is empty. Remove \
-                 the entry or provide a non-empty shell command.",
+                "Template metadata {}: setup_commands[{}] is empty or \
+                 whitespace-only. Remove the entry or provide a non-empty \
+                 shell command.",
                 metadata_path.display(),
                 idx
             );

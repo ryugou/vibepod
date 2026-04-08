@@ -66,6 +66,7 @@ fn warn_config_changes(
         "vibepod.network",
         "vibepod.mounts",
         "vibepod.env_hash",
+        "vibepod.template_setup_hash",
     ] {
         let label_name = key.strip_prefix("vibepod.").unwrap_or(key);
         let raw_stored = stored.get(*key).map(|s| s.as_str()).unwrap_or("");
@@ -700,6 +701,16 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
+        // Phase 4.7: include the template_setup_hash so warn_config_changes
+        // can surface a drift diff for legacy containers (labels_version < 3)
+        // that skip the hard-fail gate above. Without this, a user upgrading
+        // a pre-4.7 container to a template that now declares setup_commands
+        // would silently reuse the stale container and never see the
+        // "run with --new" hint.
+        current_labels.insert(
+            "vibepod.template_setup_hash".to_string(),
+            template_setup_hash.clone(),
+        );
 
         // Template mode では mount set の変更は **critical**。
         // docker のバインドマウントはコンテナ作成時に固定されるため、
