@@ -373,17 +373,21 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         let canonical_template = match super::template::resolve_template_dir(tmpl, &config_dir) {
             Ok(path) => path,
             Err(first_err) => {
-                // case-insensitive FS (macOS default) 対応のため、
-                // 要求名と embedded 名は ASCII case を無視して比較する。
-                // これにより `--template Review` のような大文字混じり
-                // 呼び出しでも、embedded `review` を lazy extract した後
-                // FS の case-insensitive 解決で正しく resolve できる。
-                // Linux (case-sensitive) では extract 後の再 resolve が
-                // 失敗するが、それは元々機能しないケースなのでエラー
-                // メッセージだけ素直に通る。
+                // extract gate は **厳密一致** のみ許容する。
+                // case-insensitive 比較だと Linux (case-sensitive FS) で
+                // `--template Review` が「embedded 名に該当する」と判定
+                // されて不要な extraction (または read-only setup での
+                // write エラー) を引き起こすため。
+                //
+                // macOS のような case-insensitive FS では、正しい大文字
+                // 小文字 (`--template review`) で 1 度でも実行すれば
+                // extraction が走り、以降 `Review` 等の case variant は
+                // resolve_template_dir の FS-level case-insensitive 解決
+                // で通るようになる。初回の miscased 呼び出しは「Template
+                // 'Review' not found」で素直に返すのが正しい挙動。
                 let is_embedded = super::template::embedded_template_names()
                     .iter()
-                    .any(|n| n.eq_ignore_ascii_case(tmpl));
+                    .any(|n| n == tmpl);
                 if !is_embedded {
                     // user-provided 前提で resolve 失敗: そのまま元のエラーを返す。
                     // extract を呼ばないので `~/.config/vibepod/templates/` は
