@@ -94,6 +94,20 @@ pub fn effective_template_name(
             {
                 return Some(default);
             }
+            // Fallback: config で設定された default が解決できなかった。
+            // host mount で prompt run を続行するが、sileniously fall back
+            // すると「template list では default になっているのに run で
+            // 効かない」という不可解な状態になるため、stderr に警告を
+            // 出してから None を返す。明示的な `--template <name>` の
+            // fail-fast とは違い、ここはあくまで best-effort の default
+            // 適用なので run 自体は止めない。
+            eprintln!(
+                "warning: configured default template '{}' could not be resolved; \
+                 falling back to host mount. Run `vibepod template list` to check \
+                 `~/.config/vibepod/templates/{}` for a missing / conflicting entry, \
+                 or unset with `vibepod template set-default`.",
+                default, default
+            );
             return None;
         }
     }
