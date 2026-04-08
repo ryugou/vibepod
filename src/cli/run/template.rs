@@ -292,6 +292,12 @@ pub fn embedded_template_names() -> Vec<String> {
 /// `<config_dir>/templates/` 配下のサブディレクトリ名を列挙し、
 /// template 名として有効なもの（validate_template_name に通るもの）
 /// だけを返す。ディレクトリが存在しない場合は空配列。
+///
+/// `resolve_template_dir` と同じ採否基準を適用する: in-root への
+/// symlinked dir は valid として含める一方、外部を指す symlink は
+/// 除外する。これによって `template list` / `set-default` の見える
+/// 集合が `run --template` の実行可能集合と一致する（不一致だと
+/// list には出ないが run は通る、または逆、という混乱が起きる）。
 pub fn user_template_names(config_dir: &Path) -> Vec<String> {
     let templates_root = config_dir.join("templates");
     if !templates_root.is_dir() {
@@ -302,9 +308,19 @@ pub fn user_template_names(config_dir: &Path) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        // `std::fs::metadata(path)` は symlink を辿る (DirEntry::metadata
+        // は辿らない点に注意)。symlinked dir も is_dir として拾うために
+        // path 経由で stat を取る。
+        .filter(|e| {
+            std::fs::metadata(e.path())
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+        })
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| validate_template_name(n).is_ok())
+        // 最終的な escape チェックは resolve_template_dir に委譲する。
+        // これで in-root symlink は通り、外部を指す symlink は弾かれる。
+        .filter(|n| resolve_template_dir(n, config_dir).is_ok())
         .collect();
     names.sort();
     names

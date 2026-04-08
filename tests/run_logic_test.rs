@@ -772,6 +772,42 @@ fn test_user_template_names_returns_subdirs_only() {
     assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
 }
 
+#[cfg(unix)]
+#[test]
+fn test_user_template_names_includes_in_root_symlinked_dir() {
+    // templates/ 内の dir に張られた symlink (in-root を指す) は valid。
+    // resolve_template_dir が通すので user_template_names も通すべき
+    // (両者の集合一致が `template list` <-> `run --template` の整合性に
+    // 必要)。
+    let config_dir = tempfile::tempdir().unwrap();
+    let templates = config_dir.path().join("templates");
+    std::fs::create_dir_all(templates.join("real")).unwrap();
+    std::os::unix::fs::symlink(templates.join("real"), templates.join("alias")).unwrap();
+
+    let names = user_template_names(config_dir.path());
+    assert_eq!(names, vec!["alias".to_string(), "real".to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_user_template_names_excludes_out_of_root_symlinked_dir() {
+    // templates/ 外を指す symlink は escape として扱い、list から除外。
+    // resolve_template_dir も reject するので runtime と整合する。
+    let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join("config");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(config_dir.join("templates")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, config_dir.join("templates").join("escape")).unwrap();
+
+    let names = user_template_names(&config_dir);
+    assert!(
+        names.is_empty(),
+        "expected escape symlink to be filtered, got {:?}",
+        names
+    );
+}
+
 #[test]
 fn test_user_template_names_filters_invalid_names() {
     let config_dir = tempfile::tempdir().unwrap();
