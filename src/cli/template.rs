@@ -42,11 +42,16 @@ pub fn list() -> Result<()> {
     // 初回呼び出しで embed を展開（既存があれば skip）
     crate::cli::run::template::extract_embedded_templates_if_missing(&config_dir)?;
 
-    let user_names = user_template_names(&config_dir);
-    let embedded_names: Vec<String> = embedded_template_names()
+    // 重要: extraction 後は embedded template も `~/.config/vibepod/
+    // templates/<name>/` の実ディレクトリとして存在するため、
+    // `user_template_names()` の結果にも embedded 名が含まれる。
+    // 「embedded か user-only か」の判定は **コンパイル時 embed 集合** を
+    // 真とするべき。embed 集合に存在する名前は常に `(embedded)`、
+    // それ以外で user dir にのみ存在するものを「ユーザー追加」とする。
+    let embedded_names = embedded_template_names();
+    let user_only_names: Vec<String> = user_template_names(&config_dir)
         .into_iter()
-        // ユーザー追加側に同名があれば embedded は除外（override）
-        .filter(|n| !user_names.contains(n))
+        .filter(|n| !embedded_names.contains(n))
         .collect();
 
     // デフォルト template 名は **global config.toml のみ** から読む。
@@ -62,7 +67,7 @@ pub fn list() -> Result<()> {
         let is_default = default_name.as_deref() == Some(name.as_str());
         all.push((name.clone(), true, is_default));
     }
-    for name in &user_names {
+    for name in &user_only_names {
         let is_default = default_name.as_deref() == Some(name.as_str());
         all.push((name.clone(), false, is_default));
     }

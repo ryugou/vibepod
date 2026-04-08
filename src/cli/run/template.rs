@@ -386,28 +386,36 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
 
         let dest = templates_root.join(name);
 
-        // symlink を follow しない判定を使う。これにより
-        // `templates/<name>` が外部ディレクトリへの symlink の場合も
-        // 「正しい user template」として扱わず、明示的にエラーにする。
-        // そうしないと `template list` は embed を広告するのに
-        // `vibepod run --template <name>` は resolve_template_dir の
-        // symlink escape チェックで失敗し、CLI が自己矛盾する。
+        // 既存エントリの判定。優先順位:
+        //   1. 何もない (NotFound) → 後段で extract
+        //   2. ディレクトリ実体 (regular dir) → ユーザー編集として保護、skip
+        //   3. in-root を指す symlink → ユーザー override として保護、skip
+        //      (resolve_template_dir も同条件で受け入れるので CLI 全体で
+        //      整合する)
+        //   4. 外部を指す symlink / regular file / その他 → 明示的にエラー
         match std::fs::symlink_metadata(&dest) {
             Ok(meta) => {
                 let ft = meta.file_type();
-                if ft.is_symlink() {
-                    bail!(
-                        "Cannot extract embedded template '{}': {} is a symlink, \
-                         which conflicts with the embedded template of the same name. \
-                         Remove or rename the symlink (it will be rejected as symlink \
-                         escape at runtime anyway).",
-                        name,
-                        dest.display()
-                    );
-                }
                 if ft.is_dir() {
                     // 通常ディレクトリ: ユーザー編集を上書きしない
                     continue;
+                }
+                if ft.is_symlink() {
+                    // resolve_template_dir と同じルールで受け入れ判定する。
+                    // in-root に解決される symlink は user override として
+                    // 尊重し、extraction を skip する。out-of-root のものや
+                    // 解決失敗するものは bail して、ユーザーに対処を促す。
+                    if resolve_template_dir(name, config_dir).is_ok() {
+                        continue;
+                    }
+                    bail!(
+                        "Cannot extract embedded template '{}': {} is a symlink that \
+                         escapes the templates root or cannot be resolved. \
+                         Remove or rename the symlink so vibepod can materialize \
+                         the embedded template.",
+                        name,
+                        dest.display()
+                    );
                 }
                 // regular file or その他
                 bail!(
