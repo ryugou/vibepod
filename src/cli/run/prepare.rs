@@ -561,6 +561,37 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
 
+        // Template mode では mount set の変更は **critical**。
+        // docker のバインドマウントはコンテナ作成時に固定されるため、
+        // template に CLAUDE.md / skills/ / agents/ / plugins/ /
+        // settings.json を追加・削除しても既存コンテナには反映されない。
+        // warn_config_changes は通常の非致命的な変更（lang / env 等）の
+        // 警告表示用なので、template mode の mount 変更はそれより前に
+        // hard fail させる。
+        if effective_template.is_some() {
+            let stored_mounts_raw = stored_labels
+                .get("vibepod.mounts")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let current_mounts_raw = current_labels
+                .get("vibepod.mounts")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            // warn_config_changes と同じ legacy 正規化ロジックを適用
+            let stored_mounts = normalize_mounts_label_legacy(stored_mounts_raw);
+            if stored_mounts != current_mounts_raw {
+                bail!(
+                    "Template mount set changed since this container was created \
+                     (template: '{}'). Bind mounts are fixed at container creation \
+                     time, so edits that add or remove files/directories in the \
+                     template (CLAUDE.md, skills/, agents/, plugins/, settings.json) \
+                     cannot take effect on the existing container. Run with --new to \
+                     recreate the container with the updated mount set.",
+                    effective_template.as_deref().unwrap_or("")
+                );
+            }
+        }
+
         warn_config_changes(&stored_labels, &current_labels)?;
     }
 
