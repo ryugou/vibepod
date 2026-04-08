@@ -51,6 +51,11 @@ pub(super) struct RunContext {
     pub(super) worktree_branch_name: Option<String>,
     pub(super) worktree_dir_name: Option<String>,
     pub(super) lang_display: String,
+    /// Normalized, sorted, deduped list of language identifiers that
+    /// will be installed in the container. This is what gets persisted
+    /// in the `vibepod.lang` label; `lang_display` is the human-readable
+    /// form shown in startup logs.
+    pub(super) lang_names: Vec<String>,
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
@@ -327,16 +332,15 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
 
     labels.insert("vibepod.network".to_string(), ctx.no_network.to_string());
 
-    // lang: setup_cmd がある場合は lang_display から推測するより、
-    // lang_names を RunContext に保存する方がきれいだが、
-    // ここでは lang_display の先頭部分を使う
-    let lang_value = ctx
-        .lang_display
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    labels.insert("vibepod.lang".to_string(), lang_value);
+    // lang: persist the FULL sorted/deduped set of languages the
+    // container was provisioned with. Using lang_display's first
+    // token would lose template-added langs (e.g. "python (detected)
+    // + rust (template)" → "python") and break the reuse check that
+    // verifies every template-required lang is present.
+    let mut lang_set = ctx.lang_names.clone();
+    lang_set.sort();
+    lang_set.dedup();
+    labels.insert("vibepod.lang".to_string(), lang_set.join(","));
 
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(

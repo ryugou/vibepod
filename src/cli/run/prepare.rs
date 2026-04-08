@@ -818,6 +818,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         worktree_branch_name,
         worktree_dir_name,
         lang_display,
+        lang_names,
         store,
         deferred_session,
         extra_mounts,
