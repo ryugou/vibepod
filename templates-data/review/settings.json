@@ -1,0 +1,20 @@
+{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "rust-analyzer-lsp@claude-plugins-official": true
+  },
+  "permissions": {
+    "deny": [
+      "Edit(*)",
+      "Write(*)",
+      "NotebookEdit(*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(sed -i*)"
+    ]
+  }
+}

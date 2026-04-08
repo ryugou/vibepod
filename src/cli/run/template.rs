@@ -27,8 +27,7 @@ use super::RunOptions;
 /// set-default` は列挙のみで展開は行わないため、read-only な
 /// `~/.config/vibepod/` setup を壊さない。
 ///
-/// Phase 3 の時点では `templates-data/` は空（`.gitkeep` のみ）。
-/// 実際の公式 template (rust-code / review) は Phase 4 で追加される。
+/// Phase 4 で公式 template (`rust-code` / `review`) が追加された。
 pub static EMBEDDED_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates-data");
 
 /// 適用すべき template 名を決定する。

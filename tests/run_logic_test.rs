@@ -914,20 +914,40 @@ fn test_user_template_names_propagates_unreadable_dir() {
 }
 
 #[test]
-fn test_extract_embedded_templates_noop_when_embed_empty() {
-    // Phase 3 時点では templates-data/ は空（.gitkeep のみ）なので
-    // embed には何も入っていない。この場合 extract は **完全な no-op**
-    // で、`~/.config/vibepod/templates/` を作らない（read-only HOME
-    // 対応のため）。Phase 4 で embed が populated されたら、この test
-    // は templates root が作られる assert に変わる（その時点で rename
-    // + assertion 更新）。
+fn test_extract_embedded_templates_creates_official_templates() {
+    // Phase 4 で templates-data/ に rust-code と review が追加されたので、
+    // extract で `~/.config/vibepod/templates/rust-code/` と
+    // `~/.config/vibepod/templates/review/` が作られることを確認する。
     let config_dir = tempfile::tempdir().unwrap();
     assert!(!config_dir.path().join("templates").exists());
 
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
 
-    // embed が空なので書き込み発生しない
-    assert!(!config_dir.path().join("templates").exists());
+    let templates = config_dir.path().join("templates");
+    assert!(templates.is_dir(), "templates root should be created");
+    assert!(
+        templates.join("rust-code").is_dir(),
+        "rust-code template should be extracted"
+    );
+    assert!(
+        templates.join("review").is_dir(),
+        "review template should be extracted"
+    );
+    // トップ階層に marker が書かれていること
+    assert!(
+        templates
+            .join("rust-code")
+            .join(".vibepod-embedded")
+            .is_file(),
+        "rust-code should have embedded marker"
+    );
+    assert!(
+        templates.join("review").join(".vibepod-embedded").is_file(),
+        "review should have embedded marker"
+    );
+    // CLAUDE.md が存在すること (template の中身が再帰的に展開されている)
+    assert!(templates.join("rust-code").join("CLAUDE.md").is_file());
+    assert!(templates.join("review").join("CLAUDE.md").is_file());
 }
 
 #[test]
@@ -936,30 +956,74 @@ fn test_extract_embedded_templates_is_idempotent() {
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
-    // 再呼び出しでもエラーにならないことを確認
+    // 再呼び出しでもエラーにならず、結果が安定していること
+    let templates = config_dir.path().join("templates");
+    assert!(templates.join("rust-code").is_dir());
+    assert!(templates.join("review").is_dir());
 }
 
 #[test]
 fn test_extract_embedded_templates_preserves_existing_user_dir() {
     let config_dir = tempfile::tempdir().unwrap();
+    // ユーザーが独自の (embedded に含まれない) template を作っている場合、
+    // extract で官公式 template が展開されても、ユーザー template は
+    // 触られない。
     let user_template = config_dir.path().join("templates").join("my-custom");
     std::fs::create_dir_all(&user_template).unwrap();
     std::fs::write(user_template.join("CLAUDE.md"), "user content").unwrap();
 
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
 
-    // ユーザー追加 template は触られない
     let content = std::fs::read_to_string(user_template.join("CLAUDE.md")).unwrap();
     assert_eq!(content, "user content");
+    // 官公式 template も同時に展開される
+    assert!(config_dir
+        .path()
+        .join("templates")
+        .join("rust-code")
+        .is_dir());
 }
 
 #[test]
-fn test_embedded_template_names_valid_in_phase_3() {
-    // Phase 3 時点では templates-data/ は空なので empty を想定
-    // （Phase 4 で公式 template が追加されたらこのテストは失敗して
-    //  調整が必要になる — その時点で assert_eq を具体名に書き換える）
+fn test_extract_embedded_templates_respects_user_override_same_name() {
+    // ユーザーが embedded と同名の dir を自前で作っている場合、
+    // extract はそれを尊重して上書きしない (marker 無しで残る)。
+    let config_dir = tempfile::tempdir().unwrap();
+    let templates = config_dir.path().join("templates");
+    std::fs::create_dir_all(templates.join("rust-code")).unwrap();
+    std::fs::write(
+        templates.join("rust-code").join("CLAUDE.md"),
+        "user override",
+    )
+    .unwrap();
+
+    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+
+    // 内容が維持される
+    let content = std::fs::read_to_string(templates.join("rust-code").join("CLAUDE.md")).unwrap();
+    assert_eq!(content, "user override");
+    // marker は書かれない (user override として扱う)
+    assert!(!templates
+        .join("rust-code")
+        .join(".vibepod-embedded")
+        .is_file());
+}
+
+#[test]
+fn test_embedded_template_names_contains_official_templates() {
+    // Phase 4 で rust-code と review が embed される。
     let names = embedded_template_names();
-    // 返り値が名前の collection として妥当であること（全て validation 通過）
+    assert!(
+        names.contains(&"rust-code".to_string()),
+        "expected rust-code in embedded templates, got {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"review".to_string()),
+        "expected review in embedded templates, got {:?}",
+        names
+    );
+    // 全て name validation を通る
     for name in &names {
         assert!(!name.is_empty());
         assert!(
