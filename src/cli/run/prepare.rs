@@ -323,27 +323,27 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 4. Compute container name
     // --worktree: ランダムハッシュ（使い捨て）
-    // それ以外: プロジェクトパス + template 名の SHA256 先頭 8 文字（永続）
+    // それ以外:
+    //   - host mode (--template 未指定): プロジェクトパスの SHA256 先頭 8 文字（v1.4.3 互換）
+    //   - template mode (--template <name>): プロジェクトパス + template 名の SHA256
     //
-    // template を hash に含めることで、`--template rust-code` と
-    // `--template review` と host mode が **別々のコンテナ**として永続
-    // される。同一プロジェクトで template を切り替えるたびに `--new`
-    // 指定無しで自動的に適切なコンテナが使われる。
+    // template 指定時だけ hash を変えることで、template モードは
+    // host mode とは別の container に落ちつつ、既存の host mode container
+    // は v1.4.3 と同じ名前のままで互換性を保つ。
     let effective_template = super::template::effective_template_name(opts);
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
             .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
-    } else {
-        // Include template in the hash input so different templates (or
-        // host mode) get distinct container names automatically.
-        let hash_input = format!(
-            "{}|template={}",
-            cwd_str,
-            effective_template.as_deref().unwrap_or("")
-        );
+    } else if let Some(ref tmpl) = effective_template {
+        // Template mode: hash に template 名を混ぜて host mode と別名に
+        let hash_input = format!("{}|template={}", cwd_str, tmpl);
         let hash = path_hash_8(&hash_input);
+        format!("vibepod-{}-{}", project_name, hash)
+    } else {
+        // Host mode: v1.4.3 互換の hash 計算を維持
+        let hash = path_hash_8(&cwd_str);
         format!("vibepod-{}-{}", project_name, hash)
     };
 
