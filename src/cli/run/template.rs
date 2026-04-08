@@ -817,6 +817,27 @@ pub struct TemplateRuntimeMetadata {
     /// `["rust"]`). Merged into `prepare_context`'s lang pipeline.
     #[serde(default)]
     pub required_langs: Vec<String>,
+
+    /// Extra shell commands the template requires the container to run
+    /// once at creation time, **after** language install and **before**
+    /// Claude Code starts. Used for rustup components (e.g.
+    /// `rustup component add rust-analyzer`), npm-global CLI installs,
+    /// or any other container-side setup that is not covered by
+    /// `required_langs`.
+    ///
+    /// Semantics:
+    /// - Entries are appended to `setup_cmd` in the order listed.
+    /// - The whole chain runs via `sh -c "<lang install> && <cmd1> && <cmd2> && ..."`.
+    /// - If any command fails, container setup fails (fail-fast).
+    /// - setup runs ONLY at container **creation**. Changing setup_commands
+    ///   on an existing container does not re-run them; callers must
+    ///   `--new` to recreate. `vibepod.template_setup_hash` + the
+    ///   Phase 4.7 `labels_version=3` reuse gate surfaces this.
+    /// - Each entry is validated at parse time: non-empty, no null bytes,
+    ///   no embedded newlines (would break the && chain), length capped
+    ///   at 2048 bytes.
+    #[serde(default)]
+    pub setup_commands: Vec<String>,
 }
 
 /// Read `vibepod-template.toml` from the given extracted template
@@ -878,6 +899,50 @@ pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
             );
         }
     }
+
+    // Validate setup_commands entries. We keep validation conservative
+    // because these strings are concatenated into a shell command chain
+    // that runs inside the container as the workspace user. Rejecting
+    // empty / null-bytes / newlines / over-long entries prevents the
+    // obvious shell-injection / chain-breaking failure modes while
+    // still letting templates use normal shell constructs (pipes,
+    // redirects, variable expansion).
+    const SETUP_COMMAND_MAX_LEN: usize = 2048;
+    for (idx, cmd) in metadata.runtime.setup_commands.iter().enumerate() {
+        if cmd.is_empty() {
+            bail!(
+                "Template metadata {}: setup_commands[{}] is empty. Remove \
+                 the entry or provide a non-empty shell command.",
+                metadata_path.display(),
+                idx
+            );
+        }
+        // Note: NUL bytes cannot appear in valid TOML strings, so
+        // the TOML parser already rejects them before we get here.
+        // We therefore don't re-check for NUL in this validator.
+        if cmd.contains('\n') || cmd.contains('\r') {
+            bail!(
+                "Template metadata {}: setup_commands[{}] contains a newline. \
+                 Setup commands are joined with ' && ' into a single shell \
+                 chain, so embedded newlines would break the chain. Split \
+                 multi-line logic into separate entries.",
+                metadata_path.display(),
+                idx
+            );
+        }
+        if cmd.len() > SETUP_COMMAND_MAX_LEN {
+            bail!(
+                "Template metadata {}: setup_commands[{}] is {} bytes (max {}). \
+                 Move long command chains into a script shipped under \
+                 scripts/ and invoke it from the setup_commands entry.",
+                metadata_path.display(),
+                idx,
+                cmd.len(),
+                SETUP_COMMAND_MAX_LEN
+            );
+        }
+    }
+
     Ok(metadata)
 }
 
