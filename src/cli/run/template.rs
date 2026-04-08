@@ -63,21 +63,23 @@ pub fn effective_template_name(
     }
     if opts.prompt.is_some() && !opts.worktree {
         if let Some(default) = config.default_prompt_template() {
-            // Best-effort: embedded / user のどちらかに存在する場合のみ
-            // template モードへ切り替える。存在しなければ host mount に
-            // フォールバックして v1.4.3 互換動作を維持する。
-            // (Phase 3 時点では templates-data/ は空なので、デフォルトは
-            // 常に host mount にフォールバックする。Phase 4 で公式 template
-            // が embed されると自動的に効き始める。)
-            let embedded = embedded_template_names();
-            if embedded.iter().any(|n| n == &default) {
+            // Best-effort: embedded ならまず extract を試み、その後
+            // `resolve_template_dir` で実体を検証する。ここで失敗する
+            // 全てのケース (read-only `$HOME` で extract できない、
+            // 同名ファイル/壊れた symlink で resolve できない、binary に
+            // 含まれず user dir にも無い、…) は **host mount に
+            // フォールバック** する。default は best-effort であり、
+            // ユーザーが設定したからといって prompt run を壊してはならない。
+            //
+            // 明示的な `--template` (上の `opts.template` 分岐) は
+            // この best-effort 扱いを受けず、`prepare_context` の後段で
+            // resolve に失敗すれば fail-fast する。これはユーザーの
+            // 明示的意図なのでエラーが見えるべき。
+            if extract_embedded_templates_if_missing(config_dir).is_ok()
+                && resolve_template_dir(&default, config_dir).is_ok()
+            {
                 return Some(default);
             }
-            let user = user_template_names(config_dir);
-            if user.iter().any(|n| n == &default) {
-                return Some(default);
-            }
-            // 存在しない: host mount フォールバック
             return None;
         }
     }

@@ -62,10 +62,13 @@ fn read_global_default_prompt_template(global_config_dir: &Path) -> Result<Optio
 pub fn list() -> Result<()> {
     let config_dir = config::default_config_dir()?;
 
-    // 初回呼び出しで embed を展開（既存があれば skip）
-    crate::cli::run::template::extract_embedded_templates_if_missing(&config_dir)?;
-
-    // 重要: extraction 後は embedded template も `~/.config/vibepod/
+    // ここでは extract を呼ばない。read-only / 権限制限された
+    // `~/.config/vibepod` でも `template list` を使えるようにするため、
+    // embedded template はバイナリから直接列挙し、on-disk 状況とは独立に
+    // 表示する。実際の展開は `vibepod run --template <name>` の経路で
+    // 必要になったときに lazy に行われる。
+    //
+    // 重要: 既に extract 済みの場合は `~/.config/vibepod/
     // templates/<name>/` の実ディレクトリとして存在するため、
     // `user_template_names()` の結果には embedded 名も embed されない
     // ユーザー追加名も両方含まれる。さらに、ユーザーが embedded と
@@ -147,8 +150,11 @@ pub fn list() -> Result<()> {
 /// を更新する。存在しない場合はエラー（available list 提示付き）。
 pub fn set_default(name: &str) -> Result<()> {
     let config_dir = config::default_config_dir()?;
-    crate::cli::run::template::extract_embedded_templates_if_missing(&config_dir)?;
-
+    // extract は呼ばない。embedded template はバイナリから直接判定でき、
+    // user template は on-disk から列挙できるため、`set-default` の検証
+    // 自体は read-only `~/.config/vibepod` でも (config.toml への書き込み
+    // 権限さえあれば) 動く。実際の展開は `run --template <name>` 経路で
+    // 必要になった時点で lazy に行う。
     let embedded = embedded_template_names();
     let user = user_template_names(&config_dir);
 
