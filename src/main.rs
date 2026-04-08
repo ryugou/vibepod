@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use vibepod::cli::{Cli, Commands};
+use vibepod::cli::{Cli, Commands, TemplateSubcommand};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -63,6 +63,14 @@ async fn main() -> Result<()> {
         Commands::Stop { name, all } => {
             vibepod::cli::stop::execute(name, all).await?;
         }
+        Commands::Template { subcommand } => match subcommand {
+            TemplateSubcommand::List {} => {
+                vibepod::cli::template::list()?;
+            }
+            TemplateSubcommand::SetDefault { name } => {
+                vibepod::cli::template::set_default(&name)?;
+            }
+        },
     }
 
     Ok(())

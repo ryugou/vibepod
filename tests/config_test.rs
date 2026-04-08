@@ -251,3 +251,82 @@ fn test_default_prompt_template_project_overrides_global() {
     let config = vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap();
     assert_eq!(config.default_prompt_template(), Some("custom".to_string()));
 }
+
+// --- set_default_prompt_template write API (Phase 3) ---
+
+#[test]
+fn test_set_default_prompt_template_creates_new_config() {
+    let global_dir = tempfile::tempdir().unwrap();
+    vibepod::config::set_default_prompt_template(global_dir.path(), Some("rust-code")).unwrap();
+
+    let config = vibepod::config::VibepodConfig::load(
+        &std::path::PathBuf::from("/nonexistent"),
+        global_dir.path(),
+    )
+    .unwrap();
+    assert_eq!(
+        config.default_prompt_template(),
+        Some("rust-code".to_string())
+    );
+}
+
+#[test]
+fn test_set_default_prompt_template_updates_existing_config() {
+    let global_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        global_dir.path().join("config.toml"),
+        "[run]\nlang = \"rust\"\n",
+    )
+    .unwrap();
+
+    vibepod::config::set_default_prompt_template(global_dir.path(), Some("review")).unwrap();
+
+    let config = vibepod::config::VibepodConfig::load(
+        &std::path::PathBuf::from("/nonexistent"),
+        global_dir.path(),
+    )
+    .unwrap();
+    assert_eq!(config.lang(), Some("rust".to_string()));
+    assert_eq!(config.default_prompt_template(), Some("review".to_string()));
+}
+
+#[test]
+fn test_set_default_prompt_template_removes_key_when_none() {
+    let global_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        global_dir.path().join("config.toml"),
+        "[run]\nlang = \"rust\"\ndefault_prompt_template = \"review\"\n",
+    )
+    .unwrap();
+
+    vibepod::config::set_default_prompt_template(global_dir.path(), None).unwrap();
+
+    let config = vibepod::config::VibepodConfig::load(
+        &std::path::PathBuf::from("/nonexistent"),
+        global_dir.path(),
+    )
+    .unwrap();
+    assert_eq!(config.lang(), Some("rust".to_string()));
+    assert_eq!(config.default_prompt_template(), None);
+}
+
+#[test]
+fn test_set_default_prompt_template_preserves_unknown_sections() {
+    let global_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        global_dir.path().join("config.toml"),
+        "[global]\ndefault_agent = \"claude\"\nimage = \"vibepod:test\"\n\n[run]\nlang = \"rust\"\n",
+    )
+    .unwrap();
+
+    vibepod::config::set_default_prompt_template(global_dir.path(), Some("rust-code")).unwrap();
+
+    let content = std::fs::read_to_string(global_dir.path().join("config.toml")).unwrap();
+    assert!(
+        content.contains("default_agent"),
+        "global section should be preserved, got: {}",
+        content
+    );
+    assert!(content.contains("default_prompt_template"));
+    assert!(content.contains("rust-code"));
+}

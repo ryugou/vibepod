@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -93,4 +93,71 @@ impl VibepodConfig {
             .as_ref()
             .and_then(|r| r.default_prompt_template.clone())
     }
+}
+
+/// `<global_config_dir>/config.toml` の `[run] default_prompt_template`
+/// 値を書き込む（他のフィールドは保持）。
+///
+/// `value = Some("name")` の場合は値を設定、`None` の場合はキーを削除。
+/// `[run]` セクションが無ければ作成する。config.toml そのものが無ければ
+/// 作成する。
+///
+/// この関数は vibepod が書き込み許可を持つ `<global_config_dir>`
+/// （通常 `~/.config/vibepod/`）配下にのみ書き込む。プロジェクト設定
+/// （`.vibepod/config.toml`）には書き込まない。
+pub fn set_default_prompt_template(global_config_dir: &Path, value: Option<&str>) -> Result<()> {
+    let config_path = global_config_dir.join("config.toml");
+
+    // 既存 config.toml を raw Table として読む（unknown sections を保持）
+    let mut table: toml::value::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
+        toml::from_str(&content).with_context(|| {
+            format!(
+                "Failed to parse {} as TOML: fix syntax errors first",
+                config_path.display()
+            )
+        })?
+    } else {
+        std::fs::create_dir_all(global_config_dir).with_context(|| {
+            format!(
+                "Failed to create config directory: {}",
+                global_config_dir.display()
+            )
+        })?;
+        toml::value::Table::new()
+    };
+
+    // [run] セクションを取得または作成
+    let run_value = table
+        .entry("run".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let run_table = match run_value {
+        toml::Value::Table(t) => t,
+        _ => {
+            anyhow::bail!(
+                "Config file {} has [run] set to a non-table value; refusing to overwrite",
+                config_path.display()
+            );
+        }
+    };
+
+    match value {
+        Some(name) => {
+            run_table.insert(
+                "default_prompt_template".to_string(),
+                toml::Value::String(name.to_string()),
+            );
+        }
+        None => {
+            run_table.remove("default_prompt_template");
+        }
+    }
+
+    let serialized = toml::to_string_pretty(&toml::Value::Table(table))
+        .context("Failed to serialize updated config.toml")?;
+    std::fs::write(&config_path, serialized)
+        .with_context(|| format!("Failed to write {}", config_path.display()))?;
+
+    Ok(())
 }

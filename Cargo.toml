@@ -28,6 +28,7 @@ chrono = "0.4"
 libc = "0.2"
 regex = "1"
 tempfile = "3"
+include_dir = "0.7"
 
 [profile.release]
 strip = true

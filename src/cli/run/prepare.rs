@@ -316,6 +316,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     let config_dir = config::default_config_dir()?;
     let global_config = config::load_global_config(&config_dir)?;
 
+    // Note: 埋め込み template の展開はここでは**行わない**。展開は
+    // template mode が使われ、かつ要求された template が user-provided
+    // として解決できない時だけ遅延実行する（step 4 の container_name
+    // 計算内）。`vibepod template list` / `template set-default` は
+    // 列挙のみで write を行わないため、host mode 専用ユーザーの
+    // read-only `~/.config/vibepod/` setup を壊さない。
+
     // 3. Check Docker & image
     let runtime = DockerRuntime::new()
         .await
@@ -344,15 +351,27 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // に落ちる（raw 名を使うと 2 つの container に split されてしまう）。
     // 同時に、resolve_template_dir が symlink escape を防ぐので path
     // traversal の心配もない。
-    let effective_template = super::template::effective_template_name(opts);
+    let effective_template =
+        super::template::effective_template_name(opts, &vibepod_config, &config_dir);
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
             .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
     } else if let Some(ref tmpl) = effective_template {
-        // Template mode: canonical path を hash 入力に使う
-        let canonical_template = super::template::resolve_template_dir(tmpl, &config_dir)?;
+        // まず要求された template をそのまま resolve する。user-provided
+        // の template は embedded extraction に依存せず、read-only
+        // `~/.config/vibepod/` でもそのまま使えるべき。初回で resolve
+        // できなかった場合のみ embedded 展開を試みて再 resolve する。
+        // これにより、例えば「embed に同名 template が存在し、かつ user
+        // は別 template を使いたい」ケースでも不要な書き込みを発生させない。
+        let canonical_template = match super::template::resolve_template_dir(tmpl, &config_dir) {
+            Ok(path) => path,
+            Err(_) => {
+                super::template::extract_embedded_templates_if_missing(&config_dir)?;
+                super::template::resolve_template_dir(tmpl, &config_dir)?
+            }
+        };
         let hash_input = format!("{}|template={}", cwd_str, canonical_template.display());
         let hash = path_hash_8(&hash_input);
         format!("vibepod-{}-{}", project_name, hash)
