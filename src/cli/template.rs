@@ -239,6 +239,21 @@ pub fn reset(name: &str, force: bool) -> Result<()> {
 
     let target = config_dir.join("templates").join(name);
 
+    // 既存 dir が **user override** (marker 無し) の場合は reset を拒否する。
+    // embedded と同名だからといってユーザーが手作業で作った template を
+    // 勝手に置き換えてよいわけではない。`template list` も override を
+    // 別扱いで表示するので、reset の挙動もそれに揃える。
+    if target.exists() && !crate::cli::run::template::is_embedded_extracted(&target) {
+        bail!(
+            "Refusing to reset template '{}': the on-disk directory '{}' is a user \
+             override (no .vibepod-embedded marker), not a vibepod-managed extraction. \
+             Remove or rename the directory manually if you want to replace it with \
+             the embedded copy.",
+            name,
+            target.display()
+        );
+    }
+
     if !force {
         bail!(
             "Refusing to reset template '{}' without --force. The target directory \
