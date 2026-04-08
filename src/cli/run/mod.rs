@@ -127,6 +127,14 @@ pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
     }
 }
 
+/// Return `true` iff `lang` has a known install command. Used by
+/// template metadata parsing to reject `required_langs` values that
+/// cannot actually be installed (a typo like "rsut" or an unsupported
+/// runtime), instead of silently dropping them at install time.
+pub fn is_supported_lang(lang: &str) -> bool {
+    get_lang_install_cmd(lang).is_some()
+}
+
 pub fn validate_slack_channel_id(id: &str) -> bool {
     (id.starts_with('C') || id.starts_with('G')) && id.len() >= 9
 }

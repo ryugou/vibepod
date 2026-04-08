@@ -626,11 +626,21 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
         mounts_parts.sort();
 
-        let current_lang = lang_display
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
+        // Encode the FULL sorted lang_names set, not just the display's
+        // first token. Previously we stored only the first whitespace-
+        // delimited word of `lang_display`, which meant e.g. "python
+        // (detected from ...) + rust (template)" stored as "python".
+        // A pre-existing container (created before the template added
+        // rust) would then match the label and be reused WITHOUT
+        // running `setup_cmd`, leaving the template-required runtime
+        // uninstalled. Storing the whole set forces re-provisioning
+        // whenever any language is added or removed.
+        let current_lang = {
+            let mut names = lang_names.clone();
+            names.sort();
+            names.dedup();
+            names.join(",")
+        };
 
         // env ファイル解決後の resolved_env_vars をハッシュ化（env ファイルの変更も検知）
         let current_env_hash = hash_env_vars(&resolved_env_vars);
@@ -670,6 +680,47 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                      recreate the container with the updated mount set.",
                     effective_template.as_deref().unwrap_or("")
                 );
+            }
+
+            // Template-required langs must all be present in the stored
+            // lang set of the existing container. `setup_cmd` only runs
+            // at container creation time, so a container created before
+            // the template added a `required_langs` entry will not
+            // have that toolchain even though the warning would let
+            // the reuse through. Hard-fail here with a clear --new hint.
+            if !template_metadata.runtime.required_langs.is_empty() {
+                let stored_lang_set: std::collections::BTreeSet<&str> = stored_labels
+                    .get("vibepod.lang")
+                    .map(|s| {
+                        s.split([',', ' '])
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let missing: Vec<String> = template_metadata
+                    .runtime
+                    .required_langs
+                    .iter()
+                    .filter(|req| !stored_lang_set.contains(req.as_str()))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    bail!(
+                        "Template '{}' requires language(s) [{}] but the existing \
+                         container was created without them (stored lang set: {:?}). \
+                         Language installation only runs at container creation, so \
+                         the required toolchain cannot be added to the existing \
+                         container. Run with --new to recreate the container with \
+                         the required toolchain installed.",
+                        effective_template.as_deref().unwrap_or(""),
+                        missing.join(", "),
+                        stored_labels
+                            .get("vibepod.lang")
+                            .cloned()
+                            .unwrap_or_else(|| "(none)".to_string())
+                    );
+                }
             }
         }
 

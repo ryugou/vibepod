@@ -1329,9 +1329,47 @@ required_langs = ["rust", ""]
     )
     .unwrap();
     let err = read_template_metadata(dir.path()).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("invalid required_langs entry"));
+    assert!(err.to_string().contains("invalid required_langs entry"));
+}
+
+#[test]
+fn test_read_template_metadata_rejects_unsupported_lang() {
+    // "ruby" has no install command in get_lang_install_cmd, so letting
+    // it through would silently drop the entry at setup time. Must bail.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+required_langs = ["ruby"]
+"#,
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("not a language vibepod knows how to install"),
+        "expected unsupported-lang error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_lang_typo() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+required_langs = ["rsut"]
+"#,
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("not a language vibepod knows how to install"),
+        "expected typo rejection, got: {}",
+        err
+    );
 }
 
 #[test]

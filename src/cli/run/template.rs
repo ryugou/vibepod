@@ -841,9 +841,12 @@ pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
     };
     let metadata: TemplateMetadata = toml::from_str(&content)
         .with_context(|| format!("Failed to parse {} as TOML", metadata_path.display()))?;
-    // Validate language names against the validator used for template
-    // names themselves — this rejects empty strings, whitespace, and
-    // path-traversal-ish inputs that could confuse `get_lang_install_cmd`.
+    // Validate each entry: shape (non-empty ASCII identifier) AND
+    // support (identifier must resolve to a known install command via
+    // `is_supported_lang`). Silent acceptance of a typo like "rsut"
+    // would lead to `setup_cmd` dropping the entry at install time,
+    // leaving the template's documented "required" runtime absent.
+    // Fail fast instead.
     for lang in &metadata.runtime.required_langs {
         if lang.is_empty()
             || !lang
@@ -854,6 +857,16 @@ pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
                 "Template metadata {}: invalid required_langs entry '{}'. \
                  Language identifiers must be non-empty ASCII alphanumerics \
                  (plus '-', '_', '+', '.').",
+                metadata_path.display(),
+                lang
+            );
+        }
+        if !super::is_supported_lang(lang) {
+            bail!(
+                "Template metadata {}: required_langs entry '{}' is not a \
+                 language vibepod knows how to install. Supported values: \
+                 rust, node, python, go, java. If you need a new runtime, \
+                 extend `get_lang_install_cmd` first.",
                 metadata_path.display(),
                 lang
             );
