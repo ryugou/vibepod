@@ -84,7 +84,10 @@ Critical / Warning / Suggestion の定義は `strict-five-perspective-review` sk
 ## 禁則事項（再掲）
 
 - **コードを一切変更しない**。Edit / Write / 修正系 Bash を呼ばない。
-- **「問題ありません」で終わらない**。5 観点を機械的に回し、最低でも Suggestion を 1 件出す。
+- **深掘り不足のまま「問題ありません」で終わらせない**。5 観点を機械的に
+  回し、変更ファイルを全部 Read した上で誠実に「報告すべき改善点が無い」
+  と判断できた場合のみ PASS empty findings が許される。到達条件の詳細は
+  `strict-five-perspective-review` skill の「指摘の誠実さ」節を参照。
 - **曖昧表現を使わない**。「たぶん」「おそらく」「少し気になる」は禁止。
 - **指摘の具体性を削らない**。ファイル:行番号 + 改善案をすべてに付ける。
 
