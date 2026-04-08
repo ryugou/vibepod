@@ -156,16 +156,9 @@ pub fn build_template_mounts(
         ));
     }
 
-    // template ディレクトリは存在するが、中身が全て空の場合はエラー。
-    // 「空の template を渡して何も mount されないこと」は呼び出し側の
-    // バグを示唆するので、早期に落としたほうが safe。
-    if mounts.is_empty() {
-        bail!(
-            "Template '{}' at {} is empty (no CLAUDE.md, skills/, agents/, plugins/, or settings.json found)",
-            template_name,
-            template_dir.display()
-        );
-    }
-
+    // Note: template ディレクトリが存在してさえいれば、中身が 0 件でも
+    // valid（空の mounts を返す）。これは `--template blank` のようにして
+    // 「ホスト ~/.claude を一切 mount しない = 素の Claude 環境で走らせる」
+    // という明示的な opt-out パターンを許可するため。
     Ok(mounts)
 }

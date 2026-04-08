@@ -323,14 +323,27 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 4. Compute container name
     // --worktree: ランダムハッシュ（使い捨て）
-    // それ以外: プロジェクトパスの SHA256 先頭 8 文字（永続）
+    // それ以外: プロジェクトパス + template 名の SHA256 先頭 8 文字（永続）
+    //
+    // template を hash に含めることで、`--template rust-code` と
+    // `--template review` と host mode が **別々のコンテナ**として永続
+    // される。同一プロジェクトで template を切り替えるたびに `--new`
+    // 指定無しで自動的に適切なコンテナが使われる。
+    let effective_template = super::template::effective_template_name(opts);
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
             .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
     } else {
-        let hash = path_hash_8(&cwd_str);
+        // Include template in the hash input so different templates (or
+        // host mode) get distinct container names automatically.
+        let hash_input = format!(
+            "{}|template={}",
+            cwd_str,
+            effective_template.as_deref().unwrap_or("")
+        );
+        let hash = path_hash_8(&hash_input);
         format!("vibepod-{}-{}", project_name, hash)
     };
 
@@ -478,10 +491,9 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 9b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
     // vibepod v2 の mode 切り替え mechanism: --template 指定時は template
-    // mount、未指定時は従来の host mount を使う。label 計算と実 mount 構築
-    // の両方で同じ分岐結果を使うため、ここで一度だけ resolve する。
+    // mount、未指定時は従来の host mount を使う。`effective_template` は
+    // 既に container_name 計算時 (step 4) に resolve 済み。
     let home = crate::config::home_dir()?;
-    let effective_template = super::template::effective_template_name(opts);
 
     // claude_config_mounts / host_settings_exists は label 計算（9b）と
     // extra_mounts 構築（下部）の両方で共有される。1 度だけ計算して使い回す。

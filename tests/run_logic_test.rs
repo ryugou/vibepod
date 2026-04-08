@@ -559,19 +559,16 @@ fn test_build_template_mounts_missing_template_errors() {
 }
 
 #[test]
-fn test_build_template_mounts_empty_template_errors() {
-    // template ディレクトリは存在するが中身が全く無いケース
+fn test_build_template_mounts_empty_template_returns_zero_mounts() {
+    // 空 template (ディレクトリだけあって中身 0 件) は「ホストの
+    // ~/.claude を一切 mount しない = 素の Claude 環境で走らせる」
+    // という opt-out パターン。エラーではなく空 Vec を返す。
     let config_dir = tempfile::tempdir().unwrap();
-    let template_dir = config_dir.path().join("templates").join("empty");
+    let template_dir = config_dir.path().join("templates").join("blank");
     std::fs::create_dir_all(&template_dir).unwrap();
 
-    let err = build_template_mounts("empty", config_dir.path()).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("empty"),
-        "expected 'empty' error, got: {}",
-        msg
-    );
+    let mounts = build_template_mounts("blank", config_dir.path()).unwrap();
+    assert_eq!(mounts.len(), 0);
 }
 
 #[test]
