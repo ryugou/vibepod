@@ -518,6 +518,31 @@ fn test_effective_template_name_interactive_ignores_default() {
     assert_eq!(effective_template_name(&opts, &config), None);
 }
 
+#[test]
+fn test_effective_template_name_worktree_ignores_default() {
+    // --worktree + --prompt でも default template は適用しない。
+    // worktree + template の併用は prepare_context で拒否されるため、
+    // config による暗黙切替が worktree 実行を破壊しないよう guard する。
+    let mut opts = make_run_options(None, Some("implement X"));
+    opts.worktree = true;
+    let config = config_with_default_template("rust-code");
+    assert_eq!(effective_template_name(&opts, &config), None);
+}
+
+#[test]
+fn test_effective_template_name_worktree_still_honors_explicit_template() {
+    // --worktree + 明示的 --template は effective_template_name としては
+    // Some を返す (最終的な拒否は prepare_context の guard が行う)。
+    // これにより拒否のエラーメッセージがユーザーに届く。
+    let mut opts = make_run_options(Some("rust-code"), Some("implement X"));
+    opts.worktree = true;
+    let config = config_with_default_template("review");
+    assert_eq!(
+        effective_template_name(&opts, &config),
+        Some("rust-code".to_string())
+    );
+}
+
 // --- build_template_mounts ---
 
 #[test]

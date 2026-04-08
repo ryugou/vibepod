@@ -48,7 +48,11 @@ pub fn effective_template_name(
     if let Some(name) = &opts.template {
         return Some(name.clone());
     }
-    if opts.prompt.is_some() {
+    // `--worktree` 指定時は default template を適用しない。
+    // `--worktree` と template モードの併用は Phase 2 で明示的に拒否
+    // しているため (`prepare_context` の guard 参照)、config による
+    // 暗黙切替で worktree+template 組み合わせに入ってしまうのを防ぐ。
+    if opts.prompt.is_some() && !opts.worktree {
         if let Some(default) = config.default_prompt_template() {
             return Some(default);
         }
