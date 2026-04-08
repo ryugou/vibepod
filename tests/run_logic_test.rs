@@ -454,22 +454,49 @@ fn empty_config() -> vibepod::config::VibepodConfig {
     vibepod::config::VibepodConfig::default()
 }
 
-fn config_with_default_template(name: &str) -> vibepod::config::VibepodConfig {
+/// Create a config dir (with no templates) and return its path-owning tempdir.
+fn empty_config_dir() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
+}
+
+/// Build a (config, config_dir) pair where the global config has
+/// `default_prompt_template = name` and a matching `templates/<name>/`
+/// directory exists so the existence check in `effective_template_name`
+/// passes.
+fn config_with_default_template(name: &str) -> (vibepod::config::VibepodConfig, tempfile::TempDir) {
     let toml_content = format!("[run]\ndefault_prompt_template = \"{}\"\n", name);
     let dir = tempfile::tempdir().unwrap();
-    let project_dir = dir.path().join("p");
-    let global_dir = dir.path().join("g");
+    let project_dir = dir.path().join("project");
+    let global_dir = dir.path().to_path_buf();
     std::fs::create_dir_all(&project_dir).unwrap();
-    std::fs::create_dir_all(&global_dir).unwrap();
     std::fs::write(global_dir.join("config.toml"), toml_content).unwrap();
-    vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap()
+    // Create the template dir so the existence check succeeds.
+    std::fs::create_dir_all(global_dir.join("templates").join(name)).unwrap();
+    let config = vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap();
+    (config, dir)
+}
+
+/// Same as above but **without** creating the template dir, used to
+/// verify the host-mount fallback when the configured default is missing.
+fn config_with_default_template_missing(
+    name: &str,
+) -> (vibepod::config::VibepodConfig, tempfile::TempDir) {
+    let toml_content = format!("[run]\ndefault_prompt_template = \"{}\"\n", name);
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    let global_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(global_dir.join("config.toml"), toml_content).unwrap();
+    let config = vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap();
+    (config, dir)
 }
 
 #[test]
 fn test_effective_template_name_returns_opts_template_when_set() {
     let opts = make_run_options(Some("rust-code"), None);
+    let cfg_dir = empty_config_dir();
     assert_eq!(
-        effective_template_name(&opts, &empty_config()),
+        effective_template_name(&opts, &empty_config(), cfg_dir.path()),
         Some("rust-code".to_string())
     );
 }
@@ -477,34 +504,53 @@ fn test_effective_template_name_returns_opts_template_when_set() {
 #[test]
 fn test_effective_template_name_returns_none_when_template_unset_interactive() {
     let opts = make_run_options(None, None);
-    assert_eq!(effective_template_name(&opts, &empty_config()), None);
+    let cfg_dir = empty_config_dir();
+    assert_eq!(
+        effective_template_name(&opts, &empty_config(), cfg_dir.path()),
+        None
+    );
 }
 
 #[test]
 fn test_effective_template_name_returns_none_when_prompt_no_default_config() {
     // --prompt あり、config に default_prompt_template なし → None
     let opts = make_run_options(None, Some("implement X"));
-    assert_eq!(effective_template_name(&opts, &empty_config()), None);
+    let cfg_dir = empty_config_dir();
+    assert_eq!(
+        effective_template_name(&opts, &empty_config(), cfg_dir.path()),
+        None
+    );
 }
 
 #[test]
-fn test_effective_template_name_returns_default_when_prompt_and_default_config() {
-    // --prompt あり、config に default_prompt_template あり → default を返す
+fn test_effective_template_name_returns_default_when_prompt_and_existing_template() {
+    // --prompt あり、config に default あり、template も存在する → default を返す
     let opts = make_run_options(None, Some("implement X"));
-    let config = config_with_default_template("rust-code");
+    let (config, dir) = config_with_default_template("rust-code");
     assert_eq!(
-        effective_template_name(&opts, &config),
+        effective_template_name(&opts, &config, dir.path()),
         Some("rust-code".to_string())
     );
 }
 
 #[test]
+fn test_effective_template_name_falls_back_when_default_template_missing() {
+    // --prompt あり、config に default あり、しかし template が
+    // ローカルにも embed にも存在しない → host mount フォールバック (None)。
+    // これによって「default を設定しただけで run が壊れる」事故を防ぐ。
+    let opts = make_run_options(None, Some("implement X"));
+    let (config, dir) = config_with_default_template_missing("ghost-template");
+    assert_eq!(effective_template_name(&opts, &config, dir.path()), None);
+}
+
+#[test]
 fn test_effective_template_name_opts_template_overrides_default() {
-    // opts.template が default を上書きする
+    // opts.template が default を上書きする (存在チェックは行わない:
+    // 明示指定はユーザー意図なので後段で fail-fast する)
     let opts = make_run_options(Some("review"), Some("implement X"));
-    let config = config_with_default_template("rust-code");
+    let (config, dir) = config_with_default_template("rust-code");
     assert_eq!(
-        effective_template_name(&opts, &config),
+        effective_template_name(&opts, &config, dir.path()),
         Some("review".to_string())
     );
 }
@@ -514,8 +560,8 @@ fn test_effective_template_name_interactive_ignores_default() {
     // interactive mode (prompt is None) では default template も無視して
     // host mount にフォールバック
     let opts = make_run_options(None, None);
-    let config = config_with_default_template("rust-code");
-    assert_eq!(effective_template_name(&opts, &config), None);
+    let (config, dir) = config_with_default_template("rust-code");
+    assert_eq!(effective_template_name(&opts, &config, dir.path()), None);
 }
 
 #[test]
@@ -525,8 +571,8 @@ fn test_effective_template_name_worktree_ignores_default() {
     // config による暗黙切替が worktree 実行を破壊しないよう guard する。
     let mut opts = make_run_options(None, Some("implement X"));
     opts.worktree = true;
-    let config = config_with_default_template("rust-code");
-    assert_eq!(effective_template_name(&opts, &config), None);
+    let (config, dir) = config_with_default_template("rust-code");
+    assert_eq!(effective_template_name(&opts, &config, dir.path()), None);
 }
 
 #[test]
@@ -536,9 +582,9 @@ fn test_effective_template_name_worktree_still_honors_explicit_template() {
     // これにより拒否のエラーメッセージがユーザーに届く。
     let mut opts = make_run_options(Some("rust-code"), Some("implement X"));
     opts.worktree = true;
-    let config = config_with_default_template("review");
+    let (config, dir) = config_with_default_template("review");
     assert_eq!(
-        effective_template_name(&opts, &config),
+        effective_template_name(&opts, &config, dir.path()),
         Some("rust-code".to_string())
     );
 }

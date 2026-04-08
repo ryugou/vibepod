@@ -350,7 +350,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // に落ちる（raw 名を使うと 2 つの container に split されてしまう）。
     // 同時に、resolve_template_dir が symlink escape を防ぐので path
     // traversal の心配もない。
-    let effective_template = super::template::effective_template_name(opts, &vibepod_config);
+    let effective_template =
+        super::template::effective_template_name(opts, &vibepod_config, &config_dir);
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
             .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))

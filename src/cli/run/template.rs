@@ -29,32 +29,56 @@ pub static EMBEDDED_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templ
 /// 適用すべき template 名を決定する。
 ///
 /// 優先順位:
-/// 1. `opts.template` が `Some` → そのまま使う（ユーザー明示指定）
-/// 2. `opts.prompt` が `Some` かつ `config.default_prompt_template()`
-///    が `Some` → config で指定されたデフォルトを使う（`vibepod template
-///    set-default <name>` で設定される値）
-/// 3. それ以外（interactive / template 未設定） → `None` を返して
-///    host mount path にフォールバックする（v1.4.3 互換挙動）
+/// 1. `opts.template` が `Some` → そのまま使う（ユーザー明示指定）。
+///    存在チェックはここでは行わない: 明示指定はユーザー意図なので、
+///    後段で「Template not found」エラーを出して fail-fast したい。
+/// 2. `opts.prompt` が `Some` かつ `opts.worktree` が `false` かつ
+///    `config.default_prompt_template()` が `Some` → config で指定された
+///    デフォルトを使う（`vibepod template set-default <name>`）。
+///    **ただし** その template が embedded / user いずれにも存在しない
+///    場合は `None` を返してホストマウントにフォールバックする
+///    （config はあくまで best-effort なので、未展開・未配置の template
+///    名で run が壊れるのを防ぐ）。
+/// 3. それ以外（interactive / worktree / 該当 template なし） → `None`
+///    を返して host mount path にフォールバックする（v1.4.3 互換挙動）。
 ///
-/// 注意: 2. が効くのは `--prompt` mode だけ。interactive でも
+/// 注意:
+///
+/// 上記 2 番のルールが効くのは `--prompt` mode だけ。interactive でも
 /// `--template` 未指定なら host mount のまま。これは interactive が
 /// 「ユーザー個人環境を使う」前提で、default template のような
-/// opinionated な切替は `--prompt` autonomous 実行にだけ効かせたい
-/// ため。
+/// opinionated な切替は `--prompt` autonomous 実行にだけ効かせたいため。
+///
+/// `--worktree` 指定時は default template も適用しない。`--worktree`
+/// と template モードの併用は Phase 2 で明示的に拒否しているため
+/// (`prepare_context` の guard 参照)、config による暗黙切替で
+/// worktree+template 組み合わせに入ってしまうのを防ぐ。
 pub fn effective_template_name(
     opts: &RunOptions,
     config: &crate::config::VibepodConfig,
+    config_dir: &Path,
 ) -> Option<String> {
     if let Some(name) = &opts.template {
         return Some(name.clone());
     }
-    // `--worktree` 指定時は default template を適用しない。
-    // `--worktree` と template モードの併用は Phase 2 で明示的に拒否
-    // しているため (`prepare_context` の guard 参照)、config による
-    // 暗黙切替で worktree+template 組み合わせに入ってしまうのを防ぐ。
     if opts.prompt.is_some() && !opts.worktree {
         if let Some(default) = config.default_prompt_template() {
-            return Some(default);
+            // Best-effort: embedded / user のどちらかに存在する場合のみ
+            // template モードへ切り替える。存在しなければ host mount に
+            // フォールバックして v1.4.3 互換動作を維持する。
+            // (Phase 3 時点では templates-data/ は空なので、デフォルトは
+            // 常に host mount にフォールバックする。Phase 4 で公式 template
+            // が embed されると自動的に効き始める。)
+            let embedded = embedded_template_names();
+            if embedded.iter().any(|n| n == &default) {
+                return Some(default);
+            }
+            let user = user_template_names(config_dir);
+            if user.iter().any(|n| n == &default) {
+                return Some(default);
+            }
+            // 存在しない: host mount フォールバック
+            return None;
         }
     }
     None
