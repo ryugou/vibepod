@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
             worktree,
             mount,
             new,
+            template,
         } => {
             vibepod::cli::run::execute(vibepod::cli::run::RunOptions {
                 resume,
@@ -39,6 +40,7 @@ async fn main() -> Result<()> {
                 worktree,
                 mount,
                 new_container: new,
+                template,
             })
             .await?;
         }

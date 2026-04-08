@@ -8,6 +8,7 @@ mod interactive;
 pub mod lock;
 mod prepare;
 mod prompt;
+pub mod template;
 
 /// CLI `run` サブコマンドのオプション
 ///
@@ -23,6 +24,10 @@ pub struct RunOptions {
     pub mount: Vec<String>,
     /// `--new` フラグ: 既存コンテナを破棄して新規作成する
     pub new_container: bool,
+    /// `--template <name>` フラグ: vibepod 管理の template を
+    /// `/home/vibepod/.claude/` にマウントする。未指定時は host の
+    /// `~/.claude/` をマウントする（v1.4.3 互換挙動）
+    pub template: Option<String>,
 }
 
 pub(super) struct RunContext {

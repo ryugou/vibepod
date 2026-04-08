@@ -12,6 +12,15 @@ The container communicates with Claude's API as part of normal operation. This i
 
 **Note on external data transmission:** VibePod mounts host files into the container (`~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/`, `~/.claude/plugins/` as read-only, plus `~/.claude/settings.json` when present via a sanitized per-container copy) and injects `GH_TOKEN` when available. If your CLAUDE.md instructions, Claude settings, or any host-side plugins/skills mounted into the container trigger external review tools, repository content may reach additional external services via these credentials and configurations. VibePod itself does not pre-install any plugins inside the Docker image.
 
+### Template mode (`vibepod run --template <name>`)
+
+When `--template <name>` is passed, VibePod mounts `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/` in place of the host mounts described above. Important security notes:
+
+- **Template `settings.json` is NOT sanitized.** Unlike host mode, which strips `hooks` and `statusLine` from the host's `settings.json` via a per-container sanitized copy, template `settings.json` is bind-mounted as-is. A template that ships a malicious or leaky `settings.json` (hooks, statusLine, enabledPlugins pointing at network tools, etc.) will take effect inside the container unchanged. Do **not** put secrets or host-specific paths in a template you share or publish.
+- **Template `plugins/`** is mounted as a plain read-only bind. Phase 2 rejects templates that ship an `installed_plugins.json` registry because the absolute `installPath` values cannot resolve inside the container; Phase 3/4 will add a normalized distribution path for template-bundled plugins.
+- **Template name validation**: only `[a-zA-Z0-9_-]+` is accepted to block path traversal like `../etc` from escaping `~/.config/vibepod/templates/`.
+- `--worktree` and `--template` cannot be used together in Phase 2.
+
 ### GH_TOKEN automatic injection
 
 When `gh` is installed and authenticated on the host, VibePod runs `gh auth token` and injects the result as `GH_TOKEN` into the container. If `gh` is not installed or not authenticated, `GH_TOKEN` is not injected. When present, the container process has access to your host GitHub token and can perform GitHub operations (push, create PRs, call GitHub API) with the same permissions as your host user.

@@ -59,6 +59,11 @@ pub enum Commands {
         /// Force create a new container (error if running, replace if stopped)
         #[arg(long)]
         new: bool,
+        /// Mount a vibepod-managed template into /home/vibepod/.claude/ instead of
+        /// the host's ~/.claude/. Template directories live under
+        /// ~/.config/vibepod/templates/<name>/.
+        #[arg(long)]
+        template: Option<String>,
     },
     /// List running VibePod containers
     Ps {},

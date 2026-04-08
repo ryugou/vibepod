@@ -129,6 +129,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     if opts.worktree && opts.prompt.is_none() {
         bail!("--worktree requires --prompt");
     }
+    if opts.worktree && opts.template.is_some() {
+        // --worktree は毎回ランダム名の使い捨てコンテナを作る一方、
+        // --template は (project, template) ごとに永続コンテナを作る。
+        // この 2 つは命名モデルが衝突するため Phase 2 では同時指定を
+        // 禁止する。template 対応の worktree モードは将来の phase で検討。
+        bail!("--worktree and --template cannot be used together in Phase 2");
+    }
 
     // Record session for restore
     let head_before = git::get_head_hash(&cwd)?;
@@ -323,13 +330,34 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // 4. Compute container name
     // --worktree: ランダムハッシュ（使い捨て）
-    // それ以外: プロジェクトパスの SHA256 先頭 8 文字（永続）
+    // それ以外:
+    //   - host mode (--template 未指定): プロジェクトパスの SHA256 先頭 8 文字（v1.4.3 互換）
+    //   - template mode (--template <name>): プロジェクトパス + template の canonical path の SHA256
+    //
+    // template 指定時だけ hash を変えることで、template モードは host
+    // mode とは別の container に落ちつつ、既存の host mode container は
+    // v1.4.3 と同じ名前のままで互換性を保つ。
+    //
+    // template mode の hash 入力には **canonical path** を使う。これで
+    // macOS のような case-insensitive FS で `--template review` と
+    // `--template Review` が同じディレクトリに解決される場合に同じ container
+    // に落ちる（raw 名を使うと 2 つの container に split されてしまう）。
+    // 同時に、resolve_template_dir が symlink escape を防ぐので path
+    // traversal の心配もない。
+    let effective_template = super::template::effective_template_name(opts);
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
             .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
+    } else if let Some(ref tmpl) = effective_template {
+        // Template mode: canonical path を hash 入力に使う
+        let canonical_template = super::template::resolve_template_dir(tmpl, &config_dir)?;
+        let hash_input = format!("{}|template={}", cwd_str, canonical_template.display());
+        let hash = path_hash_8(&hash_input);
+        format!("vibepod-{}-{}", project_name, hash)
     } else {
+        // Host mode: v1.4.3 互換の hash 計算を維持
         let hash = path_hash_8(&cwd_str);
         format!("vibepod-{}-{}", project_name, hash)
     };
@@ -477,9 +505,25 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 9b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
-    // ~/.claude/ マウントも含めるため、home を先に解決する
-    let home_early_for_mounts = crate::config::home_dir()?;
-    let claude_config_mounts_for_label = super::build_claude_config_mounts(&home_early_for_mounts);
+    // vibepod v2 の mode 切り替え mechanism: --template 指定時は template
+    // mount、未指定時は従来の host mount を使う。`effective_template` は
+    // 既に container_name 計算時 (step 4) に resolve 済み。
+    let home = crate::config::home_dir()?;
+
+    // claude_config_mounts / host_settings_exists は label 計算（9b）と
+    // extra_mounts 構築（下部）の両方で共有される。1 度だけ計算して使い回す。
+    let (claude_config_mounts, host_settings_exists) =
+        if let Some(ref template_name) = effective_template {
+            // template mode: vibepod 管理の template 配下のみ。
+            // host の sanitized settings.json はマウントしない
+            let mounts = super::template::build_template_mounts(template_name, &config_dir)?;
+            (mounts, false)
+        } else {
+            // host mode: v1.4.3 互換挙動
+            let mounts = super::build_claude_config_mounts(&home);
+            let exists = home.join(".claude").join("settings.json").is_file();
+            (mounts, exists)
+        };
 
     if let Some(stored_labels) = stored_labels_opt {
         let mut mounts_parts: Vec<String> = Vec::new();
@@ -488,7 +532,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                 mounts_parts.push(format!("{}:{}", h, c));
             }
         }
-        for (h, c) in &claude_config_mounts_for_label {
+        for (h, c) in &claude_config_mounts {
             mounts_parts.push(format!("{}:{}", h, c));
         }
         // Sanitized settings: include only container destination in the label so
@@ -496,10 +540,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         // Use a dedicated prefix (SANITIZED_SETTINGS_LABEL_MARKER) so this
         // label-only marker cannot collide with a user-provided mount serialized
         // as "{host}:{container}".
-        let host_settings_exists = home_early_for_mounts
-            .join(".claude")
-            .join("settings.json")
-            .is_file();
         if host_settings_exists {
             mounts_parts.push(super::SANITIZED_SETTINGS_LABEL_MARKER.to_string());
         }
@@ -521,12 +561,42 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
 
+        // Template mode では mount set の変更は **critical**。
+        // docker のバインドマウントはコンテナ作成時に固定されるため、
+        // template に CLAUDE.md / skills/ / agents/ / plugins/ /
+        // settings.json を追加・削除しても既存コンテナには反映されない。
+        // warn_config_changes は通常の非致命的な変更（lang / env 等）の
+        // 警告表示用なので、template mode の mount 変更はそれより前に
+        // hard fail させる。
+        if effective_template.is_some() {
+            let stored_mounts_raw = stored_labels
+                .get("vibepod.mounts")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let current_mounts_raw = current_labels
+                .get("vibepod.mounts")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            // warn_config_changes と同じ legacy 正規化ロジックを適用
+            let stored_mounts = normalize_mounts_label_legacy(stored_mounts_raw);
+            if stored_mounts != current_mounts_raw {
+                bail!(
+                    "Template mount set changed since this container was created \
+                     (template: '{}'). Bind mounts are fixed at container creation \
+                     time, so edits that add or remove files/directories in the \
+                     template (CLAUDE.md, skills/, agents/, plugins/, settings.json) \
+                     cannot take effect on the existing container. Run with --new to \
+                     recreate the container with the updated mount set.",
+                    effective_template.as_deref().unwrap_or("")
+                );
+            }
+        }
+
         warn_config_changes(&stored_labels, &current_labels)?;
     }
 
     // 10. Auth: load token
     let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
-    let home = crate::config::home_dir()?;
     let claude_json = home.join(".claude.json");
 
     let token_data = auth_manager
@@ -585,17 +655,21 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         extra_mounts.push(parsed);
     }
 
-    // ~/.claude/ 配下のグローバル設定をマウント対象に追加（存在する場合のみ）
-    let claude_config_mounts = super::build_claude_config_mounts(&home);
+    // `claude_config_mounts` は 9b の分岐で既に解決済み（template mode なら
+    // template mount、host mode なら host mount）。ここで再計算せずに
+    // そのまま `extra_mounts` に積む。
     for (host, container) in &claude_config_mounts {
         extra_mounts.push((host.clone(), container.clone()));
     }
 
-    // ホスト ~/.claude/settings.json をサニタイズしてマウント対象に追加
-    if let Some((host, container)) =
-        super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
-    {
-        extra_mounts.push((host, container));
+    // Host mode の場合だけ sanitized settings.json を実際に生成してマウント
+    // に追加する。template mode では host の settings.json は触らない。
+    if effective_template.is_none() {
+        if let Some((host, container)) =
+            super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
+        {
+            extra_mounts.push((host, container));
+        }
     }
 
     Ok(Some(RunContext {

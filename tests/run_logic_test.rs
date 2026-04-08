@@ -1,7 +1,8 @@
 use vibepod::cli::run::{
     build_claude_config_mounts, detect_languages, get_lang_install_cmd, parse_mount_arg,
     plugins_mount_entries, prepare_sanitized_settings_mount, sanitize_settings_json,
-    validate_slack_channel_id,
+    template::{build_template_mounts, effective_template_name},
+    validate_slack_channel_id, RunOptions,
 };
 
 // --- detect_languages ---
@@ -426,5 +427,253 @@ fn test_prepare_sanitized_settings_mount_no_host_settings() {
     assert!(
         result.is_none(),
         "should return None when host settings.json is absent"
+    );
+}
+
+// --- effective_template_name (Phase 2) ---
+
+fn make_run_options(template: Option<&str>, prompt: Option<&str>) -> RunOptions {
+    RunOptions {
+        resume: false,
+        prompt: prompt.map(|s| s.to_string()),
+        no_network: false,
+        env_vars: Vec::new(),
+        env_file: None,
+        lang: None,
+        worktree: false,
+        mount: Vec::new(),
+        new_container: false,
+        template: template.map(|s| s.to_string()),
+    }
+}
+
+#[test]
+fn test_effective_template_name_returns_opts_template_when_set() {
+    let opts = make_run_options(Some("rust-code"), None);
+    assert_eq!(
+        effective_template_name(&opts),
+        Some("rust-code".to_string())
+    );
+}
+
+#[test]
+fn test_effective_template_name_returns_none_when_template_unset_interactive() {
+    let opts = make_run_options(None, None);
+    assert_eq!(effective_template_name(&opts), None);
+}
+
+#[test]
+fn test_effective_template_name_returns_none_when_template_unset_with_prompt() {
+    // Phase 2 の受け入れ基準: --prompt があっても --template 未指定なら
+    // None を返す（= host mount にフォールバック）。Phase 4 で
+    // default_prompt_template を参照するよう拡張される。
+    let opts = make_run_options(None, Some("implement X"));
+    assert_eq!(effective_template_name(&opts), None);
+}
+
+// --- build_template_mounts ---
+
+#[test]
+fn test_build_template_mounts_happy_path() {
+    // plain-file plugins (no installed_plugins.json registry) は許可
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("my-template");
+    std::fs::create_dir_all(template_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(template_dir.join("agents")).unwrap();
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(template_dir.join("CLAUDE.md"), "# test").unwrap();
+    std::fs::write(template_dir.join("settings.json"), "{}").unwrap();
+
+    let mounts = build_template_mounts("my-template", config_dir.path()).unwrap();
+
+    assert_eq!(mounts.len(), 5);
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/CLAUDE.md"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/skills"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/agents"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/plugins"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/settings.json"));
+}
+
+#[test]
+fn test_build_template_mounts_rejects_installed_plugins_json() {
+    // Phase 2 では installed_plugins.json を含む plugins は silent breakage を
+    // 避けるために明示的にエラーにする（Phase 3/4 で解決）
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("with-registry");
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(
+        template_dir.join("plugins").join("installed_plugins.json"),
+        r#"{"plugins": {}}"#,
+    )
+    .unwrap();
+
+    let err = build_template_mounts("with-registry", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("installed_plugins.json"),
+        "expected error mentioning installed_plugins.json, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("not supported yet") || msg.contains("Phase 3/4"),
+        "expected error mentioning phase 3/4 deferral, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_build_template_mounts_partial_content() {
+    // CLAUDE.md だけがある template
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("minimal");
+    std::fs::create_dir_all(&template_dir).unwrap();
+    std::fs::write(template_dir.join("CLAUDE.md"), "# minimal").unwrap();
+
+    let mounts = build_template_mounts("minimal", config_dir.path()).unwrap();
+
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].1, "/home/vibepod/.claude/CLAUDE.md");
+}
+
+#[test]
+fn test_build_template_mounts_missing_template_errors() {
+    let config_dir = tempfile::tempdir().unwrap();
+    // template ディレクトリを作らない
+    let err = build_template_mounts("nonexistent", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Template 'nonexistent' not found"),
+        "expected 'not found' error, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_build_template_mounts_empty_template_returns_zero_mounts() {
+    // 空 template (ディレクトリだけあって中身 0 件) は「ホストの
+    // ~/.claude を一切 mount しない = 素の Claude 環境で走らせる」
+    // という opt-out パターン。エラーではなく空 Vec を返す。
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("blank");
+    std::fs::create_dir_all(&template_dir).unwrap();
+
+    let mounts = build_template_mounts("blank", config_dir.path()).unwrap();
+    assert_eq!(mounts.len(), 0);
+}
+
+#[test]
+fn test_build_template_mounts_rejects_path_traversal() {
+    // `../` を含む template 名は path traversal の危険があるので
+    // 拒否する（`~/.config/vibepod/templates/` の外に出るのを防ぐ）
+    let config_dir = tempfile::tempdir().unwrap();
+    let err = build_template_mounts("../etc", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_slash_in_name() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let err = build_template_mounts("foo/bar", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_empty_name() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let err = build_template_mounts("", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("empty"),
+        "expected 'empty' error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_accepts_valid_names() {
+    // ASCII 英数字 / ハイフン / アンダースコアは OK。
+    // ディレクトリが無いので not found エラーで確認する（validation は通る）
+    let config_dir = tempfile::tempdir().unwrap();
+    for name in &["rust-code", "my_template", "abc123", "a-b_c-1"] {
+        let err = build_template_mounts(name, config_dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "valid name '{}' should pass validation but fail with 'not found', got: {}",
+            name,
+            msg
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_build_template_mounts_rejects_symlinked_entry_escape() {
+    // template 内の settings.json が template root 外のファイルへの
+    // symlink である場合、path traversal になるので reject する
+    use std::os::unix::fs::symlink;
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside_file = outside_dir.path().join("secret.json");
+    std::fs::write(&outside_file, r#"{"evil": true}"#).unwrap();
+
+    let template_dir = config_dir.path().join("templates").join("malicious");
+    std::fs::create_dir_all(&template_dir).unwrap();
+    symlink(&outside_file, template_dir.join("settings.json")).unwrap();
+
+    let err = build_template_mounts("malicious", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("symlink escape") || msg.contains("outside"),
+        "expected symlink escape error, got: {}",
+        msg
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_build_template_mounts_rejects_symlinked_template_dir_escape() {
+    // template ディレクトリそのものが templates root 外への symlink
+    // の場合も reject する
+    use std::os::unix::fs::symlink;
+
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(config_dir.path().join("templates")).unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    let evil_template = outside_dir.path().join("evil-template");
+    std::fs::create_dir_all(&evil_template).unwrap();
+    std::fs::write(evil_template.join("CLAUDE.md"), "# evil").unwrap();
+
+    symlink(
+        &evil_template,
+        config_dir.path().join("templates").join("rogue"),
+    )
+    .unwrap();
+
+    let err = build_template_mounts("rogue", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("symlink escape") || msg.contains("outside"),
+        "expected symlink escape error, got: {}",
+        msg
     );
 }
