@@ -28,15 +28,32 @@ pub static EMBEDDED_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templ
 
 /// 適用すべき template 名を決定する。
 ///
-/// Phase 2 では `opts.template` の値をそのまま返すだけ。ユーザーが
-/// 明示的に `--template <name>` を指定した場合のみ `Some` を返し、
-/// それ以外（interactive も `--prompt` も）は `None` を返して
-/// host mount path にフォールバックする。
+/// 優先順位:
+/// 1. `opts.template` が `Some` → そのまま使う（ユーザー明示指定）
+/// 2. `opts.prompt` が `Some` かつ `config.default_prompt_template()`
+///    が `Some` → config で指定されたデフォルトを使う（`vibepod template
+///    set-default <name>` で設定される値）
+/// 3. それ以外（interactive / template 未設定） → `None` を返して
+///    host mount path にフォールバックする（v1.4.3 互換挙動）
 ///
-/// Phase 4 で `opts.prompt.is_some()` の場合に config の
-/// `default_prompt_template` を返すよう拡張する予定。
-pub fn effective_template_name(opts: &RunOptions) -> Option<String> {
-    opts.template.clone()
+/// 注意: 2. が効くのは `--prompt` mode だけ。interactive でも
+/// `--template` 未指定なら host mount のまま。これは interactive が
+/// 「ユーザー個人環境を使う」前提で、default template のような
+/// opinionated な切替は `--prompt` autonomous 実行にだけ効かせたい
+/// ため。
+pub fn effective_template_name(
+    opts: &RunOptions,
+    config: &crate::config::VibepodConfig,
+) -> Option<String> {
+    if let Some(name) = &opts.template {
+        return Some(name.clone());
+    }
+    if opts.prompt.is_some() {
+        if let Some(default) = config.default_prompt_template() {
+            return Some(default);
+        }
+    }
+    None
 }
 
 /// 有効な template 名であることを検証する。
@@ -324,22 +341,46 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
         }
 
         let dest = templates_root.join(name);
-        if dest.is_dir() {
-            // ユーザー編集を上書きしない
-            continue;
-        }
-        if dest.exists() {
-            // ディレクトリではない何か（ファイル / symlink 等）が衝突して
-            // いる場合は silent に skip せず明示的にエラーにする。
-            // skip すると `template list` / `set-default` はこの template を
-            // 「存在する」と広告し続けるのに、実際に `vibepod run --template`
-            // する段階で「not found」になってしまい不整合を生む。
-            bail!(
-                "Cannot extract embedded template '{}': {} exists but is not a directory. \
-                 Remove or rename it to let vibepod materialize the embedded template.",
-                name,
-                dest.display()
-            );
+
+        // symlink を follow しない判定を使う。これにより
+        // `templates/<name>` が外部ディレクトリへの symlink の場合も
+        // 「正しい user template」として扱わず、明示的にエラーにする。
+        // そうしないと `template list` は embed を広告するのに
+        // `vibepod run --template <name>` は resolve_template_dir の
+        // symlink escape チェックで失敗し、CLI が自己矛盾する。
+        match std::fs::symlink_metadata(&dest) {
+            Ok(meta) => {
+                let ft = meta.file_type();
+                if ft.is_symlink() {
+                    bail!(
+                        "Cannot extract embedded template '{}': {} is a symlink, \
+                         which conflicts with the embedded template of the same name. \
+                         Remove or rename the symlink (it will be rejected as symlink \
+                         escape at runtime anyway).",
+                        name,
+                        dest.display()
+                    );
+                }
+                if ft.is_dir() {
+                    // 通常ディレクトリ: ユーザー編集を上書きしない
+                    continue;
+                }
+                // regular file or その他
+                bail!(
+                    "Cannot extract embedded template '{}': {} exists but is not a directory. \
+                     Remove or rename it to let vibepod materialize the embedded template.",
+                    name,
+                    dest.display()
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 存在しない → 下の extract_template_dir で展開する
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("Failed to stat template destination {}", dest.display())
+                });
+            }
         }
         extract_template_dir(embedded, &dest).with_context(|| {
             format!(

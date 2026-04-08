@@ -433,7 +433,7 @@ fn test_prepare_sanitized_settings_mount_no_host_settings() {
     );
 }
 
-// --- effective_template_name (Phase 2) ---
+// --- effective_template_name ---
 
 fn make_run_options(template: Option<&str>, prompt: Option<&str>) -> RunOptions {
     RunOptions {
@@ -450,11 +450,26 @@ fn make_run_options(template: Option<&str>, prompt: Option<&str>) -> RunOptions 
     }
 }
 
+fn empty_config() -> vibepod::config::VibepodConfig {
+    vibepod::config::VibepodConfig::default()
+}
+
+fn config_with_default_template(name: &str) -> vibepod::config::VibepodConfig {
+    let toml_content = format!("[run]\ndefault_prompt_template = \"{}\"\n", name);
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("p");
+    let global_dir = dir.path().join("g");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&global_dir).unwrap();
+    std::fs::write(global_dir.join("config.toml"), toml_content).unwrap();
+    vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap()
+}
+
 #[test]
 fn test_effective_template_name_returns_opts_template_when_set() {
     let opts = make_run_options(Some("rust-code"), None);
     assert_eq!(
-        effective_template_name(&opts),
+        effective_template_name(&opts, &empty_config()),
         Some("rust-code".to_string())
     );
 }
@@ -462,16 +477,45 @@ fn test_effective_template_name_returns_opts_template_when_set() {
 #[test]
 fn test_effective_template_name_returns_none_when_template_unset_interactive() {
     let opts = make_run_options(None, None);
-    assert_eq!(effective_template_name(&opts), None);
+    assert_eq!(effective_template_name(&opts, &empty_config()), None);
 }
 
 #[test]
-fn test_effective_template_name_returns_none_when_template_unset_with_prompt() {
-    // Phase 2 の受け入れ基準: --prompt があっても --template 未指定なら
-    // None を返す（= host mount にフォールバック）。Phase 4 で
-    // default_prompt_template を参照するよう拡張される。
+fn test_effective_template_name_returns_none_when_prompt_no_default_config() {
+    // --prompt あり、config に default_prompt_template なし → None
     let opts = make_run_options(None, Some("implement X"));
-    assert_eq!(effective_template_name(&opts), None);
+    assert_eq!(effective_template_name(&opts, &empty_config()), None);
+}
+
+#[test]
+fn test_effective_template_name_returns_default_when_prompt_and_default_config() {
+    // --prompt あり、config に default_prompt_template あり → default を返す
+    let opts = make_run_options(None, Some("implement X"));
+    let config = config_with_default_template("rust-code");
+    assert_eq!(
+        effective_template_name(&opts, &config),
+        Some("rust-code".to_string())
+    );
+}
+
+#[test]
+fn test_effective_template_name_opts_template_overrides_default() {
+    // opts.template が default を上書きする
+    let opts = make_run_options(Some("review"), Some("implement X"));
+    let config = config_with_default_template("rust-code");
+    assert_eq!(
+        effective_template_name(&opts, &config),
+        Some("review".to_string())
+    );
+}
+
+#[test]
+fn test_effective_template_name_interactive_ignores_default() {
+    // interactive mode (prompt is None) では default template も無視して
+    // host mount にフォールバック
+    let opts = make_run_options(None, None);
+    let config = config_with_default_template("rust-code");
+    assert_eq!(effective_template_name(&opts, &config), None);
 }
 
 // --- build_template_mounts ---
