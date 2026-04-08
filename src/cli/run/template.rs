@@ -426,13 +426,37 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
                 });
             }
         }
-        extract_template_dir(embedded, &dest).with_context(|| {
+        // 部分展開で「中途半端な dir が残ったまま skip され続ける」事故を
+        // 防ぐため、まず兄弟ディレクトリ `<name>.tmp-<pid>` に展開して
+        // 完了後に rename で原子的に dest に移す。途中で失敗した場合は
+        // tmp dir を best-effort で削除し、次回呼び出し時に dest が無い
+        // 状態に戻す (rename 前なので「ある or ない」しか観測されない)。
+        let tmp_dest = templates_root.join(format!("{}.tmp-{}", name, std::process::id()));
+        if tmp_dest.exists() {
+            // 過去 run の残骸 (同 PID 衝突は事実上無視できるが念のため)
+            let _ = std::fs::remove_dir_all(&tmp_dest);
+        }
+        if let Err(err) = extract_template_dir(embedded, &tmp_dest).with_context(|| {
             format!(
-                "Failed to extract embedded template '{}' to {}",
+                "Failed to extract embedded template '{}' to staging dir {}",
                 name,
+                tmp_dest.display()
+            )
+        }) {
+            let _ = std::fs::remove_dir_all(&tmp_dest);
+            return Err(err);
+        }
+        if let Err(err) = std::fs::rename(&tmp_dest, &dest).with_context(|| {
+            format!(
+                "Failed to install embedded template '{}' from {} to {}",
+                name,
+                tmp_dest.display(),
                 dest.display()
             )
-        })?;
+        }) {
+            let _ = std::fs::remove_dir_all(&tmp_dest);
+            return Err(err);
+        }
     }
     Ok(())
 }
