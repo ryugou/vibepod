@@ -97,7 +97,28 @@
       "Bash(systemctl:*)",
       "Bash(service:*)",
       "Bash(kill:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+
+      "Bash(sh -c:*)",
+      "Bash(bash -c:*)",
+      "Bash(zsh -c:*)",
+      "Bash(dash -c:*)",
+      "Bash(python -c:*)",
+      "Bash(python3 -c:*)",
+      "Bash(python -m:*)",
+      "Bash(python3 -m:*)",
+      "Bash(node -e:*)",
+      "Bash(node --eval:*)",
+      "Bash(ruby -e:*)",
+      "Bash(perl -e:*)",
+      "Bash(php -r:*)",
+      "Bash(deno eval:*)",
+      "Bash(deno run:*)",
+      "Bash(bun run:*)",
+      "Bash(bun:*)",
+      "Bash(xargs:*)",
+      "Bash(eval:*)",
+      "Bash(source:*)"
     ]
   }
 }
