@@ -4,9 +4,26 @@
 //! 実 mount 処理は `src/cli/run/template.rs` 側、こちらは UI と管理操作のみ。
 
 use anyhow::{bail, Result};
+use std::path::Path;
 
 use crate::cli::run::template::{embedded_template_names, user_template_names};
 use crate::config;
+
+/// グローバル `~/.config/vibepod/config.toml` から `[run] default_prompt_template`
+/// の値を直接読む（プロジェクト設定の override は適用しない）。
+///
+/// `template list` の `<<default>>` 表示と `template set-default` が更新する
+/// 書き込み先を一致させるための helper。
+fn read_global_default_prompt_template(global_config_dir: &Path) -> Option<String> {
+    let config_path = global_config_dir.join("config.toml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let parsed: toml::Value = toml::from_str(&content).ok()?;
+    parsed
+        .get("run")
+        .and_then(|run| run.get("default_prompt_template"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
 
 /// `vibepod template list`: 公式 + ユーザー追加の template 一覧を表示。
 ///
@@ -32,10 +49,13 @@ pub fn list() -> Result<()> {
         .filter(|n| !user_names.contains(n))
         .collect();
 
-    // デフォルト template 名を config.toml から読む
-    let vibepod_config =
-        config::VibepodConfig::load(&std::env::current_dir()?, &config_dir).unwrap_or_default();
-    let default_name = vibepod_config.default_prompt_template();
+    // デフォルト template 名は **global config.toml のみ** から読む。
+    // VibepodConfig::load() を通すとプロジェクト `.vibepod/config.toml`
+    // の override が効いてしまい、`template set-default` がグローバル
+    // 設定を更新しても `template list` の表示が変わらない不整合が起きる
+    // （`set-default` は global 限定の操作なので、`list` の `<<default>>`
+    // 表示もグローバル値に揃えるのが一貫性のある挙動）。
+    let default_name = read_global_default_prompt_template(&config_dir);
 
     let mut all: Vec<(String, bool, bool)> = Vec::new(); // (name, is_embedded, is_default)
     for name in &embedded_names {

@@ -334,6 +334,22 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
 }
 
 /// `include_dir::Dir` を指定されたパスに再帰的に展開する内部ヘルパー。
+///
+/// # 実行権限の扱い
+///
+/// `include_dir` クレートは埋め込み時にファイルの POSIX mode を保存
+/// しないため、展開後のファイルは umask 準拠のデフォルト（通常 0644）
+/// になる。template 内に実行可能ファイル（hook script 等）がある場合、
+/// そのままでは実行できない。
+///
+/// Phase 3 では以下のヒューリスティックで救済する:
+/// - ファイル名が `.sh` / `.bash` / `.zsh` / `.fish` で終わる
+/// - ファイルがディレクトリ `bin/` / `scripts/` 配下にある
+///
+/// これらに該当する場合は `0755` を設定する。それ以外は umask 任せ。
+/// 将来的に他パターンが必要になったら拡張するか、template 側に
+/// `.vibepod-executable` のような metadata ファイルで宣言させる仕組みを
+/// 入れる。
 fn extract_template_dir(dir: &Dir<'_>, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)
         .with_context(|| format!("Failed to create directory: {}", dest.display()))?;
@@ -346,6 +362,20 @@ fn extract_template_dir(dir: &Dir<'_>, dest: &Path) -> Result<()> {
         let file_path = dest.join(file_name);
         std::fs::write(&file_path, file.contents())
             .with_context(|| format!("Failed to write {}", file_path.display()))?;
+
+        #[cfg(unix)]
+        {
+            if should_be_executable(file.path()) {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&file_path)
+                    .with_context(|| format!("Failed to read metadata of {}", file_path.display()))?
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&file_path, perms).with_context(|| {
+                    format!("Failed to set exec bits on {}", file_path.display())
+                })?;
+            }
+        }
     }
 
     for subdir in dir.dirs() {
@@ -358,4 +388,28 @@ fn extract_template_dir(dir: &Dir<'_>, dest: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Phase 3 heuristic: 展開されたファイルに実行権限を付けるべきか。
+///
+/// extension または親ディレクトリ名で判定する。
+#[cfg(unix)]
+fn should_be_executable(path: &Path) -> bool {
+    // 拡張子判定
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if matches!(ext, "sh" | "bash" | "zsh" | "fish") {
+            return true;
+        }
+    }
+    // ディレクトリ名判定
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component {
+            if let Some(s) = name.to_str() {
+                if matches!(s, "bin" | "scripts") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
