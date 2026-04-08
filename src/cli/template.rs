@@ -206,3 +206,68 @@ pub fn set_default(name: &str) -> Result<()> {
     println!("Default template set to: {}", name);
     Ok(())
 }
+
+/// `vibepod template reset <name> [--force]`: 埋め込み template を
+/// 強制的に再展開する。既存の `~/.config/vibepod/templates/<name>/`
+/// は削除され、vibepod binary から新しいコピーが展開される。
+///
+/// 用途: vibepod 本体をアップグレードして embedded template の中身
+/// (特に `plugins/`) が更新されたとき、既に extract 済みのユーザーが
+/// 新しい bundle を取り込むために使う。通常の extract は冪等で既存を
+/// 保護するため、このコマンドが無いと古い bundle を持ち続ける。
+///
+/// **警告**: 対象 dir 配下でユーザーが行った編集は消える。`--force`
+/// を明示的に付けないと拒否する。
+pub fn reset(name: &str, force: bool) -> Result<()> {
+    let config_dir = config::default_config_dir()?;
+
+    // embedded 集合にある名前だけ reset 対象にする。user-only template の
+    // reset は意味不明 (復元元が無い) なのでエラーにする。
+    let embedded = crate::cli::run::template::embedded_template_names();
+    if !embedded.iter().any(|n| n == name) {
+        bail!(
+            "Template '{}' is not an embedded template and cannot be reset. \
+             Available embedded templates: {}",
+            name,
+            if embedded.is_empty() {
+                "(none)".to_string()
+            } else {
+                embedded.join(", ")
+            }
+        );
+    }
+
+    let target = config_dir.join("templates").join(name);
+
+    if !force {
+        bail!(
+            "Refusing to reset template '{}' without --force. The target directory \
+             '{}' will be removed and re-extracted from the vibepod binary. Any user \
+             edits inside that directory will be lost. Pass --force to confirm.",
+            name,
+            target.display()
+        );
+    }
+
+    // 既存 dir の削除 (存在する場合のみ)。存在しなくてもエラーにしない
+    // (単に「最新バイナリから fresh 展開する」になる)。
+    if target.exists() || target.is_symlink() {
+        std::fs::remove_dir_all(&target).with_context(|| {
+            format!(
+                "Failed to remove existing template directory: {}",
+                target.display()
+            )
+        })?;
+    }
+
+    // 単一ターゲット再展開。`extract_single_embedded_template_if_missing`
+    // は既存 dir を保護するが、ここでは直前に削除したので fresh 展開が走る。
+    crate::cli::run::template::extract_single_embedded_template_if_missing(&config_dir, name)?;
+
+    println!(
+        "Template '{}' reset: fresh copy extracted to {}",
+        name,
+        target.display()
+    );
+    Ok(())
+}

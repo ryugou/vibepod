@@ -114,4 +114,17 @@ pub enum TemplateSubcommand {
         /// Template name (must exist in `vibepod template list`)
         name: String,
     },
+    /// Re-extract an embedded template from the vibepod binary.
+    ///
+    /// Use this after upgrading vibepod if the bundled template has changed
+    /// (e.g. new plugin bundle). The existing directory is removed and
+    /// replaced with a fresh extraction from the binary. **User edits to the
+    /// target directory are lost.** Pass `--force` to confirm.
+    Reset {
+        /// Template name (must be an embedded template)
+        name: String,
+        /// Confirm that existing edits in the target directory will be lost
+        #[arg(long)]
+        force: bool,
+    },
 }

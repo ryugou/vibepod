@@ -638,6 +638,64 @@ fn test_build_template_mounts_happy_path() {
 }
 
 #[test]
+fn test_build_template_mounts_rejects_registry_missing_plugins_field() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("broken");
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(
+        template_dir.join("plugins").join("installed_plugins.json"),
+        r#"{"version": 2}"#,
+    )
+    .unwrap();
+
+    let err = build_template_mounts("broken", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("missing a top-level 'plugins' object"),
+        "expected shape-error about missing plugins field, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_registry_entries_not_array() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("broken2");
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(
+        template_dir.join("plugins").join("installed_plugins.json"),
+        r#"{"version": 2, "plugins": {"superpowers@claude-plugins-official": "not-an-array"}}"#,
+    )
+    .unwrap();
+
+    let err = build_template_mounts("broken2", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("must be an array"),
+        "expected shape-error about non-array entries, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_registry_entry_missing_installpath() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("broken3");
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(
+        template_dir.join("plugins").join("installed_plugins.json"),
+        r#"{"version": 2, "plugins": {"superpowers@claude-plugins-official": [{"version": "5.0.7"}]}}"#,
+    )
+    .unwrap();
+
+    let err = build_template_mounts("broken3", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("missing a string 'installPath'"),
+        "expected shape-error about missing installPath, got: {}",
+        err
+    );
+}
+
+#[test]
 fn test_build_template_mounts_rejects_host_installpath_in_registry() {
     // user が host install を copy して作った template だと、
     // installed_plugins.json に host 絶対パス (/Users/alice/...) が

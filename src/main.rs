@@ -70,6 +70,9 @@ async fn main() -> Result<()> {
             TemplateSubcommand::SetDefault { name } => {
                 vibepod::cli::template::set_default(&name)?;
             }
+            TemplateSubcommand::Reset { name, force } => {
+                vibepod::cli::template::reset(&name, force)?;
+            }
         },
     }
 

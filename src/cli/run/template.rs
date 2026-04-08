@@ -338,22 +338,74 @@ fn validate_template_installed_plugins(registry_path: &Path, template_name: &str
     let value: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse {} as JSON", registry_path.display()))?;
 
-    // top-level `plugins` object: { "<id>": [ { "installPath": "...", ... }, ... ], ... }
-    let plugins_obj = match value.get("plugins").and_then(|v| v.as_object()) {
-        Some(o) => o,
-        None => return Ok(()), // registry が空・不正なら他の plugin が無いのと同じ扱いで通す
-    };
+    // Fail fast on malformed shapes. silent な「欠けてたら skip」を許す
+    // と、壊れた registry を通してしまって container 内で plugin が
+    // silent に解決されない状態を再生産する。期待 shape:
+    //   {
+    //     "version": 2,
+    //     "plugins": {
+    //       "<plugin-id>": [
+    //         { "installPath": "/home/vibepod/.claude/plugins/...", ... },
+    //         ...
+    //       ],
+    //       ...
+    //     }
+    //   }
+    let root = value.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Template '{}' plugin registry {} is not a JSON object at top level",
+            template_name,
+            registry_path.display()
+        )
+    })?;
+    let plugins_obj = root
+        .get("plugins")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Template '{}' plugin registry {} is missing a top-level 'plugins' object",
+                template_name,
+                registry_path.display()
+            )
+        })?;
 
     for (plugin_id, entries) in plugins_obj.iter() {
-        let array = match entries.as_array() {
-            Some(a) => a,
-            None => continue,
-        };
+        let array = entries.as_array().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Template '{}' plugin registry: '{}' must be an array of install entries",
+                template_name,
+                plugin_id
+            )
+        })?;
+        if array.is_empty() {
+            bail!(
+                "Template '{}' plugin registry: '{}' has an empty install-entries array; \
+                 remove the plugin id or add a valid entry",
+                template_name,
+                plugin_id
+            );
+        }
         for (idx, entry) in array.iter().enumerate() {
-            let install_path = match entry.get("installPath").and_then(|v| v.as_str()) {
-                Some(p) => p,
-                None => continue, // installPath が無いエントリは skip
-            };
+            let entry_obj = entry.as_object().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Template '{}' plugin registry: '{}' entry {} is not a JSON object",
+                    template_name,
+                    plugin_id,
+                    idx
+                )
+            })?;
+            let install_path = entry_obj
+                .get("installPath")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Template '{}' plugin registry: '{}' entry {} is missing a string \
+                         'installPath' field",
+                        template_name,
+                        plugin_id,
+                        idx
+                    )
+                })?;
             if !install_path.starts_with(TEMPLATE_PLUGINS_CONTAINER_PREFIX) {
                 bail!(
                     "Template '{}' plugin registry has non-container installPath for \
