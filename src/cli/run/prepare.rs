@@ -362,13 +362,43 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         // まず要求された template をそのまま resolve する。user-provided
         // の template は embedded extraction に依存せず、read-only
         // `~/.config/vibepod/` でもそのまま使えるべき。初回で resolve
-        // できなかった場合のみ embedded 展開を試みて再 resolve する。
-        // これにより、例えば「embed に同名 template が存在し、かつ user
-        // は別 template を使いたい」ケースでも不要な書き込みを発生させない。
+        // できなかった場合、**かつ要求された名前が実際に embedded 集合に
+        // 存在する** 場合のみ embedded 展開を試みて再 resolve する。
+        // これにより:
+        //   - typo (`--template rustcod`) による書き込み発生 & 誤解を招く
+        //     エラーメッセージ (`Failed to create templates root`) を防ぐ
+        //   - user-provided template だけを期待する read-only setup で
+        //     typo が無駄な mutation を起こさない
+        //   - 素直な「Template 'rustcod' not found」エラーで返す
         let canonical_template = match super::template::resolve_template_dir(tmpl, &config_dir) {
             Ok(path) => path,
-            Err(_) => {
-                super::template::extract_embedded_templates_if_missing(&config_dir)?;
+            Err(first_err) => {
+                // extract gate は **厳密一致** のみ許容する。
+                // case-insensitive 比較だと Linux (case-sensitive FS) で
+                // `--template Review` が「embedded 名に該当する」と判定
+                // されて不要な extraction (または read-only setup での
+                // write エラー) を引き起こすため。
+                //
+                // macOS のような case-insensitive FS では、正しい大文字
+                // 小文字 (`--template review`) で 1 度でも実行すれば
+                // extraction が走り、以降 `Review` 等の case variant は
+                // resolve_template_dir の FS-level case-insensitive 解決
+                // で通るようになる。初回の miscased 呼び出しは「Template
+                // 'Review' not found」で素直に返すのが正しい挙動。
+                let is_embedded = super::template::embedded_template_names()
+                    .iter()
+                    .any(|n| n == tmpl);
+                if !is_embedded {
+                    // user-provided 前提で resolve 失敗: そのまま元のエラーを返す。
+                    // extract を呼ばないので `~/.config/vibepod/templates/` は
+                    // 作られない。
+                    return Err(first_err);
+                }
+                // 要求が embedded 名: その template **だけ** を lazy
+                // 展開して再 resolve。他の embedded template (例: 壊れた
+                // `templates/review`) の影響で rust-code の展開が止まら
+                // ないよう、単一 template ターゲットの API を使う。
+                super::template::extract_single_embedded_template_if_missing(&config_dir, tmpl)?;
                 super::template::resolve_template_dir(tmpl, &config_dir)?
             }
         };

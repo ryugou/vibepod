@@ -3,7 +3,8 @@ use vibepod::cli::run::{
     plugins_mount_entries, prepare_sanitized_settings_mount, sanitize_settings_json,
     template::{
         build_template_mounts, effective_template_name, embedded_template_names,
-        extract_embedded_templates_if_missing, user_template_names,
+        extract_embedded_templates_if_missing, extract_single_embedded_template_if_missing,
+        user_template_names,
     },
     validate_slack_channel_id, RunOptions,
 };
@@ -914,20 +915,40 @@ fn test_user_template_names_propagates_unreadable_dir() {
 }
 
 #[test]
-fn test_extract_embedded_templates_noop_when_embed_empty() {
-    // Phase 3 時点では templates-data/ は空（.gitkeep のみ）なので
-    // embed には何も入っていない。この場合 extract は **完全な no-op**
-    // で、`~/.config/vibepod/templates/` を作らない（read-only HOME
-    // 対応のため）。Phase 4 で embed が populated されたら、この test
-    // は templates root が作られる assert に変わる（その時点で rename
-    // + assertion 更新）。
+fn test_extract_embedded_templates_creates_official_templates() {
+    // Phase 4 で templates-data/ に rust-code と review が追加されたので、
+    // extract で `~/.config/vibepod/templates/rust-code/` と
+    // `~/.config/vibepod/templates/review/` が作られることを確認する。
     let config_dir = tempfile::tempdir().unwrap();
     assert!(!config_dir.path().join("templates").exists());
 
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
 
-    // embed が空なので書き込み発生しない
-    assert!(!config_dir.path().join("templates").exists());
+    let templates = config_dir.path().join("templates");
+    assert!(templates.is_dir(), "templates root should be created");
+    assert!(
+        templates.join("rust-code").is_dir(),
+        "rust-code template should be extracted"
+    );
+    assert!(
+        templates.join("review").is_dir(),
+        "review template should be extracted"
+    );
+    // トップ階層に marker が書かれていること
+    assert!(
+        templates
+            .join("rust-code")
+            .join(".vibepod-embedded")
+            .is_file(),
+        "rust-code should have embedded marker"
+    );
+    assert!(
+        templates.join("review").join(".vibepod-embedded").is_file(),
+        "review should have embedded marker"
+    );
+    // CLAUDE.md が存在すること (template の中身が再帰的に展開されている)
+    assert!(templates.join("rust-code").join("CLAUDE.md").is_file());
+    assert!(templates.join("review").join("CLAUDE.md").is_file());
 }
 
 #[test]
@@ -936,30 +957,74 @@ fn test_extract_embedded_templates_is_idempotent() {
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
-    // 再呼び出しでもエラーにならないことを確認
+    // 再呼び出しでもエラーにならず、結果が安定していること
+    let templates = config_dir.path().join("templates");
+    assert!(templates.join("rust-code").is_dir());
+    assert!(templates.join("review").is_dir());
 }
 
 #[test]
 fn test_extract_embedded_templates_preserves_existing_user_dir() {
     let config_dir = tempfile::tempdir().unwrap();
+    // ユーザーが独自の (embedded に含まれない) template を作っている場合、
+    // extract で公式 template が展開されても、ユーザー template は
+    // 触られない。
     let user_template = config_dir.path().join("templates").join("my-custom");
     std::fs::create_dir_all(&user_template).unwrap();
     std::fs::write(user_template.join("CLAUDE.md"), "user content").unwrap();
 
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
 
-    // ユーザー追加 template は触られない
     let content = std::fs::read_to_string(user_template.join("CLAUDE.md")).unwrap();
     assert_eq!(content, "user content");
+    // 公式 template も同時に展開される
+    assert!(config_dir
+        .path()
+        .join("templates")
+        .join("rust-code")
+        .is_dir());
 }
 
 #[test]
-fn test_embedded_template_names_valid_in_phase_3() {
-    // Phase 3 時点では templates-data/ は空なので empty を想定
-    // （Phase 4 で公式 template が追加されたらこのテストは失敗して
-    //  調整が必要になる — その時点で assert_eq を具体名に書き換える）
+fn test_extract_embedded_templates_respects_user_override_same_name() {
+    // ユーザーが embedded と同名の dir を自前で作っている場合、
+    // extract はそれを尊重して上書きしない (marker 無しで残る)。
+    let config_dir = tempfile::tempdir().unwrap();
+    let templates = config_dir.path().join("templates");
+    std::fs::create_dir_all(templates.join("rust-code")).unwrap();
+    std::fs::write(
+        templates.join("rust-code").join("CLAUDE.md"),
+        "user override",
+    )
+    .unwrap();
+
+    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+
+    // 内容が維持される
+    let content = std::fs::read_to_string(templates.join("rust-code").join("CLAUDE.md")).unwrap();
+    assert_eq!(content, "user override");
+    // marker は書かれない (user override として扱う)
+    assert!(!templates
+        .join("rust-code")
+        .join(".vibepod-embedded")
+        .is_file());
+}
+
+#[test]
+fn test_embedded_template_names_contains_official_templates() {
+    // Phase 4 で rust-code と review が embed される。
     let names = embedded_template_names();
-    // 返り値が名前の collection として妥当であること（全て validation 通過）
+    assert!(
+        names.contains(&"rust-code".to_string()),
+        "expected rust-code in embedded templates, got {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"review".to_string()),
+        "expected review in embedded templates, got {:?}",
+        names
+    );
+    // 全て name validation を通る
     for name in &names {
         assert!(!name.is_empty());
         assert!(
@@ -968,5 +1033,81 @@ fn test_embedded_template_names_valid_in_phase_3() {
             "embedded template name '{}' failed validation",
             name
         );
+    }
+}
+
+#[test]
+fn test_extract_single_embedded_template_installs_only_target() {
+    // 単一ターゲット抽出は「要求された 1 つだけ」を展開し、他の embedded
+    // template (rust-code / review) を巻き込まない。
+    let config_dir = tempfile::tempdir().unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "rust-code").unwrap();
+
+    let templates = config_dir.path().join("templates");
+    assert!(templates.join("rust-code").is_dir());
+    assert!(templates
+        .join("rust-code")
+        .join(".vibepod-embedded")
+        .is_file());
+    // 他の template は展開されない (単一ターゲットモード)
+    assert!(!templates.join("review").exists());
+}
+
+#[test]
+fn test_extract_single_embedded_template_noop_for_unknown_name() {
+    // embed 集合に存在しない名前は no-op (エラーにならず、templates dir
+    // も変化しない)。呼び出し側 (prepare.rs) が existence check 後に
+    // 呼ぶ場合の防御でもある。
+    let config_dir = tempfile::tempdir().unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "does-not-exist").unwrap();
+    // ensure_templates_root だけは呼ばれるので templates/ は作られる
+    // (あるいは作られないかもしれないが、少なくともこの呼び出しでは
+    //  rust-code や review は生まれない)
+    let templates = config_dir.path().join("templates");
+    assert!(!templates.join("does-not-exist").exists());
+    assert!(!templates.join("rust-code").exists());
+    assert!(!templates.join("review").exists());
+}
+
+#[test]
+fn test_extract_single_embedded_template_survives_sibling_conflict() {
+    // 他の embedded 名が壊れた entry (regular file) として存在していても、
+    // 要求された embedded template は正常に展開されることを確認する。
+    // これが Phase 4 で単一-ターゲット API を導入した主な理由。
+    let config_dir = tempfile::tempdir().unwrap();
+    let templates = config_dir.path().join("templates");
+    std::fs::create_dir_all(&templates).unwrap();
+    // `review` を意図的にファイルとして置く → bulk extract だと他の
+    // template まで止まるが、単一ターゲット (rust-code) は通るはず
+    std::fs::write(templates.join("review"), "blocking file").unwrap();
+
+    extract_single_embedded_template_if_missing(config_dir.path(), "rust-code").unwrap();
+
+    assert!(templates.join("rust-code").is_dir());
+    assert!(templates
+        .join("rust-code")
+        .join(".vibepod-embedded")
+        .is_file());
+    // 壊れた review はそのまま残る (単一ターゲット API は他を触らない)
+    let content = std::fs::read_to_string(templates.join("review")).unwrap();
+    assert_eq!(content, "blocking file");
+}
+
+#[test]
+fn test_extract_single_embedded_template_noop_for_invalid_name() {
+    // name validation を通らない文字列 (path traversal 攻撃想定) は
+    // エラーにならず no-op。
+    let config_dir = tempfile::tempdir().unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "../evil").unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "").unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "has.dot").unwrap();
+    // どの呼び出しでも templates dir に該当エントリは作られない
+    let templates = config_dir.path().join("templates");
+    if templates.exists() {
+        for entry in std::fs::read_dir(&templates).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap_or_default();
+            assert!(name != ".." && !name.contains("evil") && !name.contains("has.dot"));
+        }
     }
 }
