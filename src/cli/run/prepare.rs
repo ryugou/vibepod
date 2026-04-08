@@ -311,11 +311,36 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     };
 
     // Read template metadata (required_langs, etc.) if in template mode.
-    let template_metadata = if let Some((_, ref canonical)) = resolved_template {
-        super::template::read_template_metadata(canonical)?
-    } else {
-        super::template::TemplateMetadata::default()
+    //
+    // Explicit `--template` is fail-fast: a malformed vibepod-template.toml
+    // for a user-chosen template is a clear user-visible error. But
+    // when the template came from `default_prompt_template` in config
+    // (best-effort default path), we must NOT turn metadata parse
+    // failures into fatal run errors — the spec for that code path is
+    // "fall back to host mount on any resolution failure". Emit a
+    // warning and drop the template so the run continues on host
+    // mounts, mirroring `effective_template_name`'s own fallback.
+    let template_is_explicit = opts.template.is_some();
+    let (resolved_template, template_metadata) = match resolved_template {
+        Some((name, canonical)) => match super::template::read_template_metadata(&canonical) {
+            Ok(meta) => (Some((name, canonical)), meta),
+            Err(e) if !template_is_explicit => {
+                eprintln!(
+                    "warning: configured default template '{}' has invalid \
+                     vibepod-template.toml and will be ignored; falling back \
+                     to host mount. Underlying error: {}",
+                    name, e
+                );
+                (None, super::template::TemplateMetadata::default())
+            }
+            Err(e) => return Err(e),
+        },
+        None => (None, super::template::TemplateMetadata::default()),
     };
+    // Keep `effective_template` (the name) in sync with `resolved_template`.
+    // When we drop the default template above, downstream template-mode
+    // checks should also see "no template" so the run proceeds on host mounts.
+    let effective_template: Option<String> = resolved_template.as_ref().map(|(n, _)| n.clone());
 
     // Language detection
     let effective_lang = opts.lang.clone().or_else(|| vibepod_config.lang());
