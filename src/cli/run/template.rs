@@ -822,7 +822,13 @@ pub struct TemplateRuntimeMetadata {
 /// Read `vibepod-template.toml` from the given extracted template
 /// directory. Returns `TemplateMetadata::default()` if the file is
 /// absent (the common case for user-added templates that do not
-/// declare anything). Errors only on read / parse failures.
+/// declare anything). Errors on I/O failures, TOML parse failures,
+/// **and** metadata validation failures (invalid / empty / unknown /
+/// unsupported `required_langs` entries). Callers that want
+/// best-effort semantics (e.g. the `default_prompt_template`
+/// fallback path in `prepare_context`) should catch the error and
+/// degrade gracefully; explicit `--template` callers should
+/// propagate for fail-fast behavior.
 pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
     let metadata_path = template_dir.join(TEMPLATE_METADATA_FILENAME);
     let content = match std::fs::read_to_string(&metadata_path) {
@@ -864,11 +870,11 @@ pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
         if !super::is_supported_lang(lang) {
             bail!(
                 "Template metadata {}: required_langs entry '{}' is not a \
-                 language vibepod knows how to install. Supported values: \
-                 rust, node, python, go, java. If you need a new runtime, \
-                 extend `get_lang_install_cmd` first.",
+                 language vibepod knows how to install. Supported values: {}. \
+                 If you need a new runtime, extend `get_lang_install_cmd` first.",
                 metadata_path.display(),
-                lang
+                lang,
+                super::SUPPORTED_LANGS.join(", ")
             );
         }
     }

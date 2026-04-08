@@ -842,6 +842,16 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
+    // Normalize lang_names before storing in RunContext so downstream
+    // consumers (build_config_labels, future readers) can trust the
+    // invariant without re-normalizing. See RunContext field doc.
+    let lang_names = {
+        let mut names = lang_names;
+        names.sort();
+        names.dedup();
+        names
+    };
+
     Ok(Some(RunContext {
         container_name,
         effective_workspace,

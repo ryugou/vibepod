@@ -51,10 +51,12 @@ pub(super) struct RunContext {
     pub(super) worktree_branch_name: Option<String>,
     pub(super) worktree_dir_name: Option<String>,
     pub(super) lang_display: String,
-    /// Normalized, sorted, deduped list of language identifiers that
-    /// will be installed in the container. This is what gets persisted
-    /// in the `vibepod.lang` label; `lang_display` is the human-readable
-    /// form shown in startup logs.
+    /// Sorted, deduped list of language identifiers that will be
+    /// installed in the container. Normalization is performed by
+    /// `prepare_context` before this field is stored, so callers
+    /// (notably `build_config_labels`) can rely on the order and
+    /// uniqueness without re-normalizing. `lang_display` is the
+    /// separate human-readable form shown in startup logs.
     pub(super) lang_names: Vec<String>,
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
@@ -120,6 +122,13 @@ pub fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static st
     }
     langs
 }
+
+/// Single source of truth for language identifiers vibepod knows how
+/// to install inside its container. `get_lang_install_cmd` matches on
+/// these names, `is_supported_lang` checks membership, and error
+/// messages that enumerate supported values read from this list so
+/// they cannot drift out of sync.
+pub const SUPPORTED_LANGS: &[&str] = &["rust", "node", "python", "go", "java"];
 
 pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
     match lang {
@@ -332,15 +341,14 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
 
     labels.insert("vibepod.network".to_string(), ctx.no_network.to_string());
 
-    // lang: persist the FULL sorted/deduped set of languages the
-    // container was provisioned with. Using lang_display's first
-    // token would lose template-added langs (e.g. "python (detected)
-    // + rust (template)" → "python") and break the reuse check that
-    // verifies every template-required lang is present.
-    let mut lang_set = ctx.lang_names.clone();
-    lang_set.sort();
-    lang_set.dedup();
-    labels.insert("vibepod.lang".to_string(), lang_set.join(","));
+    // lang: persist the FULL set of languages the container was
+    // provisioned with. `ctx.lang_names` is already sorted and
+    // deduped (invariant established by `prepare_context`), so this
+    // is a direct join. Using lang_display's first token would lose
+    // template-added langs (e.g. "python (detected) + rust (template)"
+    // → "python") and break the reuse check that verifies every
+    // template-required lang is present.
+    labels.insert("vibepod.lang".to_string(), ctx.lang_names.join(","));
 
     // Label schema version. Containers created pre-Phase-4.6 do not
     // have this label, which signals that `vibepod.lang` may be in
