@@ -1,0 +1,12 @@
+# vibepod-template.toml — review template metadata
+#
+# Read by the host-side vibepod CLI to decide what runtime the container
+# needs before Claude Code starts. This file is NOT mounted into the
+# container; it is internal metadata for the CLI.
+
+[runtime]
+
+# The review template is language-agnostic. It does not force any
+# specific toolchain; whichever language is detected in the host
+# project (or passed via --lang / config) is installed as usual.
+required_langs = []

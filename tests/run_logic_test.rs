@@ -4,7 +4,7 @@ use vibepod::cli::run::{
     template::{
         build_template_mounts, effective_template_name, embedded_template_names,
         extract_embedded_templates_if_missing, extract_single_embedded_template_if_missing,
-        user_template_names,
+        read_template_metadata, user_template_names,
     },
     validate_slack_channel_id, RunOptions,
 };
@@ -1217,6 +1217,147 @@ fn test_extract_embedded_templates_respects_user_override_same_name() {
         .join("rust-code")
         .join(".vibepod-embedded")
         .is_file());
+}
+
+// --- read_template_metadata ---
+
+#[test]
+fn test_read_template_metadata_missing_file_returns_default() {
+    // vibepod-template.toml が無い template は default (空 required_langs)
+    let dir = tempfile::tempdir().unwrap();
+    let meta = read_template_metadata(dir.path()).unwrap();
+    assert!(meta.runtime.required_langs.is_empty());
+}
+
+#[test]
+fn test_read_template_metadata_parses_required_langs() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+required_langs = ["rust", "python"]
+"#,
+    )
+    .unwrap();
+    let meta = read_template_metadata(dir.path()).unwrap();
+    assert_eq!(
+        meta.runtime.required_langs,
+        vec!["rust".to_string(), "python".to_string()]
+    );
+}
+
+#[test]
+fn test_read_template_metadata_empty_runtime_section_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("vibepod-template.toml"), "[runtime]\n").unwrap();
+    let meta = read_template_metadata(dir.path()).unwrap();
+    assert!(meta.runtime.required_langs.is_empty());
+}
+
+#[test]
+fn test_read_template_metadata_empty_file_ok() {
+    // 完全に空の toml は default metadata 扱い
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("vibepod-template.toml"), "").unwrap();
+    let meta = read_template_metadata(dir.path()).unwrap();
+    assert!(meta.runtime.required_langs.is_empty());
+}
+
+#[test]
+fn test_read_template_metadata_rejects_invalid_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        "not valid [[[ toml",
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("Failed to parse"),
+        "expected parse error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_unknown_fields() {
+    // deny_unknown_fields で future-proofing: 知らないキーは明示的に拒否
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+required_langs = ["rust"]
+something_new = "will be rejected until the field is added to the schema"
+"#,
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("Failed to parse"),
+        "expected parse error on unknown field, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_invalid_lang_name() {
+    // path traversal / 空文字 / 制御文字などは validate で reject
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+required_langs = ["../etc/passwd"]
+"#,
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid required_langs entry"),
+        "expected invalid lang error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_empty_lang_name() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+required_langs = ["rust", ""]
+"#,
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("invalid required_langs entry"));
+}
+
+#[test]
+fn test_embedded_rust_code_template_declares_rust_requirement() {
+    // 公式 rust-code template の vibepod-template.toml が "rust" を要求する
+    // こと。これが欠けると rust-code の quality gate が container で動かない
+    // spec 違反に戻る。回帰防止の gate。
+    let config_dir = tempfile::tempdir().unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "rust-code").unwrap();
+    let template_dir = config_dir.path().join("templates").join("rust-code");
+    let meta = read_template_metadata(&template_dir).unwrap();
+    assert_eq!(meta.runtime.required_langs, vec!["rust".to_string()]);
+}
+
+#[test]
+fn test_embedded_review_template_declares_no_required_langs() {
+    // review template は language-agnostic なので required_langs は空
+    let config_dir = tempfile::tempdir().unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "review").unwrap();
+    let template_dir = config_dir.path().join("templates").join("review");
+    let meta = read_template_metadata(&template_dir).unwrap();
+    assert!(
+        meta.runtime.required_langs.is_empty(),
+        "expected review to have no required_langs, got: {:?}",
+        meta.runtime.required_langs
+    );
 }
 
 #[test]

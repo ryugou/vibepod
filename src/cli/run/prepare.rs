@@ -269,8 +269,53 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     };
 
     // Load vibepod project config
-    let config_dir_early = config::default_config_dir()?;
-    let vibepod_config = config::VibepodConfig::load(&cwd, &config_dir_early)?;
+    let config_dir = config::default_config_dir()?;
+    let vibepod_config = config::VibepodConfig::load(&cwd, &config_dir)?;
+
+    // Template resolution (early): we need the template's canonical
+    // path *and* its metadata (vibepod-template.toml → required_langs)
+    // **before** we compute the language install plan, because the
+    // template can declare languages that MUST be installed regardless
+    // of what the cwd-detection or --lang would choose.
+    //
+    // This block does the lazy extract + resolve that Phase 3/4 would
+    // otherwise do inline near the container-name hashing step below.
+    // We capture the result here and reuse it when computing the
+    // container name, so extraction / resolve is not repeated.
+    let effective_template =
+        super::template::effective_template_name(opts, &vibepod_config, &config_dir);
+    let resolved_template: Option<(String, std::path::PathBuf)> = if opts.worktree {
+        None
+    } else if let Some(ref tmpl) = effective_template {
+        // First try resolving the template as-is. User-provided templates
+        // must work on read-only ~/.config/vibepod/ without any extraction.
+        let canonical = match super::template::resolve_template_dir(tmpl, &config_dir) {
+            Ok(path) => path,
+            Err(first_err) => {
+                // Only trigger embedded extraction on an exact name match
+                // (case-sensitive). See the comment in the earlier inline
+                // location for the rationale (typo mutation / read-only).
+                let is_embedded = super::template::embedded_template_names()
+                    .iter()
+                    .any(|n| n == tmpl);
+                if !is_embedded {
+                    return Err(first_err);
+                }
+                super::template::extract_single_embedded_template_if_missing(&config_dir, tmpl)?;
+                super::template::resolve_template_dir(tmpl, &config_dir)?
+            }
+        };
+        Some((tmpl.clone(), canonical))
+    } else {
+        None
+    };
+
+    // Read template metadata (required_langs, etc.) if in template mode.
+    let template_metadata = if let Some((_, ref canonical)) = resolved_template {
+        super::template::read_template_metadata(canonical)?
+    } else {
+        super::template::TemplateMetadata::default()
+    };
 
     // Language detection
     let effective_lang = opts.lang.clone().or_else(|| vibepod_config.lang());
@@ -280,21 +325,44 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         Vec::new()
     };
 
-    let (lang_names, lang_display): (Vec<String>, String) = if let Some(ref l) = effective_lang {
-        (vec![l.clone()], format!("{} (--lang)", l))
-    } else if detected_langs.len() == 1 {
-        let (name, file) = &detected_langs[0];
-        (
-            vec![name.clone()],
-            format!("{} (detected from {})", name, file),
-        )
-    } else if detected_langs.len() > 1 {
-        let names: Vec<String> = detected_langs.iter().map(|(n, _)| n.clone()).collect();
-        let display = format!("{} (auto-detected)", names.join(", "));
-        (names, display)
-    } else {
-        (Vec::new(), String::new())
-    };
+    let (mut lang_names, mut lang_display): (Vec<String>, String) =
+        if let Some(ref l) = effective_lang {
+            (vec![l.clone()], format!("{} (--lang)", l))
+        } else if detected_langs.len() == 1 {
+            let (name, file) = &detected_langs[0];
+            (
+                vec![name.clone()],
+                format!("{} (detected from {})", name, file),
+            )
+        } else if detected_langs.len() > 1 {
+            let names: Vec<String> = detected_langs.iter().map(|(n, _)| n.clone()).collect();
+            let display = format!("{} (auto-detected)", names.join(", "));
+            (names, display)
+        } else {
+            (Vec::new(), String::new())
+        };
+
+    // Union template-required langs into the install plan. `--lang`
+    // / config / auto-detect are respected as the primary source;
+    // template required_langs are ADDED on top so a rust-code run in
+    // a Python project still installs Rust.
+    if !template_metadata.runtime.required_langs.is_empty() {
+        let mut template_added: Vec<String> = Vec::new();
+        for req in &template_metadata.runtime.required_langs {
+            if !lang_names.iter().any(|n| n == req) {
+                lang_names.push(req.clone());
+                template_added.push(req.clone());
+            }
+        }
+        if !template_added.is_empty() {
+            let suffix = format!("+ {} (template)", template_added.join(", "));
+            if lang_display.is_empty() {
+                lang_display = suffix.trim_start_matches("+ ").to_string();
+            } else {
+                lang_display = format!("{} {}", lang_display, suffix);
+            }
+        }
+    }
 
     let setup_cmd: Option<String> = {
         let setup_parts: Vec<String> = lang_names
@@ -312,8 +380,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         eprintln!("Note: Language/tool setup requires sudo in the container. If setup fails, run `vibepod init` to rebuild the image.");
     }
 
-    // 2. Load config
-    let config_dir = config::default_config_dir()?;
+    // 2. Load global config (config_dir already loaded at the top
+    // because template metadata resolution needs it early).
     let global_config = config::load_global_config(&config_dir)?;
 
     // Note: 埋め込み template の展開はここでは**行わない**。展開は
@@ -351,57 +419,21 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // に落ちる（raw 名を使うと 2 つの container に split されてしまう）。
     // 同時に、resolve_template_dir が symlink escape を防ぐので path
     // traversal の心配もない。
-    let effective_template =
-        super::template::effective_template_name(opts, &vibepod_config, &config_dir);
+    // Container naming:
+    //   - worktree: random short hash (disposable)
+    //   - template mode: project path + canonical template path → SHA256[:8]
+    //     (canonical path keeps macOS case-insensitive FS consistent)
+    //   - host mode: project path → SHA256[:8] (v1.4.3 compatible)
+    //
+    // Template resolution (lazy extract + resolve_template_dir) already
+    // happened earlier because the lang pipeline needs the template
+    // metadata. Reuse `resolved_template` here instead of re-resolving.
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
             .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
-    } else if let Some(ref tmpl) = effective_template {
-        // まず要求された template をそのまま resolve する。user-provided
-        // の template は embedded extraction に依存せず、read-only
-        // `~/.config/vibepod/` でもそのまま使えるべき。初回で resolve
-        // できなかった場合、**かつ要求された名前が実際に embedded 集合に
-        // 存在する** 場合のみ embedded 展開を試みて再 resolve する。
-        // これにより:
-        //   - typo (`--template rustcod`) による書き込み発生 & 誤解を招く
-        //     エラーメッセージ (`Failed to create templates root`) を防ぐ
-        //   - user-provided template だけを期待する read-only setup で
-        //     typo が無駄な mutation を起こさない
-        //   - 素直な「Template 'rustcod' not found」エラーで返す
-        let canonical_template = match super::template::resolve_template_dir(tmpl, &config_dir) {
-            Ok(path) => path,
-            Err(first_err) => {
-                // extract gate は **厳密一致** のみ許容する。
-                // case-insensitive 比較だと Linux (case-sensitive FS) で
-                // `--template Review` が「embedded 名に該当する」と判定
-                // されて不要な extraction (または read-only setup での
-                // write エラー) を引き起こすため。
-                //
-                // macOS のような case-insensitive FS では、正しい大文字
-                // 小文字 (`--template review`) で 1 度でも実行すれば
-                // extraction が走り、以降 `Review` 等の case variant は
-                // resolve_template_dir の FS-level case-insensitive 解決
-                // で通るようになる。初回の miscased 呼び出しは「Template
-                // 'Review' not found」で素直に返すのが正しい挙動。
-                let is_embedded = super::template::embedded_template_names()
-                    .iter()
-                    .any(|n| n == tmpl);
-                if !is_embedded {
-                    // user-provided 前提で resolve 失敗: そのまま元のエラーを返す。
-                    // extract を呼ばないので `~/.config/vibepod/templates/` は
-                    // 作られない。
-                    return Err(first_err);
-                }
-                // 要求が embedded 名: その template **だけ** を lazy
-                // 展開して再 resolve。他の embedded template (例: 壊れた
-                // `templates/review`) の影響で rust-code の展開が止まら
-                // ないよう、単一 template ターゲットの API を使う。
-                super::template::extract_single_embedded_template_if_missing(&config_dir, tmpl)?;
-                super::template::resolve_template_dir(tmpl, &config_dir)?
-            }
-        };
+    } else if let Some((_, ref canonical_template)) = resolved_template {
         let hash_input = format!("{}|template={}", cwd_str, canonical_template.display());
         let hash = path_hash_8(&hash_input);
         format!("vibepod-{}-{}", project_name, hash)

@@ -787,6 +787,81 @@ fn extract_one_embedded(embedded: &Dir<'_>, name: &str, config_dir: &Path) -> Re
 /// ではないため)。
 pub const EMBEDDED_MARKER_FILENAME: &str = ".vibepod-embedded";
 
+/// Template metadata file name. Optional — templates without this file
+/// get `TemplateMetadata::default()` (no required langs, no extras).
+pub const TEMPLATE_METADATA_FILENAME: &str = "vibepod-template.toml";
+
+/// Template metadata declared in `vibepod-template.toml` at the root of
+/// an extracted template directory. This is **internal** metadata for
+/// the host-side `vibepod` CLI; it is NOT mounted into the container.
+///
+/// `required_langs` lists language identifiers (matching the keys
+/// understood by `get_lang_install_cmd`) that MUST be present in the
+/// container's runtime before Claude Code starts. These are unioned
+/// with whatever languages the user / project config / cwd detection
+/// would otherwise install, so a rust-specific template can declare
+/// `required_langs = ["rust"]` and get the Rust toolchain regardless
+/// of the host project's language.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateMetadata {
+    /// `[runtime]` section.
+    #[serde(default)]
+    pub runtime: TemplateRuntimeMetadata,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateRuntimeMetadata {
+    /// Language identifiers the template requires at runtime (e.g.
+    /// `["rust"]`). Merged into `prepare_context`'s lang pipeline.
+    #[serde(default)]
+    pub required_langs: Vec<String>,
+}
+
+/// Read `vibepod-template.toml` from the given extracted template
+/// directory. Returns `TemplateMetadata::default()` if the file is
+/// absent (the common case for user-added templates that do not
+/// declare anything). Errors only on read / parse failures.
+pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
+    let metadata_path = template_dir.join(TEMPLATE_METADATA_FILENAME);
+    let content = match std::fs::read_to_string(&metadata_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TemplateMetadata::default());
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to read template metadata: {}",
+                    metadata_path.display()
+                )
+            });
+        }
+    };
+    let metadata: TemplateMetadata = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as TOML", metadata_path.display()))?;
+    // Validate language names against the validator used for template
+    // names themselves — this rejects empty strings, whitespace, and
+    // path-traversal-ish inputs that could confuse `get_lang_install_cmd`.
+    for lang in &metadata.runtime.required_langs {
+        if lang.is_empty()
+            || !lang
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '+' || c == '.')
+        {
+            bail!(
+                "Template metadata {}: invalid required_langs entry '{}'. \
+                 Language identifiers must be non-empty ASCII alphanumerics \
+                 (plus '-', '_', '+', '.').",
+                metadata_path.display(),
+                lang
+            );
+        }
+    }
+    Ok(metadata)
+}
+
 /// 指定された template ディレクトリが vibepod の embed 展開によって
 /// 作られたものかどうかを判定する。マーカーファイルの存在のみで判定し、
 /// 内容は問わない (将来の version 比較フィールド拡張用)。
