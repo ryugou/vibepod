@@ -475,6 +475,7 @@ fn test_effective_template_name_returns_none_when_template_unset_with_prompt() {
 
 #[test]
 fn test_build_template_mounts_happy_path() {
+    // plain-file plugins (no installed_plugins.json registry) は許可
     let config_dir = tempfile::tempdir().unwrap();
     let template_dir = config_dir.path().join("templates").join("my-template");
     std::fs::create_dir_all(template_dir.join("skills")).unwrap();
@@ -501,6 +502,33 @@ fn test_build_template_mounts_happy_path() {
     assert!(mounts
         .iter()
         .any(|(_, dst)| dst == "/home/vibepod/.claude/settings.json"));
+}
+
+#[test]
+fn test_build_template_mounts_rejects_installed_plugins_json() {
+    // Phase 2 では installed_plugins.json を含む plugins は silent breakage を
+    // 避けるために明示的にエラーにする（Phase 3/4 で解決）
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("with-registry");
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(
+        template_dir.join("plugins").join("installed_plugins.json"),
+        r#"{"plugins": {}}"#,
+    )
+    .unwrap();
+
+    let err = build_template_mounts("with-registry", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("installed_plugins.json"),
+        "expected error mentioning installed_plugins.json, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("not supported yet") || msg.contains("Phase 3/4"),
+        "expected error mentioning phase 3/4 deferral, got: {}",
+        msg
+    );
 }
 
 #[test]

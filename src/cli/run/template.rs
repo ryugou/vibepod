@@ -106,21 +106,42 @@ pub fn build_template_mounts(
 
     let plugins_dir = template_dir.join("plugins");
     if plugins_dir.is_dir() {
-        // Phase 2 note: template の plugins は単一マウントで
-        // /home/vibepod/.claude/plugins にのみ配置する。host mode の
-        // `plugins_mount_entries` が行う「絶対パス (`installed_plugins.json` の
-        // `installPath`) への二重マウント」は行わない。
+        // Phase 2 では `installed_plugins.json` を含む plugins 構成は
+        // サポートしない。理由:
         //
-        // template 配布物に `installed_plugins.json` が含まれ、その `installPath`
-        // が build-time の絶対パスだった場合、container 内では解決できない。
-        // Phase 3/4 で embed 機構と実 template を入れた際に以下のいずれかで解決する予定:
-        //   a) template 配布前に `installed_plugins.json` の `installPath` を
-        //      コンテナ側の固定パス (/home/vibepod/.claude/plugins/cache/...) に
-        //      normalize する
-        //   b) template メタデータで必要な plugin set を宣言し、container 内で
-        //      再 install する
+        // host mode の `plugins_mount_entries` は plugins ディレクトリを
+        // `/home/vibepod/.claude/plugins` と `<host_home>/.claude/plugins` の
+        // 2 箇所に bind mount することで、`installed_plugins.json` 内の絶対
+        // パス (`installPath`) を container 内で解決している。
         //
-        // Phase 2 の時点では実 template 内容が無いので runtime 影響なし。
+        // template 側では build-time の絶対パスが container 内では存在
+        // しないため、単純に `/home/vibepod/.claude/plugins` に 1 度だけ
+        // bind mount しても Claude が `installPath` を解決できず silent に
+        // 壊れる。
+        //
+        // Phase 3/4 で以下のいずれかで解決する予定:
+        //   a) template build 時に `installed_plugins.json` の `installPath`
+        //      を container 側の固定パス (/home/vibepod/.claude/plugins/...)
+        //      に normalize する
+        //   b) template メタデータで必要な plugin set を宣言し、container
+        //      起動時に再 install する
+        //
+        // それまでは明示的にエラーにして silent breakage を防ぐ。
+        // `plugins/` 配下に `installed_plugins.json` が無い場合は
+        // シンプルな直置きプラグイン（plain files）として単一 mount を
+        // 許可する。
+        let installed_plugins_json = plugins_dir.join("installed_plugins.json");
+        if installed_plugins_json.is_file() {
+            bail!(
+                "Template '{}' ships plugins/installed_plugins.json, which is not \
+                 supported yet (tracked for Phase 3/4). Template plugins with an \
+                 installed_plugins.json registry cannot resolve their absolute \
+                 installPath values inside the container. Remove installed_plugins.json \
+                 or wait for Phase 3/4 template support.",
+                template_name
+            );
+        }
+
         mounts.push((
             plugins_dir.to_string_lossy().to_string(),
             "/home/vibepod/.claude/plugins".to_string(),
