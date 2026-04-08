@@ -264,15 +264,48 @@ pub fn reset(name: &str, force: bool) -> Result<()> {
         );
     }
 
-    // 既存 dir の削除 (存在する場合のみ)。存在しなくてもエラーにしない
+    // 既存 entry の削除 (存在する場合のみ)。存在しなくてもエラーにしない
     // (単に「最新バイナリから fresh 展開する」になる)。
-    if target.exists() || target.is_symlink() {
-        std::fs::remove_dir_all(&target).with_context(|| {
-            format!(
-                "Failed to remove existing template directory: {}",
-                target.display()
-            )
-        })?;
+    //
+    // symlink や regular file の可能性もある: `symlink_metadata()` で
+    // follow せず実体を見て、それぞれ適切な remove 関数を呼ぶ。
+    // (`remove_dir_all` は symlink 相手だと `Not a directory` で失敗する)
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if ft.is_symlink() || ft.is_file() {
+                std::fs::remove_file(&target).with_context(|| {
+                    format!(
+                        "Failed to remove existing template entry (symlink or file): {}",
+                        target.display()
+                    )
+                })?;
+            } else if ft.is_dir() {
+                std::fs::remove_dir_all(&target).with_context(|| {
+                    format!(
+                        "Failed to remove existing template directory: {}",
+                        target.display()
+                    )
+                })?;
+            } else {
+                bail!(
+                    "Cannot reset template '{}': unsupported entry type at {}",
+                    name,
+                    target.display()
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 存在しない: そのまま fresh 展開へ
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to inspect existing template path before reset: {}",
+                    target.display()
+                )
+            });
+        }
     }
 
     // 単一ターゲット再展開。`extract_single_embedded_template_if_missing`
