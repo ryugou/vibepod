@@ -226,15 +226,12 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 
 ## Roadmap
 
-| Version | Features |
-|---------|----------|
-| **v1.0** | `init` + `run` (interactive / fire-and-forget), Claude Code support |
-| **v1.1** | Pre-installed plugins (superpowers, frontend-design), `--env-file` with 1Password integration |
-| **v1.2** | `vibepod restore` (git HEAD auto-recovery with session reports) |
-| **v1.3** | Slack bridge mode (removed in v1.4), multi-provider LLM formatting |
-| **v1.4** | Stream output, `--worktree` isolation, `--lang` toolchain, `vibepod ps`, `vibepod logs`, `vibepod stop`, `--mount`, `--new`, default container reuse, `vibepod rm`, `config.toml` unified config, bridge removal, docker run unification, run.rs split |
-| **v2** | Dashboard (Web UI), execution logs, progress monitoring |
-| **v2.1+** | Gemini CLI / Codex as agent runtimes, multi-container execution |
+VibePod is heading to **v2.0**, where it will be reorganized into a clear pair:
+
+- **vibepod CLI** — a sandbox primitive that safely runs Claude Code (or other agent runtimes) inside Docker containers. No opinions about how you write code.
+- **vibepod plugin for Claude Code** — a Claude Code plugin that wraps the CLI and provides opinionated templates (e.g., quality coding flow, strict review flow) for autonomous tasks.
+
+Until v2.0 is released, no intermediate releases will be cut.
 
 ## License
 

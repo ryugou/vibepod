@@ -139,12 +139,6 @@ USER vibepod
 ENV PATH=/home/vibepod/.local/bin:$PATH
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Claude Code プラグインのインストール
-RUN claude plugin marketplace add anthropics/claude-code --sparse .claude-plugin plugins && \
-    claude plugin marketplace add obra/superpowers-marketplace && \
-    claude plugin install superpowers && \
-    claude plugin install frontend-design
-
 USER root
 RUN mkdir -p /workspace && chown vibepod:vibepod /workspace
 

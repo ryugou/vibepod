@@ -10,7 +10,7 @@ Please report security vulnerabilities via [GitHub Private Vulnerability Reporti
 
 The container communicates with Claude's API as part of normal operation. This is not "offline" — network requests are made by Claude Code inside the container. No additional data is sent to external services by VibePod itself in standard mode.
 
-**Note on external data transmission:** VibePod mounts host files into the container (`~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/` as read-only) and injects `GH_TOKEN` when available. Additionally, plugins pre-installed in the Docker image (e.g., Codex, superpowers) may invoke external APIs. If your CLAUDE.md instructions or these plugins trigger external review tools, repository content may reach additional external services via these credentials and configurations.
+**Note on external data transmission:** VibePod mounts host files into the container (`~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/`, `~/.claude/plugins/` as read-only, plus `~/.claude/settings.json` when present via a sanitized per-container copy) and injects `GH_TOKEN` when available. If your CLAUDE.md instructions, Claude settings, or any host-side plugins/skills mounted into the container trigger external review tools, repository content may reach additional external services via these credentials and configurations. VibePod itself does not pre-install any plugins inside the Docker image.
 
 ### GH_TOKEN automatic injection
 
