@@ -688,7 +688,20 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             // the template added a `required_langs` entry will not
             // have that toolchain even though the warning would let
             // the reuse through. Hard-fail here with a clear --new hint.
-            if !template_metadata.runtime.required_langs.is_empty() {
+            //
+            // Gate on `vibepod.labels_version >= 2`. Pre-Phase-4.6
+            // containers do not have that label; their `vibepod.lang`
+            // is in the legacy single-token format that cannot be
+            // trusted as the complete installed set (e.g. a polyglot
+            // container with multiple langs would still have just the
+            // first token stored). Falling through to warn_config_changes
+            // in the legacy case gives the user a readable diff instead
+            // of forcing --new unnecessarily.
+            let labels_version = stored_labels
+                .get("vibepod.labels_version")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(1);
+            if labels_version >= 2 && !template_metadata.runtime.required_langs.is_empty() {
                 let stored_lang_set: std::collections::BTreeSet<&str> = stored_labels
                     .get("vibepod.lang")
                     .map(|s| {

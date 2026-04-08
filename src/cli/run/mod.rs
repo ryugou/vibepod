@@ -342,6 +342,13 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     lang_set.dedup();
     labels.insert("vibepod.lang".to_string(), lang_set.join(","));
 
+    // Label schema version. Containers created pre-Phase-4.6 do not
+    // have this label, which signals that `vibepod.lang` may be in
+    // the legacy single-token format and should NOT be used for the
+    // hard-fail template required_langs check. The reuse-side guard
+    // falls back to a warning for unversioned labels.
+    labels.insert("vibepod.labels_version".to_string(), "2".to_string());
+
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(
         "vibepod.workspace".to_string(),
