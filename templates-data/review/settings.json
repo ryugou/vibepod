@@ -105,10 +105,6 @@
       "Bash(kill:*)",
       "Bash(pkill:*)",
 
-      "Bash(sh -c:*)",
-      "Bash(bash -c:*)",
-      "Bash(zsh -c:*)",
-      "Bash(dash -c:*)",
       "Bash(python -c:*)",
       "Bash(python3 -c:*)",
       "Bash(python -m:*)",
