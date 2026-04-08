@@ -95,7 +95,7 @@ pub fn effective_template_name(
                 return Some(default);
             }
             // Fallback: config で設定された default が解決できなかった。
-            // host mount で prompt run を続行するが、sileniously fall back
+            // host mount で prompt run を続行するが、silently fall back
             // すると「template list では default になっているのに run で
             // 効かない」という不可解な状態になるため、stderr に警告を
             // 出してから None を返す。明示的な `--template <name>` の
@@ -103,9 +103,13 @@ pub fn effective_template_name(
             // 適用なので run 自体は止めない。
             eprintln!(
                 "warning: configured default template '{}' could not be resolved; \
-                 falling back to host mount. Run `vibepod template list` to check \
+                 falling back to host mount. Check \
                  `~/.config/vibepod/templates/{}` for a missing / conflicting entry, \
-                 or unset with `vibepod template set-default`.",
+                 run `vibepod template list` to see what is available, or replace \
+                 the default with a valid name via \
+                 `vibepod template set-default <name>` (or edit the \
+                 `[run] default_prompt_template` line in \
+                 `~/.config/vibepod/config.toml` to remove it).",
                 default, default
             );
             return None;
@@ -474,15 +478,51 @@ pub fn extract_single_embedded_template_if_missing(config_dir: &Path, name: &str
 
 fn ensure_templates_root(config_dir: &Path) -> Result<()> {
     let templates_root = config_dir.join("templates");
-    if !templates_root.exists() {
-        std::fs::create_dir_all(&templates_root).with_context(|| {
+    match std::fs::symlink_metadata(&templates_root) {
+        Ok(meta) => {
+            // 存在する: ディレクトリ (or ディレクトリに解決される symlink) で
+            // あることを確認する。ファイル・壊れた symlink などの場合は
+            // 後続の extract が「Not a directory」等の曖昧なエラーになるため、
+            // ここで明示的に bail する。
+            let ft = meta.file_type();
+            if ft.is_dir() {
+                return Ok(());
+            }
+            if ft.is_symlink() {
+                // symlink の場合は最終的な解決先が dir かどうかで判断。
+                if std::fs::metadata(&templates_root)
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false)
+                {
+                    return Ok(());
+                }
+                bail!(
+                    "Templates root exists but is a symlink that does not resolve \
+                     to a directory: {}",
+                    templates_root.display()
+                );
+            }
+            bail!(
+                "Templates root exists but is not a directory: {}",
+                templates_root.display()
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&templates_root).with_context(|| {
+                format!(
+                    "Failed to create templates root: {}",
+                    templates_root.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| {
             format!(
-                "Failed to create templates root: {}",
+                "Failed to stat templates root: {}",
                 templates_root.display()
             )
-        })?;
+        }),
     }
-    Ok(())
 }
 
 /// 単一 embedded entry を `<config_dir>/templates/<name>/` に展開する
