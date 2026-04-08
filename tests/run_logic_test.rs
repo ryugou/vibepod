@@ -716,13 +716,20 @@ fn test_user_template_names_filters_invalid_names() {
 }
 
 #[test]
-fn test_extract_embedded_templates_creates_templates_root() {
+fn test_extract_embedded_templates_noop_when_embed_empty() {
+    // Phase 3 時点では templates-data/ は空（.gitkeep のみ）なので
+    // embed には何も入っていない。この場合 extract は **完全な no-op**
+    // で、`~/.config/vibepod/templates/` を作らない（read-only HOME
+    // 対応のため）。Phase 4 で embed が populated されたら、この test
+    // は templates root が作られる assert に変わる（その時点で rename
+    // + assertion 更新）。
     let config_dir = tempfile::tempdir().unwrap();
     assert!(!config_dir.path().join("templates").exists());
 
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
-    // Phase 3 時点では embed 中身は空だが、templates root は作られる
-    assert!(config_dir.path().join("templates").is_dir());
+
+    // embed が空なので書き込み発生しない
+    assert!(!config_dir.path().join("templates").exists());
 }
 
 #[test]

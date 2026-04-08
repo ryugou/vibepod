@@ -297,6 +297,12 @@ pub fn user_template_names(config_dir: &Path) -> Vec<String> {
 /// バージョンで embed template が更新されても、ユーザー既存 dir は
 /// 上書きされない（明示的な再展開手段は v2.x で別途検討）。
 pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
+    // embed が空の場合は何もしない。これにより host mode 専用ユーザーの
+    // read-only `~/.config/vibepod/` setup で不要な write を発生させない。
+    if EMBEDDED_TEMPLATES.dirs().next().is_none() {
+        return Ok(());
+    }
+
     let templates_root = config_dir.join("templates");
     if !templates_root.exists() {
         std::fs::create_dir_all(&templates_root).with_context(|| {
@@ -318,9 +324,22 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
         }
 
         let dest = templates_root.join(name);
-        if dest.exists() {
+        if dest.is_dir() {
             // ユーザー編集を上書きしない
             continue;
+        }
+        if dest.exists() {
+            // ディレクトリではない何か（ファイル / symlink 等）が衝突して
+            // いる場合は silent に skip せず明示的にエラーにする。
+            // skip すると `template list` / `set-default` はこの template を
+            // 「存在する」と広告し続けるのに、実際に `vibepod run --template`
+            // する段階で「not found」になってしまい不整合を生む。
+            bail!(
+                "Cannot extract embedded template '{}': {} exists but is not a directory. \
+                 Remove or rename it to let vibepod materialize the embedded template.",
+                name,
+                dest.display()
+            );
         }
         extract_template_dir(embedded, &dest).with_context(|| {
             format!(

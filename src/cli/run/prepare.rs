@@ -316,9 +316,11 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     let config_dir = config::default_config_dir()?;
     let global_config = config::load_global_config(&config_dir)?;
 
-    // Extract embedded templates to ~/.config/vibepod/templates/ on first run
-    // (idempotent: existing user directories are preserved).
-    super::template::extract_embedded_templates_if_missing(&config_dir)?;
+    // Note: 埋め込み template の展開はここでは**行わない**。展開は
+    // 実際に template mode が使われる時だけ遅延実行する（step 4 の
+    // container_name 計算内、および `vibepod template` subcommand 内）。
+    // これにより host mode 専用ユーザーの read-only `~/.config/vibepod/`
+    // setup を壊さない。
 
     // 3. Check Docker & image
     let runtime = DockerRuntime::new()
@@ -355,7 +357,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
     } else if let Some(ref tmpl) = effective_template {
-        // Template mode: canonical path を hash 入力に使う
+        // Template mode でのみ embed 展開を遅延実行する。host mode
+        // 単体では `~/.config/vibepod/templates/` に一切書き込まない。
+        super::template::extract_embedded_templates_if_missing(&config_dir)?;
+        // canonical path を hash 入力に使う
         let canonical_template = super::template::resolve_template_dir(tmpl, &config_dir)?;
         let hash_input = format!("{}|template={}", cwd_str, canonical_template.display());
         let hash = path_hash_8(&hash_input);
