@@ -89,7 +89,7 @@ pub fn effective_template_name(
                 return Some(default);
             }
             if embedded_template_names().iter().any(|n| n == &default)
-                && extract_embedded_templates_if_missing(config_dir).is_ok()
+                && extract_single_embedded_template_if_missing(config_dir, &default).is_ok()
                 && resolve_template_dir(&default, config_dir).is_ok()
             {
                 return Some(default);
@@ -401,6 +401,11 @@ pub fn user_template_names(config_dir: &Path) -> Result<Vec<String>> {
 /// 冪等: 既に展開済みの template はスキップされる。新規 vibepod
 /// バージョンで embed template が更新されても、ユーザー既存 dir は
 /// 上書きされない（明示的な再展開手段は v2.x で別途検討）。
+///
+/// **注意**: この関数は全 embedded template に対して処理を行うため、
+/// 1 つでも conflict があると残りの template も展開されない。単一
+/// template だけを展開したい場合 (典型的には `vibepod run --template X`
+/// の経路) は `extract_single_embedded_template_if_missing` を使うこと。
 pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
     // embed が空の場合は何もしない。これにより host mode 専用ユーザーの
     // read-only `~/.config/vibepod/` setup で不要な write を発生させない。
@@ -408,15 +413,7 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let templates_root = config_dir.join("templates");
-    if !templates_root.exists() {
-        std::fs::create_dir_all(&templates_root).with_context(|| {
-            format!(
-                "Failed to create templates root: {}",
-                templates_root.display()
-            )
-        })?;
-    }
+    ensure_templates_root(config_dir)?;
 
     for embedded in EMBEDDED_TEMPLATES.dirs() {
         let name = match embedded.path().file_name().and_then(|n| n.to_str()) {
@@ -427,100 +424,152 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
             // 不正な名前の embed entry（ビルド時のミス）は skip
             continue;
         }
+        extract_one_embedded(embedded, name, config_dir)?;
+    }
+    Ok(())
+}
 
-        let dest = templates_root.join(name);
+/// 特定の 1 つの embedded template だけを lazy 展開する。
+///
+/// `extract_embedded_templates_if_missing` と違い、**他の embedded
+/// template に conflict や破損があっても、要求された 1 つだけを展開**
+/// する。これにより `vibepod run --template rust-code` が
+/// 無関係な `review` dir の破損で失敗する regression を防ぐ。
+///
+/// `name` が embedded 集合に存在しなければ `Ok(())` を返す (呼び出し側
+/// がすでに存在確認しているか、user-provided だった場合に no-op で通す)。
+pub fn extract_single_embedded_template_if_missing(config_dir: &Path, name: &str) -> Result<()> {
+    if validate_template_name(name).is_err() {
+        return Ok(());
+    }
+    // 対象を embed から 1 つだけ拾う
+    let embedded = match EMBEDDED_TEMPLATES.dirs().find(|d| {
+        d.path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s == name)
+            .unwrap_or(false)
+    }) {
+        Some(d) => d,
+        None => return Ok(()),
+    };
 
-        // 既存エントリの判定。優先順位:
-        //   1. 何もない (NotFound) → 後段で extract
-        //   2. ディレクトリ実体 (regular dir) → ユーザー編集として保護、skip
-        //   3. in-root を指す symlink → ユーザー override として保護、skip
-        //      (resolve_template_dir も同条件で受け入れるので CLI 全体で
-        //      整合する)
-        //   4. 外部を指す symlink / regular file / その他 → 明示的にエラー
-        match std::fs::symlink_metadata(&dest) {
-            Ok(meta) => {
-                let ft = meta.file_type();
-                if ft.is_dir() {
-                    // 通常ディレクトリ: ユーザー編集を上書きしない
-                    continue;
+    ensure_templates_root(config_dir)?;
+    extract_one_embedded(embedded, name, config_dir)
+}
+
+fn ensure_templates_root(config_dir: &Path) -> Result<()> {
+    let templates_root = config_dir.join("templates");
+    if !templates_root.exists() {
+        std::fs::create_dir_all(&templates_root).with_context(|| {
+            format!(
+                "Failed to create templates root: {}",
+                templates_root.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// 単一 embedded entry を `<config_dir>/templates/<name>/` に展開する
+/// 内部ヘルパー。既存・symlink・conflict などの前置判定と atomic rename
+/// を担当する。`extract_embedded_templates_if_missing` からループで、
+/// `extract_single_embedded_template_if_missing` から 1 回だけ呼ばれる。
+fn extract_one_embedded(embedded: &Dir<'_>, name: &str, config_dir: &Path) -> Result<()> {
+    let templates_root = config_dir.join("templates");
+    let dest = templates_root.join(name);
+
+    // 既存エントリの判定。優先順位:
+    //   1. 何もない (NotFound) → 後段で extract
+    //   2. ディレクトリ実体 (regular dir) → ユーザー編集として保護、skip
+    //   3. in-root を指す symlink → ユーザー override として保護、skip
+    //      (resolve_template_dir も同条件で受け入れるので CLI 全体で
+    //      整合する)
+    //   4. 外部を指す symlink / regular file / その他 → 明示的にエラー
+    match std::fs::symlink_metadata(&dest) {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if ft.is_dir() {
+                // 通常ディレクトリ: ユーザー編集を上書きしない
+                return Ok(());
+            }
+            if ft.is_symlink() {
+                // resolve_template_dir と同じルールで受け入れ判定する。
+                // in-root に解決される symlink は user override として
+                // 尊重し、extraction を skip する。out-of-root のものや
+                // 解決失敗するものは bail して、ユーザーに対処を促す。
+                if resolve_template_dir(name, config_dir).is_ok() {
+                    return Ok(());
                 }
-                if ft.is_symlink() {
-                    // resolve_template_dir と同じルールで受け入れ判定する。
-                    // in-root に解決される symlink は user override として
-                    // 尊重し、extraction を skip する。out-of-root のものや
-                    // 解決失敗するものは bail して、ユーザーに対処を促す。
-                    if resolve_template_dir(name, config_dir).is_ok() {
-                        continue;
-                    }
-                    bail!(
-                        "Cannot extract embedded template '{}': {} is a symlink that \
-                         escapes the templates root or cannot be resolved. \
-                         Remove or rename the symlink so vibepod can materialize \
-                         the embedded template.",
-                        name,
-                        dest.display()
-                    );
-                }
-                // regular file or その他
                 bail!(
-                    "Cannot extract embedded template '{}': {} exists but is not a directory. \
-                     Remove or rename it to let vibepod materialize the embedded template.",
+                    "Cannot extract embedded template '{}': {} is a symlink that \
+                     escapes the templates root or cannot be resolved. \
+                     Remove or rename the symlink so vibepod can materialize \
+                     the embedded template.",
                     name,
                     dest.display()
                 );
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // 存在しない → 下の extract_template_dir で展開する
-            }
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("Failed to stat template destination {}", dest.display())
-                });
-            }
-        }
-        // 部分展開で「中途半端な dir が残ったまま skip され続ける」事故を
-        // 防ぐため、まず兄弟ディレクトリ `<name>.tmp-<pid>` に展開して
-        // 完了後に rename で原子的に dest に移す。途中で失敗した場合は
-        // tmp dir を best-effort で削除し、次回呼び出し時に dest が無い
-        // 状態に戻す (rename 前なので「ある or ない」しか観測されない)。
-        let tmp_dest = templates_root.join(format!("{}.tmp-{}", name, std::process::id()));
-        if tmp_dest.exists() {
-            // 過去 run の残骸 (同 PID 衝突は事実上無視できるが念のため)
-            let _ = std::fs::remove_dir_all(&tmp_dest);
-        }
-        if let Err(err) = extract_template_dir(embedded, &tmp_dest).with_context(|| {
-            format!(
-                "Failed to extract embedded template '{}' to staging dir {}",
+            // regular file or その他
+            bail!(
+                "Cannot extract embedded template '{}': {} exists but is not a directory. \
+                 Remove or rename it to let vibepod materialize the embedded template.",
                 name,
-                tmp_dest.display()
-            )
-        }) {
-            let _ = std::fs::remove_dir_all(&tmp_dest);
-            return Err(err);
-        }
-        if let Err(err) = std::fs::rename(&tmp_dest, &dest) {
-            // 並列実行の race: 他 process が先に install を終えて dest
-            // が既に存在する場合、rename は `AlreadyExists` または
-            // `DirectoryNotEmpty` で失敗する。期待する最終状態 (dest に
-            // template がある) は満たされているので、自分の staging dir
-            // だけ掃除して成功扱いにする。
-            let rename_conflict = matches!(
-                err.kind(),
-                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                dest.display()
             );
-            let _ = std::fs::remove_dir_all(&tmp_dest);
-            if rename_conflict && dest.is_dir() {
-                continue;
-            }
-            return Err(err).with_context(|| {
-                format!(
-                    "Failed to install embedded template '{}' from {} to {}",
-                    name,
-                    tmp_dest.display(),
-                    dest.display()
-                )
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 存在しない → 下の extract_template_dir で展開する
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!("Failed to stat template destination {}", dest.display())
             });
         }
+    }
+
+    // 部分展開で「中途半端な dir が残ったまま skip され続ける」事故を
+    // 防ぐため、まず兄弟ディレクトリ `<name>.tmp-<pid>` に展開して
+    // 完了後に rename で原子的に dest に移す。途中で失敗した場合は
+    // tmp dir を best-effort で削除し、次回呼び出し時に dest が無い
+    // 状態に戻す (rename 前なので「ある or ない」しか観測されない)。
+    let tmp_dest = templates_root.join(format!("{}.tmp-{}", name, std::process::id()));
+    if tmp_dest.exists() {
+        // 過去 run の残骸 (同 PID 衝突は事実上無視できるが念のため)
+        let _ = std::fs::remove_dir_all(&tmp_dest);
+    }
+    if let Err(err) = extract_template_dir(embedded, &tmp_dest).with_context(|| {
+        format!(
+            "Failed to extract embedded template '{}' to staging dir {}",
+            name,
+            tmp_dest.display()
+        )
+    }) {
+        let _ = std::fs::remove_dir_all(&tmp_dest);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp_dest, &dest) {
+        // 並列実行の race: 他 process が先に install を終えて dest
+        // が既に存在する場合、rename は `AlreadyExists` または
+        // `DirectoryNotEmpty` で失敗する。期待する最終状態 (dest に
+        // template がある) は満たされているので、自分の staging dir
+        // だけ掃除して成功扱いにする。
+        let rename_conflict = matches!(
+            err.kind(),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+        );
+        let _ = std::fs::remove_dir_all(&tmp_dest);
+        if rename_conflict && dest.is_dir() {
+            return Ok(());
+        }
+        return Err(err).with_context(|| {
+            format!(
+                "Failed to install embedded template '{}' from {} to {}",
+                name,
+                tmp_dest.display(),
+                dest.display()
+            )
+        });
     }
     Ok(())
 }

@@ -394,8 +394,11 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                     // 作られない。
                     return Err(first_err);
                 }
-                // 要求が embedded 名: lazy extract して再 resolve。
-                super::template::extract_embedded_templates_if_missing(&config_dir)?;
+                // 要求が embedded 名: その template **だけ** を lazy
+                // 展開して再 resolve。他の embedded template (例: 壊れた
+                // `templates/review`) の影響で rust-code の展開が止まら
+                // ないよう、単一 template ターゲットの API を使う。
+                super::template::extract_single_embedded_template_if_missing(&config_dir, tmpl)?;
                 super::template::resolve_template_dir(tmpl, &config_dir)?
             }
         };
