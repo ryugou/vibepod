@@ -362,12 +362,27 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         // まず要求された template をそのまま resolve する。user-provided
         // の template は embedded extraction に依存せず、read-only
         // `~/.config/vibepod/` でもそのまま使えるべき。初回で resolve
-        // できなかった場合のみ embedded 展開を試みて再 resolve する。
-        // これにより、例えば「embed に同名 template が存在し、かつ user
-        // は別 template を使いたい」ケースでも不要な書き込みを発生させない。
+        // できなかった場合、**かつ要求された名前が実際に embedded 集合に
+        // 存在する** 場合のみ embedded 展開を試みて再 resolve する。
+        // これにより:
+        //   - typo (`--template rustcod`) による書き込み発生 & 誤解を招く
+        //     エラーメッセージ (`Failed to create templates root`) を防ぐ
+        //   - user-provided template だけを期待する read-only setup で
+        //     typo が無駄な mutation を起こさない
+        //   - 素直な「Template 'rustcod' not found」エラーで返す
         let canonical_template = match super::template::resolve_template_dir(tmpl, &config_dir) {
             Ok(path) => path,
-            Err(_) => {
+            Err(first_err) => {
+                let is_embedded = super::template::embedded_template_names()
+                    .iter()
+                    .any(|n| n == tmpl);
+                if !is_embedded {
+                    // user-provided 前提で resolve 失敗: そのまま元のエラーを返す。
+                    // extract を呼ばないので `~/.config/vibepod/templates/` は
+                    // 作られない。
+                    return Err(first_err);
+                }
+                // 要求が embedded 名: lazy extract して再 resolve。
                 super::template::extract_embedded_templates_if_missing(&config_dir)?;
                 super::template::resolve_template_dir(tmpl, &config_dir)?
             }
