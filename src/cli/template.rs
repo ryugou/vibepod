@@ -3,10 +3,12 @@
 //! `vibepod template list` / `vibepod template set-default <name>` を提供する。
 //! 実 mount 処理は `src/cli/run/template.rs` 側、こちらは UI と管理操作のみ。
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-use crate::cli::run::template::{embedded_template_names, user_template_names};
+use crate::cli::run::template::{
+    embedded_template_names, is_embedded_extracted, user_template_names,
+};
 use crate::config;
 
 /// グローバル `~/.config/vibepod/config.toml` から `[run] default_prompt_template`
@@ -14,15 +16,36 @@ use crate::config;
 ///
 /// `template list` の `<<default>>` 表示と `template set-default` が更新する
 /// 書き込み先を一致させるための helper。
-fn read_global_default_prompt_template(global_config_dir: &Path) -> Option<String> {
+///
+/// 戻り値:
+/// - `Ok(None)`: config ファイルが存在しない、または `default_prompt_template`
+///   が設定されていない (正常状態)
+/// - `Ok(Some(name))`: 設定済み
+/// - `Err(_)`: ファイル read 失敗 (NotFound 以外) や TOML パースエラー。
+///   呼び出し側はこれを呑まずユーザーに報告する (`set-default` も同じ
+///   ファイルで失敗するため、`list` 側だけ silent に成功させると
+///   不整合が起きる)。
+fn read_global_default_prompt_template(global_config_dir: &Path) -> Result<Option<String>> {
     let config_path = global_config_dir.join("config.toml");
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    let parsed: toml::Value = toml::from_str(&content).ok()?;
-    parsed
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to read config file: {}", config_path.display()));
+        }
+    };
+    let parsed: toml::Value = toml::from_str(&content).with_context(|| {
+        format!(
+            "Failed to parse {} as TOML: fix syntax errors first",
+            config_path.display()
+        )
+    })?;
+    Ok(parsed
         .get("run")
         .and_then(|run| run.get("default_prompt_template"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(|s| s.to_string()))
 }
 
 /// `vibepod template list`: 公式 + ユーザー追加の template 一覧を表示。
@@ -44,15 +67,38 @@ pub fn list() -> Result<()> {
 
     // 重要: extraction 後は embedded template も `~/.config/vibepod/
     // templates/<name>/` の実ディレクトリとして存在するため、
-    // `user_template_names()` の結果にも embedded 名が含まれる。
-    // 「embedded か user-only か」の判定は **コンパイル時 embed 集合** を
-    // 真とするべき。embed 集合に存在する名前は常に `(embedded)`、
-    // それ以外で user dir にのみ存在するものを「ユーザー追加」とする。
+    // `user_template_names()` の結果には embedded 名も embed されない
+    // ユーザー追加名も両方含まれる。さらに、ユーザーが embedded と
+    // 同名のディレクトリを自前で作って override しているケースもある。
+    // 区別のため extract_template_dir は dest に `.vibepod-embedded`
+    // マーカーを書く。これが存在する dir は vibepod 管理 (`(embedded)`)、
+    // 存在しない dir はユーザー作成 (override or 純粋ユーザー追加)。
     let embedded_names = embedded_template_names();
-    let user_only_names: Vec<String> = user_template_names(&config_dir)
-        .into_iter()
-        .filter(|n| !embedded_names.contains(n))
-        .collect();
+    let templates_root = config_dir.join("templates");
+    let user_dir_names = user_template_names(&config_dir);
+    // 真に embed として表示する: コンパイル時 embed 集合に名前があり、
+    // かつ on-disk dir にマーカーがある (= vibepod が展開した実体)。
+    // マーカーが無ければ user override として扱う。
+    let mut embedded_displayed: Vec<String> = Vec::new();
+    let mut user_only_names: Vec<String> = Vec::new();
+    for name in &user_dir_names {
+        let dir = templates_root.join(name);
+        if embedded_names.contains(name) && is_embedded_extracted(&dir) {
+            embedded_displayed.push(name.clone());
+        } else {
+            user_only_names.push(name.clone());
+        }
+    }
+    // まだ extract されていない embedded もあり得る (read-only $HOME 等で
+    // extract が呼ばれない経路)。embedded 集合のうち on-disk に出ていない
+    // ものは embedded として広告だけしておく。
+    for name in &embedded_names {
+        if !user_dir_names.contains(name) {
+            embedded_displayed.push(name.clone());
+        }
+    }
+    embedded_displayed.sort();
+    embedded_displayed.dedup();
 
     // デフォルト template 名は **global config.toml のみ** から読む。
     // VibepodConfig::load() を通すとプロジェクト `.vibepod/config.toml`
@@ -60,13 +106,14 @@ pub fn list() -> Result<()> {
     // 設定を更新しても `template list` の表示が変わらない不整合が起きる
     // （`set-default` は global 限定の操作なので、`list` の `<<default>>`
     // 表示もグローバル値に揃えるのが一貫性のある挙動）。
-    let default_name = read_global_default_prompt_template(&config_dir);
+    let default_name = read_global_default_prompt_template(&config_dir)?;
 
     let mut all: Vec<(String, bool, bool)> = Vec::new(); // (name, is_embedded, is_default)
-    for name in &embedded_names {
+    for name in &embedded_displayed {
         let is_default = default_name.as_deref() == Some(name.as_str());
         all.push((name.clone(), true, is_default));
     }
+    user_only_names.sort();
     for name in &user_only_names {
         let is_default = default_name.as_deref() == Some(name.as_str());
         all.push((name.clone(), false, is_default));

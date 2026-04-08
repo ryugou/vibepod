@@ -486,9 +486,36 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
 /// 将来的に他パターンが必要になったら拡張するか、template 側に
 /// `.vibepod-executable` のような metadata ファイルで宣言させる仕組みを
 /// 入れる。
+/// `template list` が「embedded を vibepod が展開した dir」と
+/// 「ユーザー自身が同名で作った dir (override)」を区別するためのマーカー
+/// ファイル名。中身は extract 時の vibepod バージョン (informational)。
+/// マーカーは extract のトップ階層にのみ書き、再帰展開時には書かない
+/// (ネストしたディレクトリは template の一部であって、独立した template
+/// ではないため)。
+pub const EMBEDDED_MARKER_FILENAME: &str = ".vibepod-embedded";
+
+/// 指定された template ディレクトリが vibepod の embed 展開によって
+/// 作られたものかどうかを判定する。マーカーファイルの存在のみで判定し、
+/// 内容は問わない (将来の version 比較フィールド拡張用)。
+pub fn is_embedded_extracted(template_dir: &Path) -> bool {
+    template_dir.join(EMBEDDED_MARKER_FILENAME).is_file()
+}
+
 fn extract_template_dir(dir: &Dir<'_>, dest: &Path) -> Result<()> {
+    extract_template_dir_inner(dir, dest, true)
+}
+
+fn extract_template_dir_inner(dir: &Dir<'_>, dest: &Path, is_top: bool) -> Result<()> {
     std::fs::create_dir_all(dest)
         .with_context(|| format!("Failed to create directory: {}", dest.display()))?;
+
+    if is_top {
+        // トップ階層にだけマーカーを書く。`template list` がこのファイルを
+        // 見て embedded vs user-override を判定する。
+        let marker_path = dest.join(EMBEDDED_MARKER_FILENAME);
+        std::fs::write(&marker_path, env!("CARGO_PKG_VERSION"))
+            .with_context(|| format!("Failed to write {}", marker_path.display()))?;
+    }
 
     for file in dir.files() {
         let file_name = match file.path().file_name().and_then(|n| n.to_str()) {
@@ -520,7 +547,9 @@ fn extract_template_dir(dir: &Dir<'_>, dest: &Path) -> Result<()> {
             None => continue,
         };
         let sub_path = dest.join(sub_name);
-        extract_template_dir(subdir, &sub_path)?;
+        // 再帰呼び出しでは marker を書かない (ネスト dir は独立 template
+        // ではない)
+        extract_template_dir_inner(subdir, &sub_path, false)?;
     }
 
     Ok(())
