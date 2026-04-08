@@ -745,7 +745,16 @@ fn test_build_template_mounts_accepts_installed_plugins_json() {
     // (`/home/vibepod/.claude/plugins/cache/...`) で書く responsibility を持つ。
     let config_dir = tempfile::tempdir().unwrap();
     let template_dir = config_dir.path().join("templates").join("with-registry");
-    std::fs::create_dir_all(template_dir.join("plugins").join("cache")).unwrap();
+    // registry の installPath が指す実体を作る
+    std::fs::create_dir_all(
+        template_dir
+            .join("plugins")
+            .join("cache")
+            .join("claude-plugins-official")
+            .join("superpowers")
+            .join("5.0.7"),
+    )
+    .unwrap();
     std::fs::write(
         template_dir.join("plugins").join("installed_plugins.json"),
         r#"{
@@ -772,6 +781,72 @@ fn test_build_template_mounts_accepts_installed_plugins_json() {
             .any(|(_, dst)| dst == "/home/vibepod/.claude/plugins"),
         "expected plugins mount at /home/vibepod/.claude/plugins, got {:?}",
         mounts
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_registry_installpath_missing_on_disk() {
+    // registry が指す installPath が container prefix で正しく始まって
+    // いても、plugins_dir 配下に対応 cache dir が無い (stale な registry /
+    // version 不一致 / typo) 場合は bail する。container 起動後の silent
+    // な plugin 解決失敗を防ぐ。
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("stale-registry");
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(
+        template_dir.join("plugins").join("installed_plugins.json"),
+        r#"{
+  "version": 2,
+  "plugins": {
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/vibepod/.claude/plugins/cache/claude-plugins-official/superpowers/9.9.9",
+        "version": "9.9.9"
+      }
+    ]
+  }
+}"#,
+    )
+    .unwrap();
+
+    let err = build_template_mounts("stale-registry", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no corresponding directory exists"),
+        "expected error about missing plugin cache dir, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_registry_installpath_with_traversal() {
+    // installPath に `..` を含む registry は path traversal として reject
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("traversal");
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(
+        template_dir.join("plugins").join("installed_plugins.json"),
+        r#"{
+  "version": 2,
+  "plugins": {
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/vibepod/.claude/plugins/../../../etc/passwd",
+        "version": "evil"
+      }
+    ]
+  }
+}"#,
+    )
+    .unwrap();
+
+    let err = build_template_mounts("traversal", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("path traversal"),
+        "expected path traversal error, got: {}",
+        err
     );
 }
 

@@ -292,7 +292,7 @@ pub fn build_template_mounts(
         // 固定パスに mount する」という単純な 1 点 mount で済む。
         let registry_path = plugins_dir.join("installed_plugins.json");
         if registry_path.is_file() {
-            validate_template_installed_plugins(&registry_path, template_name)?;
+            validate_template_installed_plugins(&registry_path, template_name, &plugins_dir)?;
         }
         mounts.push((
             plugins_dir.to_string_lossy().to_string(),
@@ -328,7 +328,11 @@ const TEMPLATE_PLUGINS_CONTAINER_PREFIX: &str = "/home/vibepod/.claude/plugins/"
 /// Claude が plugin を解決できず silent breakage になる。template 作成
 /// 時に container path を pre-bake する responsibility を明示的に強制
 /// するためのガード。
-fn validate_template_installed_plugins(registry_path: &Path, template_name: &str) -> Result<()> {
+fn validate_template_installed_plugins(
+    registry_path: &Path,
+    template_name: &str,
+    plugins_dir: &Path,
+) -> Result<()> {
     let content = std::fs::read_to_string(registry_path).with_context(|| {
         format!(
             "Failed to read template plugin registry {}",
@@ -418,6 +422,39 @@ fn validate_template_installed_plugins(registry_path: &Path, template_name: &str
                     idx,
                     install_path,
                     TEMPLATE_PLUGINS_CONTAINER_PREFIX
+                );
+            }
+
+            // installPath の container prefix 以降の相対部分が、実際に
+            // `plugins_dir` 配下に存在することを確認する。registry が指す
+            // plugin cache が無いと、container 起動後に Claude は plugin を
+            // 解決できず silent に壊れる。stale な registry (version 不一致)
+            // / typo / 不完全な bundle を early に検出する。
+            let relative = &install_path[TEMPLATE_PLUGINS_CONTAINER_PREFIX.len()..];
+            // Security: path traversal 排除 (container prefix の直後に
+            // `../` を埋め込むケース)
+            if relative.split('/').any(|seg| seg == ".." || seg == ".") {
+                bail!(
+                    "Template '{}' plugin registry: '{}' entry {} has an installPath with \
+                     path traversal segments: {:?}",
+                    template_name,
+                    plugin_id,
+                    idx,
+                    install_path
+                );
+            }
+            let resolved = plugins_dir.join(relative);
+            if !resolved.is_dir() {
+                bail!(
+                    "Template '{}' plugin registry: '{}' entry {} has installPath {:?} \
+                     but no corresponding directory exists at {} in the template's \
+                     plugins/ bundle. Either ship the plugin cache under that path or \
+                     update installed_plugins.json to match the actual bundle layout.",
+                    template_name,
+                    plugin_id,
+                    idx,
+                    install_path,
+                    resolved.display()
                 );
             }
         }
