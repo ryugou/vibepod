@@ -4,7 +4,7 @@
 //! 実 mount 処理は `src/cli/run/template.rs` 側、こちらは UI と管理操作のみ。
 
 use anyhow::{bail, Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::run::template::{
     embedded_template_names, is_embedded_extracted, user_template_names,
@@ -205,4 +205,286 @@ pub fn set_default(name: &str) -> Result<()> {
     config::set_default_prompt_template(&config_dir, Some(name))?;
     println!("Default template set to: {}", name);
     Ok(())
+}
+
+/// `vibepod template reset <name> [--force]`: 埋め込み template を
+/// 強制的に再展開する。既存の `~/.config/vibepod/templates/<name>/`
+/// は削除され、vibepod binary から新しいコピーが展開される。
+///
+/// 用途: vibepod 本体をアップグレードして embedded template の中身
+/// (特に `plugins/`) が更新されたとき、既に extract 済みのユーザーが
+/// 新しい bundle を取り込むために使う。通常の extract は冪等で既存を
+/// 保護するため、このコマンドが無いと古い bundle を持ち続ける。
+///
+/// **警告**: 対象 dir 配下でユーザーが行った編集は消える。`--force`
+/// を明示的に付けないと拒否する。
+pub fn reset(name: &str, force: bool) -> Result<()> {
+    let config_dir = config::default_config_dir()?;
+    reset_in(&config_dir, name, force)
+}
+
+/// `reset()` の内部実装。`config_dir` を明示的に受け取るため、HOME 環境
+/// 変数を汚さずに testable。本体は `reset()` からのみ呼ばれる。
+pub(crate) fn reset_in(config_dir: &Path, name: &str, force: bool) -> Result<()> {
+    // embedded 集合にある名前だけ reset 対象にする。user-only template の
+    // reset は意味不明 (復元元が無い) なのでエラーにする。
+    let embedded = crate::cli::run::template::embedded_template_names();
+    if !embedded.iter().any(|n| n == name) {
+        bail!(
+            "Template '{}' is not an embedded template and cannot be reset. \
+             Available embedded templates: {}",
+            name,
+            if embedded.is_empty() {
+                "(none)".to_string()
+            } else {
+                embedded.join(", ")
+            }
+        );
+    }
+
+    let target: PathBuf = config_dir.join("templates").join(name);
+
+    // 既存 dir が **user override** (marker 無し) の場合は reset を拒否する。
+    // embedded と同名だからといってユーザーが手作業で作った template を
+    // 勝手に置き換えてよいわけではない。`template list` も override を
+    // 別扱いで表示するので、reset の挙動もそれに揃える。
+    if target.exists() && !crate::cli::run::template::is_embedded_extracted(&target) {
+        bail!(
+            "Refusing to reset template '{}': the on-disk directory '{}' is a user \
+             override (no .vibepod-embedded marker), not a vibepod-managed extraction. \
+             Remove or rename the directory manually if you want to replace it with \
+             the embedded copy.",
+            name,
+            target.display()
+        );
+    }
+
+    if !force {
+        bail!(
+            "Refusing to reset template '{}' without --force. The target directory \
+             '{}' will be removed and re-extracted from the vibepod binary. Any user \
+             edits inside that directory will be lost. Pass --force to confirm.",
+            name,
+            target.display()
+        );
+    }
+
+    // 既存 entry の削除 (存在する場合のみ)。存在しなくてもエラーにしない
+    // (単に「最新バイナリから fresh 展開する」になる)。
+    //
+    // symlink や regular file の可能性もある: `symlink_metadata()` で
+    // follow せず実体を見て、それぞれ適切な remove 関数を呼ぶ。
+    // (`remove_dir_all` は symlink 相手だと `Not a directory` で失敗する)
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) => {
+            let ft = meta.file_type();
+            if ft.is_symlink() || ft.is_file() {
+                std::fs::remove_file(&target).with_context(|| {
+                    format!(
+                        "Failed to remove existing template entry (symlink or file): {}",
+                        target.display()
+                    )
+                })?;
+            } else if ft.is_dir() {
+                std::fs::remove_dir_all(&target).with_context(|| {
+                    format!(
+                        "Failed to remove existing template directory: {}",
+                        target.display()
+                    )
+                })?;
+            } else {
+                bail!(
+                    "Cannot reset template '{}': unsupported entry type at {}",
+                    name,
+                    target.display()
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 存在しない: そのまま fresh 展開へ
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to inspect existing template path before reset: {}",
+                    target.display()
+                )
+            });
+        }
+    }
+
+    // 単一ターゲット再展開。`extract_single_embedded_template_if_missing`
+    // は既存 dir を保護するが、ここでは直前に削除したので fresh 展開が走る。
+    crate::cli::run::template::extract_single_embedded_template_if_missing(config_dir, name)?;
+
+    println!(
+        "Template '{}' reset: fresh copy extracted to {}",
+        name,
+        target.display()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn embedded_name_or_skip() -> Option<String> {
+        // Phase 4+ では rust-code / review が embed される。どちらかが
+        // 存在すれば十分。テストでは最初の 1 つを採用する。
+        crate::cli::run::template::embedded_template_names()
+            .into_iter()
+            .next()
+    }
+
+    #[test]
+    fn reset_in_rejects_non_embedded_name() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let err = reset_in(config_dir.path(), "definitely-not-embedded", true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not an embedded template"),
+            "expected non-embedded rejection, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn reset_in_without_force_refuses_even_for_embedded() {
+        let Some(name) = embedded_name_or_skip() else {
+            return;
+        };
+        let config_dir = tempfile::tempdir().unwrap();
+        let err = reset_in(config_dir.path(), &name, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--force"),
+            "expected --force requirement, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn reset_in_refuses_user_override_dir() {
+        // embedded と同名の dir が marker 無しで存在する → user override
+        // として扱って reset を拒否する。
+        let Some(name) = embedded_name_or_skip() else {
+            return;
+        };
+        let config_dir = tempfile::tempdir().unwrap();
+        let target = config_dir.path().join("templates").join(&name);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("CLAUDE.md"), "user override").unwrap();
+        // 明示的に marker は書かない
+
+        let err = reset_in(config_dir.path(), &name, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("user override"),
+            "expected user override rejection, got: {}",
+            msg
+        );
+        // user の内容が保持されていること (reset が走っていない)
+        let content = std::fs::read_to_string(target.join("CLAUDE.md")).unwrap();
+        assert_eq!(content, "user override");
+    }
+
+    #[test]
+    fn reset_in_fresh_extract_when_target_absent() {
+        // 既存 dir が無い状態でも reset は成功して fresh 展開が走る。
+        let Some(name) = embedded_name_or_skip() else {
+            return;
+        };
+        let config_dir = tempfile::tempdir().unwrap();
+        assert!(!config_dir.path().join("templates").join(&name).exists());
+
+        reset_in(config_dir.path(), &name, true).unwrap();
+
+        let target = config_dir.path().join("templates").join(&name);
+        assert!(target.is_dir());
+        assert!(
+            target.join(".vibepod-embedded").is_file(),
+            "fresh extract should write the embedded marker"
+        );
+    }
+
+    #[test]
+    fn reset_in_replaces_prior_embedded_extract() {
+        // 前回の embedded extract (marker あり) に対して reset すると、
+        // 既存 dir が削除されて fresh 展開される。ユーザーが追加したファイル
+        // も一緒に消えることを確認 (reset の責務)。
+        let Some(name) = embedded_name_or_skip() else {
+            return;
+        };
+        let config_dir = tempfile::tempdir().unwrap();
+        let target = config_dir.path().join("templates").join(&name);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(".vibepod-embedded"), "0.0.0-test").unwrap();
+        std::fs::write(target.join("STALE.md"), "should be gone after reset").unwrap();
+
+        reset_in(config_dir.path(), &name, true).unwrap();
+
+        assert!(
+            !target.join("STALE.md").exists(),
+            "stale file should be wiped"
+        );
+        assert!(
+            target.join(".vibepod-embedded").is_file(),
+            "marker should be re-written after fresh extract"
+        );
+        // fresh 展開後、embedded 側の CLAUDE.md が置かれている
+        assert!(target.join("CLAUDE.md").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_in_handles_symlink_target() {
+        // 既存 target が (embedded dir へ向く) symlink の場合も、reset は
+        // remove_file で消してから fresh 展開できる。
+        // (symlink 経由だと is_embedded_extracted() は解決先の marker を見る)
+        let Some(name) = embedded_name_or_skip() else {
+            return;
+        };
+        let config_dir = tempfile::tempdir().unwrap();
+        let templates = config_dir.path().join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+
+        // 解決先に marker 付きの dir を用意 (embedded extract の模倣)
+        let real = templates.join("__real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join(".vibepod-embedded"), "0.0.0-test").unwrap();
+
+        let link = templates.join(&name);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        reset_in(config_dir.path(), &name, true).unwrap();
+
+        // reset 後は symlink は消えて、fresh な dir が置かれている
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(!meta.file_type().is_symlink(), "symlink should be replaced");
+        assert!(link.is_dir());
+        assert!(link.join(".vibepod-embedded").is_file());
+    }
+
+    #[test]
+    fn reset_in_rejects_regular_file_at_target_when_force_missing() {
+        // regular file が target にある + force 無し → force 要求エラー
+        // (is_embedded_extracted() は false なので user override 扱いで
+        //  先に bail するのが正しい挙動)
+        let Some(name) = embedded_name_or_skip() else {
+            return;
+        };
+        let config_dir = tempfile::tempdir().unwrap();
+        let templates = config_dir.path().join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::write(templates.join(&name), "not a dir").unwrap();
+
+        let err = reset_in(config_dir.path(), &name, true).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("user override"),
+            "expected user override rejection (file has no marker), got: {}",
+            msg
+        );
+    }
 }

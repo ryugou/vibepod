@@ -272,42 +272,28 @@ pub fn build_template_mounts(
     }
 
     if let Some(plugins_dir) = resolve_template_entry(&template_dir, "plugins", true)? {
-        // Phase 2 では `installed_plugins.json` を含む plugins 構成は
-        // サポートしない。理由:
+        // template の `plugins/` は `/home/vibepod/.claude/plugins` に
+        // そのまま bind mount する。`installed_plugins.json` が含まれる
+        // 場合、その `installPath` は template 側で **container 内の
+        // 絶対パス** (`/home/vibepod/.claude/plugins/cache/...`) を
+        // 指している前提。template 作成時に container path を pre-bake
+        // するのが responsibility で、vibepod CLI は rewrite しない。
         //
-        // host mode の `plugins_mount_entries` は plugins ディレクトリを
-        // `/home/vibepod/.claude/plugins` と `<host_home>/.claude/plugins` の
-        // 2 箇所に bind mount することで、`installed_plugins.json` 内の絶対
-        // パス (`installPath`) を container 内で解決している。
+        // ただし、user template を host install からコピーした場合など、
+        // `installPath` に host 絶対パス (`/Users/alice/.claude/plugins/...`)
+        // が残っていると container 内で解決できず silent breakage になる。
+        // silent breakage を防ぐため、`installed_plugins.json` を読み、
+        // すべての `installPath` が container prefix で始まることを
+        // 検証する。1 つでも不一致があれば明示的にエラーにする。
         //
-        // template 側では build-time の絶対パスが container 内では存在
-        // しないため、単純に `/home/vibepod/.claude/plugins` に 1 度だけ
-        // bind mount しても Claude が `installPath` を解決できず silent に
-        // 壊れる。
-        //
-        // Phase 3/4 で以下のいずれかで解決する予定:
-        //   a) template build 時に `installed_plugins.json` の `installPath`
-        //      を container 側の固定パス (/home/vibepod/.claude/plugins/...)
-        //      に normalize する
-        //   b) template メタデータで必要な plugin set を宣言し、container
-        //      起動時に再 install する
-        //
-        // それまでは明示的にエラーにして silent breakage を防ぐ。
-        // `plugins/` 配下に `installed_plugins.json` が無い場合は
-        // シンプルな直置きプラグイン（plain files）として単一 mount を
-        // 許可する。
-        let installed_plugins_json = plugins_dir.join("installed_plugins.json");
-        if installed_plugins_json.is_file() {
-            bail!(
-                "Template '{}' ships plugins/installed_plugins.json, which is not \
-                 supported yet (tracked for Phase 3/4). Template plugins with an \
-                 installed_plugins.json registry cannot resolve their absolute \
-                 installPath values inside the container. Remove installed_plugins.json \
-                 or wait for Phase 3/4 template support.",
-                template_name
-            );
+        // host mode は別経路 (`plugins_mount_entries`) で 2 点 mount
+        // + host 絶対パスを container に投影する方式を取るが、
+        // template mode は「template が所有する plugin を container
+        // 固定パスに mount する」という単純な 1 点 mount で済む。
+        let registry_path = plugins_dir.join("installed_plugins.json");
+        if registry_path.is_file() {
+            validate_template_installed_plugins(&registry_path, template_name, &plugins_dir)?;
         }
-
         mounts.push((
             plugins_dir.to_string_lossy().to_string(),
             "/home/vibepod/.claude/plugins".to_string(),
@@ -326,6 +312,154 @@ pub fn build_template_mounts(
     // 「ホスト ~/.claude を一切 mount しない = 素の Claude 環境で走らせる」
     // という明示的な opt-out パターンを許可するため。
     Ok(mounts)
+}
+
+/// Container 内で plugin cache がマウントされる path prefix。
+/// template 側の `installed_plugins.json` に書く `installPath` は
+/// この prefix で始まっていなければならない。
+const TEMPLATE_PLUGINS_CONTAINER_PREFIX: &str = "/home/vibepod/.claude/plugins/";
+
+/// `plugins/installed_plugins.json` を読み、全エントリの `installPath` が
+/// container 内絶対パス (`/home/vibepod/.claude/plugins/...`) を指して
+/// いることを検証する。
+///
+/// vibepod CLI は rewrite を行わないので、host 絶対パス (例:
+/// `/Users/alice/.claude/plugins/...`) が残っていると container 内で
+/// Claude が plugin を解決できず silent breakage になる。template 作成
+/// 時に container path を pre-bake する responsibility を明示的に強制
+/// するためのガード。
+fn validate_template_installed_plugins(
+    registry_path: &Path,
+    template_name: &str,
+    plugins_dir: &Path,
+) -> Result<()> {
+    let content = std::fs::read_to_string(registry_path).with_context(|| {
+        format!(
+            "Failed to read template plugin registry {}",
+            registry_path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", registry_path.display()))?;
+
+    // Fail fast on malformed shapes. silent な「欠けてたら skip」を許す
+    // と、壊れた registry を通してしまって container 内で plugin が
+    // silent に解決されない状態を再生産する。期待 shape:
+    //   {
+    //     "version": 2,
+    //     "plugins": {
+    //       "<plugin-id>": [
+    //         { "installPath": "/home/vibepod/.claude/plugins/...", ... },
+    //         ...
+    //       ],
+    //       ...
+    //     }
+    //   }
+    let root = value.as_object().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Template '{}' plugin registry {} is not a JSON object at top level",
+            template_name,
+            registry_path.display()
+        )
+    })?;
+    let plugins_obj = root
+        .get("plugins")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Template '{}' plugin registry {} is missing a top-level 'plugins' object",
+                template_name,
+                registry_path.display()
+            )
+        })?;
+
+    for (plugin_id, entries) in plugins_obj.iter() {
+        let array = entries.as_array().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Template '{}' plugin registry: '{}' must be an array of install entries",
+                template_name,
+                plugin_id
+            )
+        })?;
+        if array.is_empty() {
+            bail!(
+                "Template '{}' plugin registry: '{}' has an empty install-entries array; \
+                 remove the plugin id or add a valid entry",
+                template_name,
+                plugin_id
+            );
+        }
+        for (idx, entry) in array.iter().enumerate() {
+            let entry_obj = entry.as_object().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Template '{}' plugin registry: '{}' entry {} is not a JSON object",
+                    template_name,
+                    plugin_id,
+                    idx
+                )
+            })?;
+            let install_path = entry_obj
+                .get("installPath")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Template '{}' plugin registry: '{}' entry {} is missing a string \
+                         'installPath' field",
+                        template_name,
+                        plugin_id,
+                        idx
+                    )
+                })?;
+            if !install_path.starts_with(TEMPLATE_PLUGINS_CONTAINER_PREFIX) {
+                bail!(
+                    "Template '{}' plugin registry has non-container installPath for \
+                     '{}' entry {}: {:?}. Template plugins must pre-bake container paths \
+                     starting with '{}' because vibepod CLI does not rewrite paths at \
+                     runtime. Either convert the installPath to the container-side path \
+                     or remove installed_plugins.json to ship plugins as plain files only.",
+                    template_name,
+                    plugin_id,
+                    idx,
+                    install_path,
+                    TEMPLATE_PLUGINS_CONTAINER_PREFIX
+                );
+            }
+
+            // installPath の container prefix 以降の相対部分が、実際に
+            // `plugins_dir` 配下に存在することを確認する。registry が指す
+            // plugin cache が無いと、container 起動後に Claude は plugin を
+            // 解決できず silent に壊れる。stale な registry (version 不一致)
+            // / typo / 不完全な bundle を early に検出する。
+            let relative = &install_path[TEMPLATE_PLUGINS_CONTAINER_PREFIX.len()..];
+            // Security: path traversal 排除 (container prefix の直後に
+            // `../` を埋め込むケース)
+            if relative.split('/').any(|seg| seg == ".." || seg == ".") {
+                bail!(
+                    "Template '{}' plugin registry: '{}' entry {} has an installPath with \
+                     path traversal segments: {:?}",
+                    template_name,
+                    plugin_id,
+                    idx,
+                    install_path
+                );
+            }
+            let resolved = plugins_dir.join(relative);
+            if !resolved.is_dir() {
+                bail!(
+                    "Template '{}' plugin registry: '{}' entry {} has installPath {:?} \
+                     but no corresponding directory exists at {} in the template's \
+                     plugins/ bundle. Either ship the plugin cache under that path or \
+                     update installed_plugins.json to match the actual bundle layout.",
+                    template_name,
+                    plugin_id,
+                    idx,
+                    install_path,
+                    resolved.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 埋め込まれた公式 template の名前一覧を返す（トップレベルのサブ
@@ -716,23 +850,44 @@ fn extract_template_dir_inner(dir: &Dir<'_>, dest: &Path, is_top: bool) -> Resul
 
 /// Phase 3 heuristic: 展開されたファイルに実行権限を付けるべきか。
 ///
-/// extension または親ディレクトリ名で判定する。
+/// extension または親ディレクトリ名で判定する。カバー範囲:
+/// - `.sh` / `.bash` / `.zsh` / `.fish` / `.cmd` 拡張子
+/// - `bin/` / `scripts/` ディレクトリ配下の全ファイル
+/// - `hooks/` ディレクトリ配下の、`.json` / `.md` / `.txt` 以外の全ファイル
+///   (hook script は拡張子無し・`.cmd` 等を持つことが多い)
 #[cfg(unix)]
 fn should_be_executable(path: &Path) -> bool {
     // 拡張子判定
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if matches!(ext, "sh" | "bash" | "zsh" | "fish") {
+    let ext_lower = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if let Some(ref ext) = ext_lower {
+        if matches!(ext.as_str(), "sh" | "bash" | "zsh" | "fish" | "cmd") {
             return true;
         }
     }
     // ディレクトリ名判定
+    let mut under_hooks = false;
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
             if let Some(s) = name.to_str() {
                 if matches!(s, "bin" | "scripts") {
                     return true;
                 }
+                if s == "hooks" {
+                    under_hooks = true;
+                }
             }
+        }
+    }
+    // hooks/ 配下は data file (.json / .md / .txt) を除いて実行可能とみなす
+    if under_hooks {
+        match ext_lower.as_deref() {
+            Some("json") | Some("md") | Some("txt") | Some("yaml") | Some("yml") | Some("toml") => {
+                return false;
+            }
+            _ => return true,
         }
     }
     false
