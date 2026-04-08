@@ -183,3 +183,71 @@ fn test_prompt_idle_timeout_zero_disables() {
     let config = vibepod::config::VibepodConfig::load(dir.path(), config_dir.path()).unwrap();
     assert_eq!(config.prompt_idle_timeout(), 0);
 }
+
+// --- default_prompt_template (Phase 2 では field のみ、挙動は Phase 4) ---
+
+#[test]
+fn test_default_prompt_template_not_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = vibepod::config::VibepodConfig::load(dir.path(), config_dir.path()).unwrap();
+    assert_eq!(config.default_prompt_template(), None);
+}
+
+#[test]
+fn test_default_prompt_template_from_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let vibepod_dir = dir.path().join(".vibepod");
+    std::fs::create_dir_all(&vibepod_dir).unwrap();
+    std::fs::write(
+        vibepod_dir.join("config.toml"),
+        "[run]\ndefault_prompt_template = \"rust-code\"\n",
+    )
+    .unwrap();
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = vibepod::config::VibepodConfig::load(dir.path(), config_dir.path()).unwrap();
+    assert_eq!(
+        config.default_prompt_template(),
+        Some("rust-code".to_string())
+    );
+}
+
+#[test]
+fn test_default_prompt_template_from_global() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let global_dir = dir.path().join("global");
+    std::fs::create_dir_all(&global_dir).unwrap();
+    std::fs::write(
+        global_dir.join("config.toml"),
+        "[run]\ndefault_prompt_template = \"review\"\n",
+    )
+    .unwrap();
+
+    let config = vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap();
+    assert_eq!(config.default_prompt_template(), Some("review".to_string()));
+}
+
+#[test]
+fn test_default_prompt_template_project_overrides_global() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("project");
+    std::fs::create_dir_all(project_dir.join(".vibepod")).unwrap();
+    std::fs::write(
+        project_dir.join(".vibepod/config.toml"),
+        "[run]\ndefault_prompt_template = \"custom\"\n",
+    )
+    .unwrap();
+    let global_dir = dir.path().join("global");
+    std::fs::create_dir_all(&global_dir).unwrap();
+    std::fs::write(
+        global_dir.join("config.toml"),
+        "[run]\ndefault_prompt_template = \"rust-code\"\n",
+    )
+    .unwrap();
+
+    let config = vibepod::config::VibepodConfig::load(&project_dir, &global_dir).unwrap();
+    assert_eq!(config.default_prompt_template(), Some("custom".to_string()));
+}

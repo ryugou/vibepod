@@ -1,7 +1,8 @@
 use vibepod::cli::run::{
     build_claude_config_mounts, detect_languages, get_lang_install_cmd, parse_mount_arg,
     plugins_mount_entries, prepare_sanitized_settings_mount, sanitize_settings_json,
-    validate_slack_channel_id,
+    template::{build_template_mounts, effective_template_name},
+    validate_slack_channel_id, RunOptions,
 };
 
 // --- detect_languages ---
@@ -427,4 +428,172 @@ fn test_prepare_sanitized_settings_mount_no_host_settings() {
         result.is_none(),
         "should return None when host settings.json is absent"
     );
+}
+
+// --- effective_template_name (Phase 2) ---
+
+fn make_run_options(template: Option<&str>, prompt: Option<&str>) -> RunOptions {
+    RunOptions {
+        resume: false,
+        prompt: prompt.map(|s| s.to_string()),
+        no_network: false,
+        env_vars: Vec::new(),
+        env_file: None,
+        lang: None,
+        worktree: false,
+        mount: Vec::new(),
+        new_container: false,
+        template: template.map(|s| s.to_string()),
+    }
+}
+
+#[test]
+fn test_effective_template_name_returns_opts_template_when_set() {
+    let opts = make_run_options(Some("rust-code"), None);
+    assert_eq!(
+        effective_template_name(&opts),
+        Some("rust-code".to_string())
+    );
+}
+
+#[test]
+fn test_effective_template_name_returns_none_when_template_unset_interactive() {
+    let opts = make_run_options(None, None);
+    assert_eq!(effective_template_name(&opts), None);
+}
+
+#[test]
+fn test_effective_template_name_returns_none_when_template_unset_with_prompt() {
+    // Phase 2 の受け入れ基準: --prompt があっても --template 未指定なら
+    // None を返す（= host mount にフォールバック）。Phase 4 で
+    // default_prompt_template を参照するよう拡張される。
+    let opts = make_run_options(None, Some("implement X"));
+    assert_eq!(effective_template_name(&opts), None);
+}
+
+// --- build_template_mounts ---
+
+#[test]
+fn test_build_template_mounts_happy_path() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("my-template");
+    std::fs::create_dir_all(template_dir.join("skills")).unwrap();
+    std::fs::create_dir_all(template_dir.join("agents")).unwrap();
+    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::write(template_dir.join("CLAUDE.md"), "# test").unwrap();
+    std::fs::write(template_dir.join("settings.json"), "{}").unwrap();
+
+    let mounts = build_template_mounts("my-template", config_dir.path()).unwrap();
+
+    assert_eq!(mounts.len(), 5);
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/CLAUDE.md"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/skills"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/agents"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/plugins"));
+    assert!(mounts
+        .iter()
+        .any(|(_, dst)| dst == "/home/vibepod/.claude/settings.json"));
+}
+
+#[test]
+fn test_build_template_mounts_partial_content() {
+    // CLAUDE.md だけがある template
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("minimal");
+    std::fs::create_dir_all(&template_dir).unwrap();
+    std::fs::write(template_dir.join("CLAUDE.md"), "# minimal").unwrap();
+
+    let mounts = build_template_mounts("minimal", config_dir.path()).unwrap();
+
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].1, "/home/vibepod/.claude/CLAUDE.md");
+}
+
+#[test]
+fn test_build_template_mounts_missing_template_errors() {
+    let config_dir = tempfile::tempdir().unwrap();
+    // template ディレクトリを作らない
+    let err = build_template_mounts("nonexistent", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Template 'nonexistent' not found"),
+        "expected 'not found' error, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_build_template_mounts_empty_template_errors() {
+    // template ディレクトリは存在するが中身が全く無いケース
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("empty");
+    std::fs::create_dir_all(&template_dir).unwrap();
+
+    let err = build_template_mounts("empty", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("empty"),
+        "expected 'empty' error, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_path_traversal() {
+    // `../` を含む template 名は path traversal の危険があるので
+    // 拒否する（`~/.config/vibepod/templates/` の外に出るのを防ぐ）
+    let config_dir = tempfile::tempdir().unwrap();
+    let err = build_template_mounts("../etc", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_slash_in_name() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let err = build_template_mounts("foo/bar", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_empty_name() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let err = build_template_mounts("", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("empty"),
+        "expected 'empty' error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_accepts_valid_names() {
+    // ASCII 英数字 / ハイフン / アンダースコアは OK。
+    // ディレクトリが無いので not found エラーで確認する（validation は通る）
+    let config_dir = tempfile::tempdir().unwrap();
+    for name in &["rust-code", "my_template", "abc123", "a-b_c-1"] {
+        let err = build_template_mounts(name, config_dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "valid name '{}' should pass validation but fail with 'not found', got: {}",
+            name,
+            msg
+        );
+    }
 }
