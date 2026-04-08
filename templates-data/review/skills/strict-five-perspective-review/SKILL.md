@@ -1,6 +1,6 @@
 ---
 name: strict-five-perspective-review
-description: Security / Reliability / Performance / Maintainability / Architecture の 5 観点を機械的に適用し、「問題なし」を許容せず最低 1 件の指摘を出す。use when コードをレビューするとき
+description: Security / Reliability / Performance / Maintainability / Architecture の 5 観点を機械的に適用する。深掘り不足による「問題なし」を禁じるが、誠実な深掘り後の空 findings は PASS として許容する。use when コードをレビューするとき
 ---
 
 # Strict Five-Perspective Review
