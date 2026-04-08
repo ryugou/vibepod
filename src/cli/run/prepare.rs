@@ -129,6 +129,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     if opts.worktree && opts.prompt.is_none() {
         bail!("--worktree requires --prompt");
     }
+    if opts.worktree && opts.template.is_some() {
+        // --worktree は毎回ランダム名の使い捨てコンテナを作る一方、
+        // --template は (project, template) ごとに永続コンテナを作る。
+        // この 2 つは命名モデルが衝突するため Phase 2 では同時指定を
+        // 禁止する。template 対応の worktree モードは将来の phase で検討。
+        bail!("--worktree and --template cannot be used together in Phase 2");
+    }
 
     // Record session for restore
     let head_before = git::get_head_hash(&cwd)?;

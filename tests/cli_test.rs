@@ -151,6 +151,47 @@ fn test_parse_run_without_mount() {
 }
 
 #[test]
+fn test_parse_run_with_template() {
+    let cli = Cli::parse_from(["vibepod", "run", "--template", "rust-code"]);
+    if let vibepod::cli::Commands::Run { template, .. } = cli.command {
+        assert_eq!(template, Some("rust-code".to_string()));
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_without_template() {
+    let cli = Cli::parse_from(["vibepod", "run"]);
+    if let vibepod::cli::Commands::Run { template, .. } = cli.command {
+        assert_eq!(template, None);
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_parse_run_with_template_and_prompt() {
+    let cli = Cli::parse_from([
+        "vibepod",
+        "run",
+        "--template",
+        "review",
+        "--prompt",
+        "review the diff",
+    ]);
+    if let vibepod::cli::Commands::Run {
+        template, prompt, ..
+    } = cli.command
+    {
+        assert_eq!(template, Some("review".to_string()));
+        assert_eq!(prompt, Some("review the diff".to_string()));
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
 fn test_parse_ps_command() {
     let cli = Cli::parse_from(["vibepod", "ps"]);
     assert!(matches!(cli.command, vibepod::cli::Commands::Ps {}));

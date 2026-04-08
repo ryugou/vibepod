@@ -116,8 +116,25 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 | `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
+| `--template <name>` | Mount a vibepod-managed template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/` instead of the host's `~/.claude/`. Template names must match `[a-zA-Z0-9_-]+`. See "Templates" below |
 
 **Container reuse is the default.** VibePod creates one container per project (named `vibepod-{project}-{hash}`) and reuses it across runs. Setup only runs once; subsequent `vibepod run` calls skip setup and connect instantly via `docker exec`. Use `--new` to force a fresh container.
+
+When `--template <name>` is passed, each `(project, template)` combination gets its own persistent container, so you can switch between host mode and multiple templates on the same project without `--new`.
+
+#### Templates (Phase 2 preview)
+
+Templates let you mount an alternate `.claude/` configuration into the container in place of your host's `~/.claude/`. A template is a directory under `~/.config/vibepod/templates/<name>/` that can contain any subset of:
+
+- `CLAUDE.md`
+- `skills/`
+- `agents/`
+- `plugins/` (plain files only in Phase 2 — templates that ship an `installed_plugins.json` registry are rejected until Phase 3/4 lands the installPath-rewrite support)
+- `settings.json` (**not** sanitized — unlike host mode, template `settings.json` is mounted as-is, so don't put secrets in a template you share)
+
+An empty template (`~/.config/vibepod/templates/blank/` with nothing inside) is allowed and means "mount nothing into `/home/vibepod/.claude/`" — useful for a clean Claude home.
+
+`--worktree --template <name>` is rejected in Phase 2. The disposable `--worktree` container naming and the per-template persistent-container naming would conflict; template support for worktree mode will land in a later phase.
 
 #### When to use which?
 
