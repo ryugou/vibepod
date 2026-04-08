@@ -63,19 +63,29 @@ pub fn effective_template_name(
     }
     if opts.prompt.is_some() && !opts.worktree {
         if let Some(default) = config.default_prompt_template() {
-            // Best-effort: embedded ならまず extract を試み、その後
-            // `resolve_template_dir` で実体を検証する。ここで失敗する
-            // 全てのケース (read-only `$HOME` で extract できない、
-            // 同名ファイル/壊れた symlink で resolve できない、binary に
-            // 含まれず user dir にも無い、…) は **host mount に
-            // フォールバック** する。default は best-effort であり、
-            // ユーザーが設定したからといって prompt run を壊してはならない。
+            // Best-effort 解決:
+            //
+            //   1. まず on-disk の `templates/<default>/` を直接 resolve
+            //      する。ユーザーが管理する template (embedded を一切
+            //      使わないケースを含む) は extract に依存せずそのまま
+            //      使えるべき。embedded extraction の失敗が user-managed
+            //      default を巻き込んで host mount フォールバックさせる
+            //      regression を防ぐ。
+            //   2. 直接 resolve に失敗した場合、その名前が embedded 集合に
+            //      あるなら lazy extract を試み、再 resolve する。
+            //   3. それでも resolve できなければ host mount フォールバック
+            //      (`None` を返す)。default は best-effort なので、
+            //      ユーザーが設定したからといって prompt run を壊さない。
             //
             // 明示的な `--template` (上の `opts.template` 分岐) は
             // この best-effort 扱いを受けず、`prepare_context` の後段で
             // resolve に失敗すれば fail-fast する。これはユーザーの
             // 明示的意図なのでエラーが見えるべき。
-            if extract_embedded_templates_if_missing(config_dir).is_ok()
+            if resolve_template_dir(&default, config_dir).is_ok() {
+                return Some(default);
+            }
+            if embedded_template_names().iter().any(|n| n == &default)
+                && extract_embedded_templates_if_missing(config_dir).is_ok()
                 && resolve_template_dir(&default, config_dir).is_ok()
             {
                 return Some(default);
@@ -317,39 +327,67 @@ pub fn embedded_template_names() -> Vec<String> {
 ///
 /// `<config_dir>/templates/` 配下のサブディレクトリ名を列挙し、
 /// template 名として有効なもの（validate_template_name に通るもの）
-/// だけを返す。ディレクトリが存在しない場合は空配列。
+/// だけを返す。ディレクトリが存在しない場合は空配列を返す（正常）。
 ///
 /// `resolve_template_dir` と同じ採否基準を適用する: in-root への
 /// symlinked dir は valid として含める一方、外部を指す symlink は
 /// 除外する。これによって `template list` / `set-default` の見える
 /// 集合が `run --template` の実行可能集合と一致する（不一致だと
 /// list には出ないが run は通る、または逆、という混乱が起きる）。
-pub fn user_template_names(config_dir: &Path) -> Vec<String> {
+///
+/// エラー処理: `read_dir` の I/O エラーはそのまま伝播する。
+/// `~/.config/vibepod/templates/` が存在するのに読めないような状況
+/// (パーミッション破壊、I/O 故障) は silent に無視せず、CLI で
+/// 「I/O failure」をユーザーに見せるのが正しい (silent な不一致は
+/// `set-default` が実在 template を reject する不可解な挙動を生む)。
+/// 個別エントリの metadata 取得失敗だけは「読めないエントリ = 一覧
+/// から除外」として best-effort で扱う (read_dir 自体は成功している
+/// ので catastrophic ではない)。
+pub fn user_template_names(config_dir: &Path) -> Result<Vec<String>> {
     let templates_root = config_dir.join("templates");
     if !templates_root.is_dir() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let mut names: Vec<String> = std::fs::read_dir(&templates_root)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
+    let entries = std::fs::read_dir(&templates_root).with_context(|| {
+        format!(
+            "Failed to read templates directory: {}",
+            templates_root.display()
+        )
+    })?;
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "Failed to read entry under templates directory: {}",
+                templates_root.display()
+            )
+        })?;
         // `std::fs::metadata(path)` は symlink を辿る (DirEntry::metadata
         // は辿らない点に注意)。symlinked dir も is_dir として拾うために
-        // path 経由で stat を取る。
-        .filter(|e| {
-            std::fs::metadata(e.path())
-                .map(|m| m.is_dir())
-                .unwrap_or(false)
-        })
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| validate_template_name(n).is_ok())
+        // path 経由で stat を取る。symlink 解決失敗 (broken symlink) は
+        // best-effort で除外。
+        let is_dir = match std::fs::metadata(entry.path()) {
+            Ok(m) => m.is_dir(),
+            Err(_) => false,
+        };
+        if !is_dir {
+            continue;
+        }
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if validate_template_name(&name).is_err() {
+            continue;
+        }
         // 最終的な escape チェックは resolve_template_dir に委譲する。
-        // これで in-root symlink は通り、外部を指す symlink は弾かれる。
-        .filter(|n| resolve_template_dir(n, config_dir).is_ok())
-        .collect();
+        if resolve_template_dir(&name, config_dir).is_err() {
+            continue;
+        }
+        names.push(name);
+    }
     names.sort();
-    names
+    Ok(names)
 }
 
 /// 埋め込み template のうち、ユーザー template ディレクトリに

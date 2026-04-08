@@ -78,7 +78,7 @@ pub fn list() -> Result<()> {
     // 存在しない dir はユーザー作成 (override or 純粋ユーザー追加)。
     let embedded_names = embedded_template_names();
     let templates_root = config_dir.join("templates");
-    let user_dir_names = user_template_names(&config_dir);
+    let user_dir_names = user_template_names(&config_dir)?;
     // 真に embed として表示する: コンパイル時 embed 集合に名前があり、
     // かつ on-disk dir にマーカーがある (= vibepod が展開した実体)。
     // マーカーが無ければ user override として扱う。
@@ -156,7 +156,7 @@ pub fn set_default(name: &str) -> Result<()> {
     // 権限さえあれば) 動く。実際の展開は `run --template <name>` 経路で
     // 必要になった時点で lazy に行う。
     let embedded = embedded_template_names();
-    let user = user_template_names(&config_dir);
+    let user = user_template_names(&config_dir)?;
 
     let exists = embedded.iter().any(|n| n == name) || user.iter().any(|n| n == name);
     if !exists {

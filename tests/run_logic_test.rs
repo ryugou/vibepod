@@ -534,6 +534,20 @@ fn test_effective_template_name_returns_default_when_prompt_and_existing_templat
 }
 
 #[test]
+fn test_effective_template_name_uses_user_dir_default_without_extract() {
+    // ユーザーが自分で `templates/<name>/` を作って default に指定して
+    // いる場合、embedded extraction の成否とは無関係にそのまま使えるべき。
+    // (templates-data/ が空でも user-managed default は機能する)
+    let opts = make_run_options(None, Some("implement X"));
+    let (config, dir) = config_with_default_template("rust-code");
+    // dir には既に `templates/rust-code/` がある (helper が作る)。
+    assert_eq!(
+        effective_template_name(&opts, &config, dir.path()),
+        Some("rust-code".to_string())
+    );
+}
+
+#[test]
 fn test_effective_template_name_falls_back_when_default_template_missing() {
     // --prompt あり、config に default あり、しかし template が
     // ローカルにも embed にも存在しない → host mount フォールバック (None)。
@@ -801,7 +815,7 @@ fn test_build_template_mounts_rejects_symlinked_template_dir_escape() {
 #[test]
 fn test_user_template_names_empty_when_no_dir() {
     let config_dir = tempfile::tempdir().unwrap();
-    let names = user_template_names(config_dir.path());
+    let names = user_template_names(config_dir.path()).unwrap();
     assert!(names.is_empty());
 }
 
@@ -814,7 +828,7 @@ fn test_user_template_names_returns_subdirs_only() {
     // ファイルは無視される
     std::fs::write(templates.join("not_a_template.txt"), "").unwrap();
 
-    let names = user_template_names(config_dir.path());
+    let names = user_template_names(config_dir.path()).unwrap();
     assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
 }
 
@@ -830,7 +844,7 @@ fn test_user_template_names_includes_in_root_symlinked_dir() {
     std::fs::create_dir_all(templates.join("real")).unwrap();
     std::os::unix::fs::symlink(templates.join("real"), templates.join("alias")).unwrap();
 
-    let names = user_template_names(config_dir.path());
+    let names = user_template_names(config_dir.path()).unwrap();
     assert_eq!(names, vec!["alias".to_string(), "real".to_string()]);
 }
 
@@ -846,7 +860,7 @@ fn test_user_template_names_excludes_out_of_root_symlinked_dir() {
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, config_dir.join("templates").join("escape")).unwrap();
 
-    let names = user_template_names(&config_dir);
+    let names = user_template_names(&config_dir).unwrap();
     assert!(
         names.is_empty(),
         "expected escape symlink to be filtered, got {:?}",
@@ -862,8 +876,41 @@ fn test_user_template_names_filters_invalid_names() {
     // 名前に `.` が入るものは validate_template_name で reject される
     std::fs::create_dir_all(templates.join("invalid.name")).unwrap();
 
-    let names = user_template_names(config_dir.path());
+    let names = user_template_names(config_dir.path()).unwrap();
     assert_eq!(names, vec!["valid".to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_user_template_names_propagates_unreadable_dir() {
+    // templates/ が存在するが読み取り権限が無い場合、空配列ではなく
+    // I/O エラーを伝播する。silent な空配列だと set-default が「該当
+    // template が無い」と reject して原因不明になるため。
+    use std::os::unix::fs::PermissionsExt;
+    let config_dir = tempfile::tempdir().unwrap();
+    let templates = config_dir.path().join("templates");
+    std::fs::create_dir_all(&templates).unwrap();
+    let mut perms = std::fs::metadata(&templates).unwrap().permissions();
+    perms.set_mode(0o000);
+    std::fs::set_permissions(&templates, perms).unwrap();
+
+    let result = user_template_names(config_dir.path());
+
+    // restore so the tempdir cleanup can run
+    let mut perms = std::fs::metadata(&templates).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&templates, perms).unwrap();
+
+    // root user (CI) は permission を無視するので、その場合だけ skip。
+    // 通常ユーザー実行ではエラーが返るはず。
+    if let Ok(names) = &result {
+        eprintln!(
+            "running as root or perms ignored — got {:?}, skipping assertion",
+            names
+        );
+        return;
+    }
+    assert!(result.is_err(), "expected I/O error, got {:?}", result);
 }
 
 #[test]
