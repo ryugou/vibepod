@@ -9,8 +9,8 @@
 //! 挙動のまま（後方互換）。`--prompt` 時の自動 default template 切替は
 //! Phase 4 で `effective_template_name` を拡張して導入予定。
 
-use anyhow::{bail, Result};
-use std::path::Path;
+use anyhow::{bail, Context, Result};
+use std::path::{Path, PathBuf};
 
 use super::RunOptions;
 
@@ -49,6 +49,94 @@ fn validate_template_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Template 名を検証し、その template ディレクトリの canonical path を返す。
+///
+/// この関数は path traversal / symlink escape 対策の要:
+/// - 名前を英数字 + `-` + `_` に制限
+/// - ディレクトリを canonicalize し、`<config_dir>/templates/` 配下で
+///   あることを verify（symlinked template dir が外を指す場合は reject）
+/// - 返す path は canonical（macOS case-insensitive FS で "review"/"Review"
+///   が同じ canonical path に解決されるため、container name hash 等の
+///   stable key としても使える）
+pub fn resolve_template_dir(template_name: &str, config_dir: &Path) -> Result<PathBuf> {
+    validate_template_name(template_name)?;
+
+    let templates_root = config_dir.join("templates");
+    let template_dir = templates_root.join(template_name);
+    if !template_dir.is_dir() {
+        bail!(
+            "Template '{}' not found at {}",
+            template_name,
+            template_dir.display()
+        );
+    }
+
+    let canonical_template = template_dir.canonicalize().with_context(|| {
+        format!(
+            "Failed to canonicalize template directory: {}",
+            template_dir.display()
+        )
+    })?;
+
+    // templates_root 自体が存在しない場合は上の `template_dir.is_dir()` で
+    // 既に弾かれているので、ここでは必ず存在する。canonical を取って
+    // containment チェックする。
+    let canonical_root = templates_root.canonicalize().with_context(|| {
+        format!(
+            "Failed to canonicalize templates root: {}",
+            templates_root.display()
+        )
+    })?;
+
+    if !canonical_template.starts_with(&canonical_root) {
+        bail!(
+            "Template '{}' resolves to {} which is outside {} (possible symlink escape)",
+            template_name,
+            canonical_template.display(),
+            canonical_root.display()
+        );
+    }
+
+    Ok(canonical_template)
+}
+
+/// `template_dir` 配下にある `entry` が存在し、symlink で外部を指して
+/// いない場合のみ canonical path を返す。存在しなければ `Ok(None)`、
+/// symlink escape なら `Err`。
+fn resolve_template_entry(
+    template_dir: &Path,
+    entry: &str,
+    expect_dir: bool,
+) -> Result<Option<PathBuf>> {
+    let path = template_dir.join(entry);
+    let exists = if expect_dir {
+        path.is_dir()
+    } else {
+        path.is_file()
+    };
+    if !exists {
+        return Ok(None);
+    }
+
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize template entry: {}", path.display()))?;
+
+    // template_dir は既に canonical である前提で、entry の canonical が
+    // その配下にあることを verify（symlink が template root 外を指す
+    // 攻撃を防ぐ）
+    if !canonical.starts_with(template_dir) {
+        bail!(
+            "Template entry {} resolves to {} which is outside template root {} (possible symlink escape)",
+            path.display(),
+            canonical.display(),
+            template_dir.display()
+        );
+    }
+
+    Ok(Some(canonical))
+}
+
 /// 指定された template ディレクトリの中身をコンテナへのマウント
 /// エントリに変換する。
 ///
@@ -61,51 +149,38 @@ fn validate_template_name(name: &str) -> Result<()> {
 /// - `plugins/`       → `/home/vibepod/.claude/plugins`
 /// - `settings.json`  → `/home/vibepod/.claude/settings.json`
 ///
-/// 存在するエントリだけがマウント対象になる。template ディレクトリ
-/// そのものが存在しない場合はエラー。
+/// 存在するエントリだけがマウント対象になる。全てのエントリは
+/// canonicalize され、template root の外を指す symlink は reject される。
 pub fn build_template_mounts(
     template_name: &str,
     config_dir: &Path,
 ) -> Result<Vec<(String, String)>> {
-    validate_template_name(template_name)?;
-
-    let template_dir = config_dir.join("templates").join(template_name);
-    if !template_dir.is_dir() {
-        bail!(
-            "Template '{}' not found at {}",
-            template_name,
-            template_dir.display()
-        );
-    }
+    let template_dir = resolve_template_dir(template_name, config_dir)?;
 
     let mut mounts = Vec::new();
 
-    let claude_md = template_dir.join("CLAUDE.md");
-    if claude_md.is_file() {
+    if let Some(canonical) = resolve_template_entry(&template_dir, "CLAUDE.md", false)? {
         mounts.push((
-            claude_md.to_string_lossy().to_string(),
+            canonical.to_string_lossy().to_string(),
             "/home/vibepod/.claude/CLAUDE.md".to_string(),
         ));
     }
 
-    let skills_dir = template_dir.join("skills");
-    if skills_dir.is_dir() {
+    if let Some(canonical) = resolve_template_entry(&template_dir, "skills", true)? {
         mounts.push((
-            skills_dir.to_string_lossy().to_string(),
+            canonical.to_string_lossy().to_string(),
             "/home/vibepod/.claude/skills".to_string(),
         ));
     }
 
-    let agents_dir = template_dir.join("agents");
-    if agents_dir.is_dir() {
+    if let Some(canonical) = resolve_template_entry(&template_dir, "agents", true)? {
         mounts.push((
-            agents_dir.to_string_lossy().to_string(),
+            canonical.to_string_lossy().to_string(),
             "/home/vibepod/.claude/agents".to_string(),
         ));
     }
 
-    let plugins_dir = template_dir.join("plugins");
-    if plugins_dir.is_dir() {
+    if let Some(plugins_dir) = resolve_template_entry(&template_dir, "plugins", true)? {
         // Phase 2 では `installed_plugins.json` を含む plugins 構成は
         // サポートしない。理由:
         //
@@ -148,10 +223,9 @@ pub fn build_template_mounts(
         ));
     }
 
-    let settings_json = template_dir.join("settings.json");
-    if settings_json.is_file() {
+    if let Some(canonical) = resolve_template_entry(&template_dir, "settings.json", false)? {
         mounts.push((
-            settings_json.to_string_lossy().to_string(),
+            canonical.to_string_lossy().to_string(),
             "/home/vibepod/.claude/settings.json".to_string(),
         ));
     }

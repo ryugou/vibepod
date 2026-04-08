@@ -332,11 +332,18 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // --worktree: ランダムハッシュ（使い捨て）
     // それ以外:
     //   - host mode (--template 未指定): プロジェクトパスの SHA256 先頭 8 文字（v1.4.3 互換）
-    //   - template mode (--template <name>): プロジェクトパス + template 名の SHA256
+    //   - template mode (--template <name>): プロジェクトパス + template の canonical path の SHA256
     //
-    // template 指定時だけ hash を変えることで、template モードは
-    // host mode とは別の container に落ちつつ、既存の host mode container
-    // は v1.4.3 と同じ名前のままで互換性を保つ。
+    // template 指定時だけ hash を変えることで、template モードは host
+    // mode とは別の container に落ちつつ、既存の host mode container は
+    // v1.4.3 と同じ名前のままで互換性を保つ。
+    //
+    // template mode の hash 入力には **canonical path** を使う。これで
+    // macOS のような case-insensitive FS で `--template review` と
+    // `--template Review` が同じディレクトリに解決される場合に同じ container
+    // に落ちる（raw 名を使うと 2 つの container に split されてしまう）。
+    // 同時に、resolve_template_dir が symlink escape を防ぐので path
+    // traversal の心配もない。
     let effective_template = super::template::effective_template_name(opts);
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
@@ -344,8 +351,9 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
     } else if let Some(ref tmpl) = effective_template {
-        // Template mode: hash に template 名を混ぜて host mode と別名に
-        let hash_input = format!("{}|template={}", cwd_str, tmpl);
+        // Template mode: canonical path を hash 入力に使う
+        let canonical_template = super::template::resolve_template_dir(tmpl, &config_dir)?;
+        let hash_input = format!("{}|template={}", cwd_str, canonical_template.display());
         let hash = path_hash_8(&hash_input);
         format!("vibepod-{}-{}", project_name, hash)
     } else {

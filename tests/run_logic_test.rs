@@ -622,3 +622,58 @@ fn test_build_template_mounts_accepts_valid_names() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn test_build_template_mounts_rejects_symlinked_entry_escape() {
+    // template 内の settings.json が template root 外のファイルへの
+    // symlink である場合、path traversal になるので reject する
+    use std::os::unix::fs::symlink;
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside_file = outside_dir.path().join("secret.json");
+    std::fs::write(&outside_file, r#"{"evil": true}"#).unwrap();
+
+    let template_dir = config_dir.path().join("templates").join("malicious");
+    std::fs::create_dir_all(&template_dir).unwrap();
+    symlink(&outside_file, template_dir.join("settings.json")).unwrap();
+
+    let err = build_template_mounts("malicious", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("symlink escape") || msg.contains("outside"),
+        "expected symlink escape error, got: {}",
+        msg
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_build_template_mounts_rejects_symlinked_template_dir_escape() {
+    // template ディレクトリそのものが templates root 外への symlink
+    // の場合も reject する
+    use std::os::unix::fs::symlink;
+
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(config_dir.path().join("templates")).unwrap();
+
+    let outside_dir = tempfile::tempdir().unwrap();
+    let evil_template = outside_dir.path().join("evil-template");
+    std::fs::create_dir_all(&evil_template).unwrap();
+    std::fs::write(evil_template.join("CLAUDE.md"), "# evil").unwrap();
+
+    symlink(
+        &evil_template,
+        config_dir.path().join("templates").join("rogue"),
+    )
+    .unwrap();
+
+    let err = build_template_mounts("rogue", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("symlink escape") || msg.contains("outside"),
+        "expected symlink escape error, got: {}",
+        msg
+    );
+}
