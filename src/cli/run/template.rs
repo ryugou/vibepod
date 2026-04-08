@@ -787,6 +787,100 @@ fn extract_one_embedded(embedded: &Dir<'_>, name: &str, config_dir: &Path) -> Re
 /// ではないため)。
 pub const EMBEDDED_MARKER_FILENAME: &str = ".vibepod-embedded";
 
+/// Template metadata file name. Optional — templates without this file
+/// get `TemplateMetadata::default()` (no required langs, no extras).
+pub const TEMPLATE_METADATA_FILENAME: &str = "vibepod-template.toml";
+
+/// Template metadata declared in `vibepod-template.toml` at the root of
+/// an extracted template directory. This is **internal** metadata for
+/// the host-side `vibepod` CLI; it is NOT mounted into the container.
+///
+/// `required_langs` lists language identifiers (matching the keys
+/// understood by `get_lang_install_cmd`) that MUST be present in the
+/// container's runtime before Claude Code starts. These are unioned
+/// with whatever languages the user / project config / cwd detection
+/// would otherwise install, so a rust-specific template can declare
+/// `required_langs = ["rust"]` and get the Rust toolchain regardless
+/// of the host project's language.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateMetadata {
+    /// `[runtime]` section.
+    #[serde(default)]
+    pub runtime: TemplateRuntimeMetadata,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateRuntimeMetadata {
+    /// Language identifiers the template requires at runtime (e.g.
+    /// `["rust"]`). Merged into `prepare_context`'s lang pipeline.
+    #[serde(default)]
+    pub required_langs: Vec<String>,
+}
+
+/// Read `vibepod-template.toml` from the given extracted template
+/// directory. Returns `TemplateMetadata::default()` if the file is
+/// absent (the common case for user-added templates that do not
+/// declare anything). Errors on I/O failures, TOML parse failures,
+/// **and** metadata validation failures (invalid / empty / unknown /
+/// unsupported `required_langs` entries). Callers that want
+/// best-effort semantics (e.g. the `default_prompt_template`
+/// fallback path in `prepare_context`) should catch the error and
+/// degrade gracefully; explicit `--template` callers should
+/// propagate for fail-fast behavior.
+pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
+    let metadata_path = template_dir.join(TEMPLATE_METADATA_FILENAME);
+    let content = match std::fs::read_to_string(&metadata_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TemplateMetadata::default());
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to read template metadata: {}",
+                    metadata_path.display()
+                )
+            });
+        }
+    };
+    let metadata: TemplateMetadata = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as TOML", metadata_path.display()))?;
+    // Validate each entry: shape (non-empty ASCII identifier) AND
+    // support (identifier must resolve to a known install command via
+    // `is_supported_lang`). Silent acceptance of a typo like "rsut"
+    // would lead to `setup_cmd` dropping the entry at install time,
+    // leaving the template's documented "required" runtime absent.
+    // Fail fast instead.
+    for lang in &metadata.runtime.required_langs {
+        if lang.is_empty()
+            || !lang
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '+' || c == '.')
+        {
+            bail!(
+                "Template metadata {}: invalid required_langs entry '{}'. \
+                 Language identifiers must be non-empty ASCII alphanumerics \
+                 (plus '-', '_', '+', '.').",
+                metadata_path.display(),
+                lang
+            );
+        }
+        if !super::is_supported_lang(lang) {
+            bail!(
+                "Template metadata {}: required_langs entry '{}' is not a \
+                 language vibepod knows how to install. Supported values: {}. \
+                 If you need a new runtime, extend `get_lang_install_cmd` first.",
+                metadata_path.display(),
+                lang,
+                super::SUPPORTED_LANGS.join(", ")
+            );
+        }
+    }
+    Ok(metadata)
+}
+
 /// 指定された template ディレクトリが vibepod の embed 展開によって
 /// 作られたものかどうかを判定する。マーカーファイルの存在のみで判定し、
 /// 内容は問わない (将来の version 比較フィールド拡張用)。

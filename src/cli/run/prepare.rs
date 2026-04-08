@@ -269,8 +269,78 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     };
 
     // Load vibepod project config
-    let config_dir_early = config::default_config_dir()?;
-    let vibepod_config = config::VibepodConfig::load(&cwd, &config_dir_early)?;
+    let config_dir = config::default_config_dir()?;
+    let vibepod_config = config::VibepodConfig::load(&cwd, &config_dir)?;
+
+    // Template resolution (early): we need the template's canonical
+    // path *and* its metadata (vibepod-template.toml → required_langs)
+    // **before** we compute the language install plan, because the
+    // template can declare languages that MUST be installed regardless
+    // of what the cwd-detection or --lang would choose.
+    //
+    // This block does the lazy extract + resolve that Phase 3/4 would
+    // otherwise do inline near the container-name hashing step below.
+    // We capture the result here and reuse it when computing the
+    // container name, so extraction / resolve is not repeated.
+    let effective_template =
+        super::template::effective_template_name(opts, &vibepod_config, &config_dir);
+    let resolved_template: Option<(String, std::path::PathBuf)> = if opts.worktree {
+        None
+    } else if let Some(ref tmpl) = effective_template {
+        // First try resolving the template as-is. User-provided templates
+        // must work on read-only ~/.config/vibepod/ without any extraction.
+        let canonical = match super::template::resolve_template_dir(tmpl, &config_dir) {
+            Ok(path) => path,
+            Err(first_err) => {
+                // Only trigger embedded extraction on an exact name match
+                // (case-sensitive). See the comment in the earlier inline
+                // location for the rationale (typo mutation / read-only).
+                let is_embedded = super::template::embedded_template_names()
+                    .iter()
+                    .any(|n| n == tmpl);
+                if !is_embedded {
+                    return Err(first_err);
+                }
+                super::template::extract_single_embedded_template_if_missing(&config_dir, tmpl)?;
+                super::template::resolve_template_dir(tmpl, &config_dir)?
+            }
+        };
+        Some((tmpl.clone(), canonical))
+    } else {
+        None
+    };
+
+    // Read template metadata (required_langs, etc.) if in template mode.
+    //
+    // Explicit `--template` is fail-fast: a malformed vibepod-template.toml
+    // for a user-chosen template is a clear user-visible error. But
+    // when the template came from `default_prompt_template` in config
+    // (best-effort default path), we must NOT turn metadata parse
+    // failures into fatal run errors — the spec for that code path is
+    // "fall back to host mount on any resolution failure". Emit a
+    // warning and drop the template so the run continues on host
+    // mounts, mirroring `effective_template_name`'s own fallback.
+    let template_is_explicit = opts.template.is_some();
+    let (resolved_template, template_metadata) = match resolved_template {
+        Some((name, canonical)) => match super::template::read_template_metadata(&canonical) {
+            Ok(meta) => (Some((name, canonical)), meta),
+            Err(e) if !template_is_explicit => {
+                eprintln!(
+                    "warning: configured default template '{}' has invalid \
+                     vibepod-template.toml and will be ignored; falling back \
+                     to host mount. Underlying error: {}",
+                    name, e
+                );
+                (None, super::template::TemplateMetadata::default())
+            }
+            Err(e) => return Err(e),
+        },
+        None => (None, super::template::TemplateMetadata::default()),
+    };
+    // Keep `effective_template` (the name) in sync with `resolved_template`.
+    // When we drop the default template above, downstream template-mode
+    // checks should also see "no template" so the run proceeds on host mounts.
+    let effective_template: Option<String> = resolved_template.as_ref().map(|(n, _)| n.clone());
 
     // Language detection
     let effective_lang = opts.lang.clone().or_else(|| vibepod_config.lang());
@@ -280,21 +350,44 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         Vec::new()
     };
 
-    let (lang_names, lang_display): (Vec<String>, String) = if let Some(ref l) = effective_lang {
-        (vec![l.clone()], format!("{} (--lang)", l))
-    } else if detected_langs.len() == 1 {
-        let (name, file) = &detected_langs[0];
-        (
-            vec![name.clone()],
-            format!("{} (detected from {})", name, file),
-        )
-    } else if detected_langs.len() > 1 {
-        let names: Vec<String> = detected_langs.iter().map(|(n, _)| n.clone()).collect();
-        let display = format!("{} (auto-detected)", names.join(", "));
-        (names, display)
-    } else {
-        (Vec::new(), String::new())
-    };
+    let (mut lang_names, mut lang_display): (Vec<String>, String) =
+        if let Some(ref l) = effective_lang {
+            (vec![l.clone()], format!("{} (--lang)", l))
+        } else if detected_langs.len() == 1 {
+            let (name, file) = &detected_langs[0];
+            (
+                vec![name.clone()],
+                format!("{} (detected from {})", name, file),
+            )
+        } else if detected_langs.len() > 1 {
+            let names: Vec<String> = detected_langs.iter().map(|(n, _)| n.clone()).collect();
+            let display = format!("{} (auto-detected)", names.join(", "));
+            (names, display)
+        } else {
+            (Vec::new(), String::new())
+        };
+
+    // Union template-required langs into the install plan. `--lang`
+    // / config / auto-detect are respected as the primary source;
+    // template required_langs are ADDED on top so a rust-code run in
+    // a Python project still installs Rust.
+    if !template_metadata.runtime.required_langs.is_empty() {
+        let mut template_added: Vec<String> = Vec::new();
+        for req in &template_metadata.runtime.required_langs {
+            if !lang_names.iter().any(|n| n == req) {
+                lang_names.push(req.clone());
+                template_added.push(req.clone());
+            }
+        }
+        if !template_added.is_empty() {
+            let suffix = format!("+ {} (template)", template_added.join(", "));
+            if lang_display.is_empty() {
+                lang_display = suffix.trim_start_matches("+ ").to_string();
+            } else {
+                lang_display = format!("{} {}", lang_display, suffix);
+            }
+        }
+    }
 
     let setup_cmd: Option<String> = {
         let setup_parts: Vec<String> = lang_names
@@ -312,8 +405,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         eprintln!("Note: Language/tool setup requires sudo in the container. If setup fails, run `vibepod init` to rebuild the image.");
     }
 
-    // 2. Load config
-    let config_dir = config::default_config_dir()?;
+    // 2. Load global config (config_dir already loaded at the top
+    // because template metadata resolution needs it early).
     let global_config = config::load_global_config(&config_dir)?;
 
     // Note: 埋め込み template の展開はここでは**行わない**。展開は
@@ -351,57 +444,21 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // に落ちる（raw 名を使うと 2 つの container に split されてしまう）。
     // 同時に、resolve_template_dir が symlink escape を防ぐので path
     // traversal の心配もない。
-    let effective_template =
-        super::template::effective_template_name(opts, &vibepod_config, &config_dir);
+    // Container naming:
+    //   - worktree: random short hash (disposable)
+    //   - template mode: project path + canonical template path → SHA256[:8]
+    //     (canonical path keeps macOS case-insensitive FS consistent)
+    //   - host mode: project path → SHA256[:8] (v1.4.3 compatible)
+    //
+    // Template resolution (lazy extract + resolve_template_dir) already
+    // happened earlier because the lang pipeline needs the template
+    // metadata. Reuse `resolved_template` here instead of re-resolving.
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
             .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
-    } else if let Some(ref tmpl) = effective_template {
-        // まず要求された template をそのまま resolve する。user-provided
-        // の template は embedded extraction に依存せず、read-only
-        // `~/.config/vibepod/` でもそのまま使えるべき。初回で resolve
-        // できなかった場合、**かつ要求された名前が実際に embedded 集合に
-        // 存在する** 場合のみ embedded 展開を試みて再 resolve する。
-        // これにより:
-        //   - typo (`--template rustcod`) による書き込み発生 & 誤解を招く
-        //     エラーメッセージ (`Failed to create templates root`) を防ぐ
-        //   - user-provided template だけを期待する read-only setup で
-        //     typo が無駄な mutation を起こさない
-        //   - 素直な「Template 'rustcod' not found」エラーで返す
-        let canonical_template = match super::template::resolve_template_dir(tmpl, &config_dir) {
-            Ok(path) => path,
-            Err(first_err) => {
-                // extract gate は **厳密一致** のみ許容する。
-                // case-insensitive 比較だと Linux (case-sensitive FS) で
-                // `--template Review` が「embedded 名に該当する」と判定
-                // されて不要な extraction (または read-only setup での
-                // write エラー) を引き起こすため。
-                //
-                // macOS のような case-insensitive FS では、正しい大文字
-                // 小文字 (`--template review`) で 1 度でも実行すれば
-                // extraction が走り、以降 `Review` 等の case variant は
-                // resolve_template_dir の FS-level case-insensitive 解決
-                // で通るようになる。初回の miscased 呼び出しは「Template
-                // 'Review' not found」で素直に返すのが正しい挙動。
-                let is_embedded = super::template::embedded_template_names()
-                    .iter()
-                    .any(|n| n == tmpl);
-                if !is_embedded {
-                    // user-provided 前提で resolve 失敗: そのまま元のエラーを返す。
-                    // extract を呼ばないので `~/.config/vibepod/templates/` は
-                    // 作られない。
-                    return Err(first_err);
-                }
-                // 要求が embedded 名: その template **だけ** を lazy
-                // 展開して再 resolve。他の embedded template (例: 壊れた
-                // `templates/review`) の影響で rust-code の展開が止まら
-                // ないよう、単一 template ターゲットの API を使う。
-                super::template::extract_single_embedded_template_if_missing(&config_dir, tmpl)?;
-                super::template::resolve_template_dir(tmpl, &config_dir)?
-            }
-        };
+    } else if let Some((_, ref canonical_template)) = resolved_template {
         let hash_input = format!("{}|template={}", cwd_str, canonical_template.display());
         let hash = path_hash_8(&hash_input);
         format!("vibepod-{}-{}", project_name, hash)
@@ -594,11 +651,21 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
         mounts_parts.sort();
 
-        let current_lang = lang_display
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
+        // Encode the FULL sorted lang_names set, not just the display's
+        // first token. Previously we stored only the first whitespace-
+        // delimited word of `lang_display`, which meant e.g. "python
+        // (detected from ...) + rust (template)" stored as "python".
+        // A pre-existing container (created before the template added
+        // rust) would then match the label and be reused WITHOUT
+        // running `setup_cmd`, leaving the template-required runtime
+        // uninstalled. Storing the whole set forces re-provisioning
+        // whenever any language is added or removed.
+        let current_lang = {
+            let mut names = lang_names.clone();
+            names.sort();
+            names.dedup();
+            names.join(",")
+        };
 
         // env ファイル解決後の resolved_env_vars をハッシュ化（env ファイルの変更も検知）
         let current_env_hash = hash_env_vars(&resolved_env_vars);
@@ -638,6 +705,60 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                      recreate the container with the updated mount set.",
                     effective_template.as_deref().unwrap_or("")
                 );
+            }
+
+            // Template-required langs must all be present in the stored
+            // lang set of the existing container. `setup_cmd` only runs
+            // at container creation time, so a container created before
+            // the template added a `required_langs` entry will not
+            // have that toolchain even though the warning would let
+            // the reuse through. Hard-fail here with a clear --new hint.
+            //
+            // Gate on `vibepod.labels_version >= 2`. Pre-Phase-4.6
+            // containers do not have that label; their `vibepod.lang`
+            // is in the legacy single-token format that cannot be
+            // trusted as the complete installed set (e.g. a polyglot
+            // container with multiple langs would still have just the
+            // first token stored). Falling through to warn_config_changes
+            // in the legacy case gives the user a readable diff instead
+            // of forcing --new unnecessarily.
+            let labels_version = stored_labels
+                .get("vibepod.labels_version")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(1);
+            if labels_version >= 2 && !template_metadata.runtime.required_langs.is_empty() {
+                let stored_lang_set: std::collections::BTreeSet<&str> = stored_labels
+                    .get("vibepod.lang")
+                    .map(|s| {
+                        s.split([',', ' '])
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let missing: Vec<String> = template_metadata
+                    .runtime
+                    .required_langs
+                    .iter()
+                    .filter(|req| !stored_lang_set.contains(req.as_str()))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    bail!(
+                        "Template '{}' requires language(s) [{}] but the existing \
+                         container was created without them (stored lang set: {:?}). \
+                         Language installation only runs at container creation, so \
+                         the required toolchain cannot be added to the existing \
+                         container. Run with --new to recreate the container with \
+                         the required toolchain installed.",
+                        effective_template.as_deref().unwrap_or(""),
+                        missing.join(", "),
+                        stored_labels
+                            .get("vibepod.lang")
+                            .cloned()
+                            .unwrap_or_else(|| "(none)".to_string())
+                    );
+                }
             }
         }
 
@@ -721,6 +842,16 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
+    // Normalize lang_names before storing in RunContext so downstream
+    // consumers (build_config_labels, future readers) can trust the
+    // invariant without re-normalizing. See RunContext field doc.
+    let lang_names = {
+        let mut names = lang_names;
+        names.sort();
+        names.dedup();
+        names
+    };
+
     Ok(Some(RunContext {
         container_name,
         effective_workspace,
@@ -735,6 +866,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         worktree_branch_name,
         worktree_dir_name,
         lang_display,
+        lang_names,
         store,
         deferred_session,
         extra_mounts,

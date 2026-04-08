@@ -1,0 +1,14 @@
+# vibepod-template.toml — rust-code template metadata
+#
+# Read by the host-side vibepod CLI to decide what runtime the container
+# needs before Claude Code starts. This file is NOT mounted into the
+# container; it is internal metadata for the CLI.
+
+[runtime]
+
+# rust-code's quality gate (cargo fmt / cargo clippy / cargo test) is
+# mandatory, so the Rust toolchain must be installed in the container
+# regardless of what the host project's primary language detection
+# returns. vibepod unions required_langs with any other language
+# sources (--lang, config, cwd detection).
+required_langs = ["rust"]

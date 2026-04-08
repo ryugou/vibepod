@@ -51,6 +51,13 @@ pub(super) struct RunContext {
     pub(super) worktree_branch_name: Option<String>,
     pub(super) worktree_dir_name: Option<String>,
     pub(super) lang_display: String,
+    /// Sorted, deduped list of language identifiers that will be
+    /// installed in the container. Normalization is performed by
+    /// `prepare_context` before this field is stored, so callers
+    /// (notably `build_config_labels`) can rely on the order and
+    /// uniqueness without re-normalizing. `lang_display` is the
+    /// separate human-readable form shown in startup logs.
+    pub(super) lang_names: Vec<String>,
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
@@ -116,6 +123,13 @@ pub fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static st
     langs
 }
 
+/// Single source of truth for language identifiers vibepod knows how
+/// to install inside its container. `get_lang_install_cmd` matches on
+/// these names, `is_supported_lang` checks membership, and error
+/// messages that enumerate supported values read from this list so
+/// they cannot drift out of sync.
+pub const SUPPORTED_LANGS: &[&str] = &["rust", "node", "python", "go", "java"];
+
 pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
     match lang {
         "rust" => Some("sudo apt-get update && sudo apt-get install -y build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && . $HOME/.cargo/env"),
@@ -125,6 +139,14 @@ pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
         "java" => Some("sudo apt-get update && sudo apt-get install -y default-jdk"),
         _ => None,
     }
+}
+
+/// Return `true` iff `lang` has a known install command. Used by
+/// template metadata parsing to reject `required_langs` values that
+/// cannot actually be installed (a typo like "rsut" or an unsupported
+/// runtime), instead of silently dropping them at install time.
+pub fn is_supported_lang(lang: &str) -> bool {
+    get_lang_install_cmd(lang).is_some()
 }
 
 pub fn validate_slack_channel_id(id: &str) -> bool {
@@ -319,16 +341,21 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
 
     labels.insert("vibepod.network".to_string(), ctx.no_network.to_string());
 
-    // lang: setup_cmd がある場合は lang_display から推測するより、
-    // lang_names を RunContext に保存する方がきれいだが、
-    // ここでは lang_display の先頭部分を使う
-    let lang_value = ctx
-        .lang_display
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    labels.insert("vibepod.lang".to_string(), lang_value);
+    // lang: persist the FULL set of languages the container was
+    // provisioned with. `ctx.lang_names` is already sorted and
+    // deduped (invariant established by `prepare_context`), so this
+    // is a direct join. Using lang_display's first token would lose
+    // template-added langs (e.g. "python (detected) + rust (template)"
+    // → "python") and break the reuse check that verifies every
+    // template-required lang is present.
+    labels.insert("vibepod.lang".to_string(), ctx.lang_names.join(","));
+
+    // Label schema version. Containers created pre-Phase-4.6 do not
+    // have this label, which signals that `vibepod.lang` may be in
+    // the legacy single-token format and should NOT be used for the
+    // hard-fail template required_langs check. The reuse-side guard
+    // falls back to a warning for unversioned labels.
+    labels.insert("vibepod.labels_version".to_string(), "2".to_string());
 
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(
