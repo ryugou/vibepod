@@ -137,7 +137,9 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     let vibepod_dir = cwd.join(".vibepod");
     let store = SessionStore::new(vibepod_dir.clone());
 
-    // Ensure .worktrees/ exists for vibepod's --worktree feature
+    // Proactively create .worktrees/ (unconditionally, even without --worktree)
+    // so that vibepod's --worktree feature and any tooling that expects the
+    // directory can rely on its existence without prompting the user later.
     let worktrees_dir = cwd.join(".worktrees");
     if !worktrees_dir.exists() {
         std::fs::create_dir_all(&worktrees_dir)?;
