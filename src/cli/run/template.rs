@@ -4,10 +4,12 @@
 //! mechanism を採用している。本 module はその template 側（vibepod
 //! 管理のテンプレート）のマウント構築を担当する。
 //!
-//! Phase 2 の時点では、`--template <name>` で明示指定された場合にのみ
-//! template mount が使われる。指定が無い場合は v1.4.3 の host mount
-//! 挙動のまま（後方互換）。`--prompt` 時の自動 default template 切替は
-//! Phase 4 で `effective_template_name` を拡張して導入予定。
+//! `--template <name>` で明示指定された場合に template mount が使われる。
+//! 指定が無い場合は v1.4.3 の host mount 挙動のまま（後方互換）。
+//! Phase 3 以降は `--prompt` で `--template` 未指定のとき、
+//! `~/.config/vibepod/config.toml` の `[run] default_prompt_template` を
+//! 見て自動的に template mount に切り替える (best-effort; 解決失敗時は
+//! host mount にフォールバック)。
 
 use anyhow::{bail, Context, Result};
 use include_dir::{include_dir, Dir};
@@ -18,9 +20,12 @@ use super::RunOptions;
 /// ビルド時に `templates-data/` 配下全体をバイナリに埋め込む。
 ///
 /// ここに置かれたサブディレクトリが vibepod の「公式 template」となり、
-/// 初回 `vibepod run` または `vibepod template list` 時に
-/// `~/.config/vibepod/templates/<name>/` に展開される（既存ディレクトリ
-/// があればユーザー編集を保護するため展開しない）。
+/// `vibepod run --template <name>` で template mode が要求され、かつ
+/// 該当 template が `~/.config/vibepod/templates/<name>/` に見当たらない
+/// ときに lazy 展開される (既存ディレクトリがあればユーザー編集を
+/// 保護するため上書きしない)。`vibepod template list` / `template
+/// set-default` は列挙のみで展開は行わないため、read-only な
+/// `~/.config/vibepod/` setup を壊さない。
 ///
 /// Phase 3 の時点では `templates-data/` は空（`.gitkeep` のみ）。
 /// 実際の公式 template (rust-code / review) は Phase 4 で追加される。
@@ -494,16 +499,28 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
             let _ = std::fs::remove_dir_all(&tmp_dest);
             return Err(err);
         }
-        if let Err(err) = std::fs::rename(&tmp_dest, &dest).with_context(|| {
-            format!(
-                "Failed to install embedded template '{}' from {} to {}",
-                name,
-                tmp_dest.display(),
-                dest.display()
-            )
-        }) {
+        if let Err(err) = std::fs::rename(&tmp_dest, &dest) {
+            // 並列実行の race: 他 process が先に install を終えて dest
+            // が既に存在する場合、rename は `AlreadyExists` または
+            // `DirectoryNotEmpty` で失敗する。期待する最終状態 (dest に
+            // template がある) は満たされているので、自分の staging dir
+            // だけ掃除して成功扱いにする。
+            let rename_conflict = matches!(
+                err.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+            );
             let _ = std::fs::remove_dir_all(&tmp_dest);
-            return Err(err);
+            if rename_conflict && dest.is_dir() {
+                continue;
+            }
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to install embedded template '{}' from {} to {}",
+                    name,
+                    tmp_dest.display(),
+                    dest.display()
+                )
+            });
         }
     }
     Ok(())

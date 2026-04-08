@@ -41,11 +41,33 @@ fn read_global_default_prompt_template(global_config_dir: &Path) -> Result<Optio
             config_path.display()
         )
     })?;
-    Ok(parsed
-        .get("run")
-        .and_then(|run| run.get("default_prompt_template"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string()))
+    // `[run]` が無ければ未設定扱い (正常)。存在するが table で無い、
+    // または `default_prompt_template` が string でないなら shape エラー
+    // として fail する (silent な None は `set-default` との不整合を
+    // 生むので避ける — `set-default` は同じファイルで table を要求する)。
+    let run = match parsed.get("run") {
+        None => return Ok(None),
+        Some(v) => v,
+    };
+    let run_table = match run.as_table() {
+        Some(t) => t,
+        None => {
+            bail!(
+                "Invalid config in {}: [run] must be a TOML table",
+                config_path.display()
+            );
+        }
+    };
+    match run_table.get("default_prompt_template") {
+        None => Ok(None),
+        Some(v) => match v.as_str() {
+            Some(s) => Ok(Some(s.to_string())),
+            None => bail!(
+                "Invalid config in {}: [run].default_prompt_template must be a string",
+                config_path.display()
+            ),
+        },
+    }
 }
 
 /// `vibepod template list`: 公式 + ユーザー追加の template 一覧を表示。
