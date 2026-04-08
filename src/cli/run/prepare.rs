@@ -806,37 +806,50 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             // the container in a half-configured state relative to the
             // updated template. Hard-fail with a clear --new hint.
             //
-            // Gated on labels_version >= 3 because Phase 4.6 and earlier
-            // containers have no `vibepod.template_setup_hash` label;
-            // treating their absence as "empty" would falsely reject
-            // every reuse of a legacy container under a template that
-            // introduced setup_commands.
-            if labels_version >= 3 {
-                let stored_setup_hash = stored_labels
-                    .get("vibepod.template_setup_hash")
-                    .cloned()
-                    .unwrap_or_default();
-                if stored_setup_hash != template_setup_hash {
-                    bail!(
-                        "Template '{}' setup_commands hash changed since this \
-                         container was created (stored: {:?}, current: {:?}). \
-                         setup_commands run only at container creation, so the \
-                         new commands cannot be retroactively applied to the \
-                         existing container. Run with --new to recreate the \
-                         container with the updated setup sequence.",
-                        effective_template.as_deref().unwrap_or(""),
-                        if stored_setup_hash.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            stored_setup_hash
-                        },
-                        if template_setup_hash.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            template_setup_hash.clone()
-                        }
-                    );
-                }
+            // Two cases:
+            //   * labels_version >= 3: compare stored hash to current.
+            //     Any difference is drift → bail.
+            //   * labels_version < 3 (pre-Phase-4.7 legacy container):
+            //     the container has no stored hash at all, so we cannot
+            //     tell whether any setup_commands have ever run inside
+            //     it. If the current template declares non-empty
+            //     setup_commands, we MUST assume the legacy container
+            //     is missing them and bail with --new. If the current
+            //     template has empty setup_commands there is nothing
+            //     to install so reuse is safe.
+            let stored_setup_hash = stored_labels
+                .get("vibepod.template_setup_hash")
+                .cloned()
+                .unwrap_or_default();
+            let setup_hash_mismatch = if labels_version >= 3 {
+                stored_setup_hash != template_setup_hash
+            } else {
+                // Legacy (no label): treat as "has ever run any
+                // setup" = false. Mismatch if the current template
+                // wants any setup done.
+                !template_metadata.runtime.setup_commands.is_empty()
+            };
+            if setup_hash_mismatch {
+                bail!(
+                    "Template '{}' setup_commands hash mismatch (stored: {:?}, \
+                     current: {:?}; labels_version={}). setup_commands run only \
+                     at container creation, so the declared commands cannot be \
+                     retroactively applied to the existing container. Run with \
+                     --new to recreate the container with the updated setup \
+                     sequence.",
+                    effective_template.as_deref().unwrap_or(""),
+                    if stored_setup_hash.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        stored_setup_hash
+                    },
+                    if template_setup_hash.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        template_setup_hash.clone()
+                    },
+                    labels_version
+                );
             }
         }
 
