@@ -279,13 +279,21 @@ pub fn build_template_mounts(
         // 指している前提。template 作成時に container path を pre-bake
         // するのが responsibility で、vibepod CLI は rewrite しない。
         //
-        // 公式 template (rust-code / review) は `templates-data/<name>/
-        // plugins/installed_plugins.json` にこの形で記述済み。
+        // ただし、user template を host install からコピーした場合など、
+        // `installPath` に host 絶対パス (`/Users/alice/.claude/plugins/...`)
+        // が残っていると container 内で解決できず silent breakage になる。
+        // silent breakage を防ぐため、`installed_plugins.json` を読み、
+        // すべての `installPath` が container prefix で始まることを
+        // 検証する。1 つでも不一致があれば明示的にエラーにする。
         //
         // host mode は別経路 (`plugins_mount_entries`) で 2 点 mount
         // + host 絶対パスを container に投影する方式を取るが、
         // template mode は「template が所有する plugin を container
         // 固定パスに mount する」という単純な 1 点 mount で済む。
+        let registry_path = plugins_dir.join("installed_plugins.json");
+        if registry_path.is_file() {
+            validate_template_installed_plugins(&registry_path, template_name)?;
+        }
         mounts.push((
             plugins_dir.to_string_lossy().to_string(),
             "/home/vibepod/.claude/plugins".to_string(),
@@ -304,6 +312,65 @@ pub fn build_template_mounts(
     // 「ホスト ~/.claude を一切 mount しない = 素の Claude 環境で走らせる」
     // という明示的な opt-out パターンを許可するため。
     Ok(mounts)
+}
+
+/// Container 内で plugin cache がマウントされる path prefix。
+/// template 側の `installed_plugins.json` に書く `installPath` は
+/// この prefix で始まっていなければならない。
+const TEMPLATE_PLUGINS_CONTAINER_PREFIX: &str = "/home/vibepod/.claude/plugins/";
+
+/// `plugins/installed_plugins.json` を読み、全エントリの `installPath` が
+/// container 内絶対パス (`/home/vibepod/.claude/plugins/...`) を指して
+/// いることを検証する。
+///
+/// vibepod CLI は rewrite を行わないので、host 絶対パス (例:
+/// `/Users/alice/.claude/plugins/...`) が残っていると container 内で
+/// Claude が plugin を解決できず silent breakage になる。template 作成
+/// 時に container path を pre-bake する responsibility を明示的に強制
+/// するためのガード。
+fn validate_template_installed_plugins(registry_path: &Path, template_name: &str) -> Result<()> {
+    let content = std::fs::read_to_string(registry_path).with_context(|| {
+        format!(
+            "Failed to read template plugin registry {}",
+            registry_path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", registry_path.display()))?;
+
+    // top-level `plugins` object: { "<id>": [ { "installPath": "...", ... }, ... ], ... }
+    let plugins_obj = match value.get("plugins").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return Ok(()), // registry が空・不正なら他の plugin が無いのと同じ扱いで通す
+    };
+
+    for (plugin_id, entries) in plugins_obj.iter() {
+        let array = match entries.as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+        for (idx, entry) in array.iter().enumerate() {
+            let install_path = match entry.get("installPath").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => continue, // installPath が無いエントリは skip
+            };
+            if !install_path.starts_with(TEMPLATE_PLUGINS_CONTAINER_PREFIX) {
+                bail!(
+                    "Template '{}' plugin registry has non-container installPath for \
+                     '{}' entry {}: {:?}. Template plugins must pre-bake container paths \
+                     starting with '{}' because vibepod CLI does not rewrite paths at \
+                     runtime. Either convert the installPath to the container-side path \
+                     or remove installed_plugins.json to ship plugins as plain files only.",
+                    template_name,
+                    plugin_id,
+                    idx,
+                    install_path,
+                    TEMPLATE_PLUGINS_CONTAINER_PREFIX
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 埋め込まれた公式 template の名前一覧を返す（トップレベルのサブ
@@ -694,23 +761,44 @@ fn extract_template_dir_inner(dir: &Dir<'_>, dest: &Path, is_top: bool) -> Resul
 
 /// Phase 3 heuristic: 展開されたファイルに実行権限を付けるべきか。
 ///
-/// extension または親ディレクトリ名で判定する。
+/// extension または親ディレクトリ名で判定する。カバー範囲:
+/// - `.sh` / `.bash` / `.zsh` / `.fish` / `.cmd` 拡張子
+/// - `bin/` / `scripts/` ディレクトリ配下の全ファイル
+/// - `hooks/` ディレクトリ配下の、`.json` / `.md` / `.txt` 以外の全ファイル
+///   (hook script は拡張子無し・`.cmd` 等を持つことが多い)
 #[cfg(unix)]
 fn should_be_executable(path: &Path) -> bool {
     // 拡張子判定
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if matches!(ext, "sh" | "bash" | "zsh" | "fish") {
+    let ext_lower = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if let Some(ref ext) = ext_lower {
+        if matches!(ext.as_str(), "sh" | "bash" | "zsh" | "fish" | "cmd") {
             return true;
         }
     }
     // ディレクトリ名判定
+    let mut under_hooks = false;
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
             if let Some(s) = name.to_str() {
                 if matches!(s, "bin" | "scripts") {
                     return true;
                 }
+                if s == "hooks" {
+                    under_hooks = true;
+                }
             }
+        }
+    }
+    // hooks/ 配下は data file (.json / .md / .txt) を除いて実行可能とみなす
+    if under_hooks {
+        match ext_lower.as_deref() {
+            Some("json") | Some("md") | Some("txt") | Some("yaml") | Some("yml") | Some("toml") => {
+                return false;
+            }
+            _ => return true,
         }
     }
     false

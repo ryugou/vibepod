@@ -77,13 +77,18 @@ template mode で有効になる plugin:
 - **superpowers** — TDD / debugging / writing-plans / verification-before-completion
   等の規律系 skill 群。`rust-tdd-cycle` / `rust-quality-gate` の上位で参照する
   (brainstorming / systematic-debugging / receiving-code-review 等)
-- **rust-analyzer-lsp** — rust-analyzer を介した型情報・参照解決・補完。
-  大きめのコードベースで関数シグネチャを追跡する際に不可欠
 
-これらは host 側の Claude Code に何が install されているかに **依存しない**。
-template 自体が plugin を持ち運ぶため、fresh な vibepod setup でも、
-同僚の machine でも、`vibepod run --template rust-code` は同じ plugin
-セットで動く。認証は一切使わない (両 plugin とも auth 不要)。
+superpowers は host 側の Claude Code に何が install されているかに
+**依存しない**。template 自体が plugin を持ち運ぶため、fresh な vibepod
+setup でも、同僚の machine でも、`vibepod run --template rust-code` は
+同じ plugin セットで動く。認証は一切使わない (auth 不要)。
+
+**rust-analyzer (LSP) について**: rust-analyzer binary は container 側
+で `rustup component add rust-analyzer` 等で別途 install する必要があり、
+template は Claude Code plugin として `rust-analyzer-lsp` を bundle
+しない (上流 plugin の実体が binary 無しの README/LICENSE のみのため)。
+container の Rust toolchain install は `vibepod run --lang rust` や
+container image 側で管理する責務。
 
 上記に加えて、template 配下の以下も直接マウントされる:
 

@@ -638,6 +638,46 @@ fn test_build_template_mounts_happy_path() {
 }
 
 #[test]
+fn test_build_template_mounts_rejects_host_installpath_in_registry() {
+    // user が host install を copy して作った template だと、
+    // installed_plugins.json に host 絶対パス (/Users/alice/...) が
+    // 残っていることがある。そのまま container に mount しても Claude
+    // は plugin を解決できないので、vibepod CLI は明示的に bail する。
+    let config_dir = tempfile::tempdir().unwrap();
+    let template_dir = config_dir.path().join("templates").join("host-paths");
+    std::fs::create_dir_all(template_dir.join("plugins").join("cache")).unwrap();
+    std::fs::write(
+        template_dir.join("plugins").join("installed_plugins.json"),
+        r#"{
+  "version": 2,
+  "plugins": {
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/Users/alice/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.7",
+        "version": "5.0.7"
+      }
+    ]
+  }
+}"#,
+    )
+    .unwrap();
+
+    let err = build_template_mounts("host-paths", config_dir.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("non-container installPath"),
+        "expected error about non-container installPath, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("/home/vibepod/.claude/plugins/"),
+        "expected error mentioning required container prefix, got: {}",
+        msg
+    );
+}
+
+#[test]
 fn test_build_template_mounts_accepts_installed_plugins_json() {
     // Phase 4.5 以降、`plugins/installed_plugins.json` を含む template は
     // 「template が plugin を所有し container path を pre-bake している」
@@ -964,7 +1004,7 @@ fn test_extract_embedded_templates_creates_official_templates() {
     assert!(templates.join("review").join("CLAUDE.md").is_file());
 
     // Phase 4.5: plugins/ も bundle されており、installed_plugins.json と
-    // superpowers / rust-analyzer-lsp の cache が展開されている
+    // superpowers の cache が展開されている
     for template_name in ["rust-code", "review"] {
         let plugins = templates.join(template_name).join("plugins");
         assert!(
@@ -982,13 +1022,6 @@ fn test_extract_embedded_templates_creates_official_templates() {
                 .join("cache/claude-plugins-official/superpowers/5.0.7/CLAUDE.md")
                 .is_file(),
             "{} should have superpowers plugin extracted",
-            template_name
-        );
-        assert!(
-            plugins
-                .join("cache/claude-plugins-official/rust-analyzer-lsp/1.0.0")
-                .is_dir(),
-            "{} should have rust-analyzer-lsp plugin extracted",
             template_name
         );
     }
