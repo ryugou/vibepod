@@ -638,29 +638,42 @@ fn test_build_template_mounts_happy_path() {
 }
 
 #[test]
-fn test_build_template_mounts_rejects_installed_plugins_json() {
-    // Phase 2 では installed_plugins.json を含む plugins は silent breakage を
-    // 避けるために明示的にエラーにする（Phase 3/4 で解決）
+fn test_build_template_mounts_accepts_installed_plugins_json() {
+    // Phase 4.5 以降、`plugins/installed_plugins.json` を含む template は
+    // 「template が plugin を所有し container path を pre-bake している」
+    // 前提で受け入れる。vibepod CLI は installPath の rewrite を行わず、
+    // `plugins/` 全体を `/home/vibepod/.claude/plugins` に 1 点 bind する
+    // だけ。template 作成者は installPath を container 絶対パス
+    // (`/home/vibepod/.claude/plugins/cache/...`) で書く responsibility を持つ。
     let config_dir = tempfile::tempdir().unwrap();
     let template_dir = config_dir.path().join("templates").join("with-registry");
-    std::fs::create_dir_all(template_dir.join("plugins")).unwrap();
+    std::fs::create_dir_all(template_dir.join("plugins").join("cache")).unwrap();
     std::fs::write(
         template_dir.join("plugins").join("installed_plugins.json"),
-        r#"{"plugins": {}}"#,
+        r#"{
+  "version": 2,
+  "plugins": {
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/vibepod/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.7",
+        "version": "5.0.7"
+      }
+    ]
+  }
+}"#,
     )
     .unwrap();
 
-    let err = build_template_mounts("with-registry", config_dir.path()).unwrap_err();
-    let msg = err.to_string();
+    let mounts = build_template_mounts("with-registry", config_dir.path()).unwrap();
+
+    // plugins/ が /home/vibepod/.claude/plugins に 1 点 mount される
     assert!(
-        msg.contains("installed_plugins.json"),
-        "expected error mentioning installed_plugins.json, got: {}",
-        msg
-    );
-    assert!(
-        msg.contains("not supported yet") || msg.contains("Phase 3/4"),
-        "expected error mentioning phase 3/4 deferral, got: {}",
-        msg
+        mounts
+            .iter()
+            .any(|(_, dst)| dst == "/home/vibepod/.claude/plugins"),
+        "expected plugins mount at /home/vibepod/.claude/plugins, got {:?}",
+        mounts
     );
 }
 
@@ -949,6 +962,36 @@ fn test_extract_embedded_templates_creates_official_templates() {
     // CLAUDE.md が存在すること (template の中身が再帰的に展開されている)
     assert!(templates.join("rust-code").join("CLAUDE.md").is_file());
     assert!(templates.join("review").join("CLAUDE.md").is_file());
+
+    // Phase 4.5: plugins/ も bundle されており、installed_plugins.json と
+    // superpowers / rust-analyzer-lsp の cache が展開されている
+    for template_name in ["rust-code", "review"] {
+        let plugins = templates.join(template_name).join("plugins");
+        assert!(
+            plugins.is_dir(),
+            "{} plugins/ should be extracted",
+            template_name
+        );
+        assert!(
+            plugins.join("installed_plugins.json").is_file(),
+            "{} plugins/installed_plugins.json should be extracted",
+            template_name
+        );
+        assert!(
+            plugins
+                .join("cache/claude-plugins-official/superpowers/5.0.7/CLAUDE.md")
+                .is_file(),
+            "{} should have superpowers plugin extracted",
+            template_name
+        );
+        assert!(
+            plugins
+                .join("cache/claude-plugins-official/rust-analyzer-lsp/1.0.0")
+                .is_dir(),
+            "{} should have rust-analyzer-lsp plugin extracted",
+            template_name
+        );
+    }
 }
 
 #[test]

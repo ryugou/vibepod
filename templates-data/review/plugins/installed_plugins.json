@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "plugins": {
+    "superpowers@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/vibepod/.claude/plugins/cache/claude-plugins-official/superpowers/5.0.7",
+        "version": "5.0.7"
+      }
+    ],
+    "rust-analyzer-lsp@claude-plugins-official": [
+      {
+        "scope": "user",
+        "installPath": "/home/vibepod/.claude/plugins/cache/claude-plugins-official/rust-analyzer-lsp/1.0.0",
+        "version": "1.0.0"
+      }
+    ]
+  }
+}
