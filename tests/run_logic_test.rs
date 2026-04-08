@@ -1,7 +1,10 @@
 use vibepod::cli::run::{
     build_claude_config_mounts, detect_languages, get_lang_install_cmd, parse_mount_arg,
     plugins_mount_entries, prepare_sanitized_settings_mount, sanitize_settings_json,
-    template::{build_template_mounts, effective_template_name},
+    template::{
+        build_template_mounts, effective_template_name, embedded_template_names,
+        extract_embedded_templates_if_missing, user_template_names,
+    },
     validate_slack_channel_id, RunOptions,
 };
 
@@ -676,4 +679,89 @@ fn test_build_template_mounts_rejects_symlinked_template_dir_escape() {
         "expected symlink escape error, got: {}",
         msg
     );
+}
+
+// --- Phase 3: template store + embed + enumeration ---
+
+#[test]
+fn test_user_template_names_empty_when_no_dir() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let names = user_template_names(config_dir.path());
+    assert!(names.is_empty());
+}
+
+#[test]
+fn test_user_template_names_returns_subdirs_only() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let templates = config_dir.path().join("templates");
+    std::fs::create_dir_all(templates.join("alpha")).unwrap();
+    std::fs::create_dir_all(templates.join("beta")).unwrap();
+    // ファイルは無視される
+    std::fs::write(templates.join("not_a_template.txt"), "").unwrap();
+
+    let names = user_template_names(config_dir.path());
+    assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+}
+
+#[test]
+fn test_user_template_names_filters_invalid_names() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let templates = config_dir.path().join("templates");
+    std::fs::create_dir_all(templates.join("valid")).unwrap();
+    // 名前に `.` が入るものは validate_template_name で reject される
+    std::fs::create_dir_all(templates.join("invalid.name")).unwrap();
+
+    let names = user_template_names(config_dir.path());
+    assert_eq!(names, vec!["valid".to_string()]);
+}
+
+#[test]
+fn test_extract_embedded_templates_creates_templates_root() {
+    let config_dir = tempfile::tempdir().unwrap();
+    assert!(!config_dir.path().join("templates").exists());
+
+    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+    // Phase 3 時点では embed 中身は空だが、templates root は作られる
+    assert!(config_dir.path().join("templates").is_dir());
+}
+
+#[test]
+fn test_extract_embedded_templates_is_idempotent() {
+    let config_dir = tempfile::tempdir().unwrap();
+    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+    // 再呼び出しでもエラーにならないことを確認
+}
+
+#[test]
+fn test_extract_embedded_templates_preserves_existing_user_dir() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let user_template = config_dir.path().join("templates").join("my-custom");
+    std::fs::create_dir_all(&user_template).unwrap();
+    std::fs::write(user_template.join("CLAUDE.md"), "user content").unwrap();
+
+    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+
+    // ユーザー追加 template は触られない
+    let content = std::fs::read_to_string(user_template.join("CLAUDE.md")).unwrap();
+    assert_eq!(content, "user content");
+}
+
+#[test]
+fn test_embedded_template_names_valid_in_phase_3() {
+    // Phase 3 時点では templates-data/ は空なので empty を想定
+    // （Phase 4 で公式 template が追加されたらこのテストは失敗して
+    //  調整が必要になる — その時点で assert_eq を具体名に書き換える）
+    let names = embedded_template_names();
+    // 返り値が名前の collection として妥当であること（全て validation 通過）
+    for name in &names {
+        assert!(!name.is_empty());
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "embedded template name '{}' failed validation",
+            name
+        );
+    }
 }

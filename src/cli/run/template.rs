@@ -10,9 +10,21 @@
 //! Phase 4 で `effective_template_name` を拡張して導入予定。
 
 use anyhow::{bail, Context, Result};
+use include_dir::{include_dir, Dir};
 use std::path::{Path, PathBuf};
 
 use super::RunOptions;
+
+/// ビルド時に `templates-data/` 配下全体をバイナリに埋め込む。
+///
+/// ここに置かれたサブディレクトリが vibepod の「公式 template」となり、
+/// 初回 `vibepod run` または `vibepod template list` 時に
+/// `~/.config/vibepod/templates/<name>/` に展開される（既存ディレクトリ
+/// があればユーザー編集を保護するため展開しない）。
+///
+/// Phase 3 の時点では `templates-data/` は空（`.gitkeep` のみ）。
+/// 実際の公式 template (rust-code / review) は Phase 4 で追加される。
+pub static EMBEDDED_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates-data");
 
 /// 適用すべき template 名を決定する。
 ///
@@ -235,4 +247,115 @@ pub fn build_template_mounts(
     // 「ホスト ~/.claude を一切 mount しない = 素の Claude 環境で走らせる」
     // という明示的な opt-out パターンを許可するため。
     Ok(mounts)
+}
+
+/// 埋め込まれた公式 template の名前一覧を返す（トップレベルのサブ
+/// ディレクトリ名のみ）。`.gitkeep` 等のファイルは除外する。
+pub fn embedded_template_names() -> Vec<String> {
+    let mut names: Vec<String> = EMBEDDED_TEMPLATES
+        .dirs()
+        .filter_map(|d| {
+            d.path()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        })
+        .filter(|n| validate_template_name(n).is_ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// ユーザー追加 template の名前一覧を返す。
+///
+/// `<config_dir>/templates/` 配下のサブディレクトリ名を列挙し、
+/// template 名として有効なもの（validate_template_name に通るもの）
+/// だけを返す。ディレクトリが存在しない場合は空配列。
+pub fn user_template_names(config_dir: &Path) -> Vec<String> {
+    let templates_root = config_dir.join("templates");
+    if !templates_root.is_dir() {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = std::fs::read_dir(&templates_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| validate_template_name(n).is_ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// 埋め込み template のうち、ユーザー template ディレクトリに
+/// まだ展開されていないものを `<config_dir>/templates/<name>/` に
+/// コピーする。既存ディレクトリがあれば触らない（ユーザー編集の保護）。
+///
+/// 冪等: 既に展開済みの template はスキップされる。新規 vibepod
+/// バージョンで embed template が更新されても、ユーザー既存 dir は
+/// 上書きされない（明示的な再展開手段は v2.x で別途検討）。
+pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
+    let templates_root = config_dir.join("templates");
+    if !templates_root.exists() {
+        std::fs::create_dir_all(&templates_root).with_context(|| {
+            format!(
+                "Failed to create templates root: {}",
+                templates_root.display()
+            )
+        })?;
+    }
+
+    for embedded in EMBEDDED_TEMPLATES.dirs() {
+        let name = match embedded.path().file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if validate_template_name(name).is_err() {
+            // 不正な名前の embed entry（ビルド時のミス）は skip
+            continue;
+        }
+
+        let dest = templates_root.join(name);
+        if dest.exists() {
+            // ユーザー編集を上書きしない
+            continue;
+        }
+        extract_template_dir(embedded, &dest).with_context(|| {
+            format!(
+                "Failed to extract embedded template '{}' to {}",
+                name,
+                dest.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// `include_dir::Dir` を指定されたパスに再帰的に展開する内部ヘルパー。
+fn extract_template_dir(dir: &Dir<'_>, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("Failed to create directory: {}", dest.display()))?;
+
+    for file in dir.files() {
+        let file_name = match file.path().file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let file_path = dest.join(file_name);
+        std::fs::write(&file_path, file.contents())
+            .with_context(|| format!("Failed to write {}", file_path.display()))?;
+    }
+
+    for subdir in dir.dirs() {
+        let sub_name = match subdir.path().file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let sub_path = dest.join(sub_name);
+        extract_template_dir(subdir, &sub_path)?;
+    }
+
+    Ok(())
 }

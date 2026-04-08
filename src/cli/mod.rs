@@ -7,6 +7,7 @@ pub mod restore;
 pub mod rm;
 pub mod run;
 pub mod stop;
+pub mod template;
 
 use clap::{Parser, Subcommand};
 
@@ -96,5 +97,21 @@ pub enum Commands {
         /// Stop all VibePod containers
         #[arg(long)]
         all: bool,
+    },
+    /// Manage vibepod templates (list / set-default)
+    Template {
+        #[command(subcommand)]
+        subcommand: TemplateSubcommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TemplateSubcommand {
+    /// List available templates (embedded and user-added)
+    List {},
+    /// Set the default template used when `--prompt` is passed without `--template`
+    SetDefault {
+        /// Template name (must exist in `vibepod template list`)
+        name: String,
     },
 }

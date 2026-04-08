@@ -316,6 +316,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     let config_dir = config::default_config_dir()?;
     let global_config = config::load_global_config(&config_dir)?;
 
+    // Extract embedded templates to ~/.config/vibepod/templates/ on first run
+    // (idempotent: existing user directories are preserved).
+    super::template::extract_embedded_templates_if_missing(&config_dir)?;
+
     // 3. Check Docker & image
     let runtime = DockerRuntime::new()
         .await
