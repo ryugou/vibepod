@@ -702,11 +702,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
         // Phase 4.7: include the template_setup_hash so warn_config_changes
-        // can surface a drift diff for legacy containers (labels_version < 3)
-        // that skip the hard-fail gate above. Without this, a user upgrading
-        // a pre-4.7 container to a template that now declares setup_commands
-        // would silently reuse the stale container and never see the
-        // "run with --new" hint.
+        // can surface a drift diff. Note that legacy template containers
+        // (labels_version < 3) under a template that declares non-empty
+        // setup_commands are NOT silently reused — they are hard-failed
+        // by the reuse gate below with a `--new` hint. The presence of
+        // this label in current_labels still helps the warning path
+        // describe drift in the remaining edge cases (labels_version >= 3
+        // containers that hit the gate, host-mode reuse where the value
+        // is empty on both sides, etc.).
         current_labels.insert(
             "vibepod.template_setup_hash".to_string(),
             template_setup_hash.clone(),

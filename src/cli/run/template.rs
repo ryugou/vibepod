@@ -833,9 +833,11 @@ pub struct TemplateRuntimeMetadata {
     ///   on an existing container does not re-run them; callers must
     ///   `--new` to recreate. `vibepod.template_setup_hash` + the
     ///   Phase 4.7 `labels_version=3` reuse gate surfaces this.
-    /// - Each entry is validated at parse time: non-empty, no null bytes,
-    ///   no embedded newlines (would break the && chain), length capped
-    ///   at 2048 bytes.
+    /// - Each entry is validated at parse time: non-empty / not
+    ///   whitespace-only, no embedded newlines (would break the && chain),
+    ///   length capped at 2048 bytes. NUL bytes cannot appear in valid
+    ///   TOML strings, so they are rejected upstream by the TOML parser
+    ///   before this validator runs.
     #[serde(default)]
     pub setup_commands: Vec<String>,
 }
