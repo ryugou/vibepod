@@ -66,6 +66,7 @@ fn warn_config_changes(
         "vibepod.network",
         "vibepod.mounts",
         "vibepod.env_hash",
+        "vibepod.template_setup_hash",
     ] {
         let label_name = key.strip_prefix("vibepod.").unwrap_or(key);
         let raw_stored = stored.get(*key).map(|s| s.as_str()).unwrap_or("");
@@ -342,6 +343,23 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // checks should also see "no template" so the run proceeds on host mounts.
     let effective_template: Option<String> = resolved_template.as_ref().map(|(n, _)| n.clone());
 
+    // Fingerprint of the template's `setup_commands` list. Empty string
+    // when no template was selected or when the template declared no
+    // setup_commands. Used by:
+    //   - build_config_labels (persisted as `vibepod.template_setup_hash`)
+    //   - the template-mode reuse gate below (detects drift vs. stored
+    //     hash and hard-fails with a `--new` hint).
+    // Newlines are disallowed inside entries (validated at parse time)
+    // so joining on '\n' is an unambiguous canonical form.
+    let template_setup_hash: String = {
+        let cmds = &template_metadata.runtime.setup_commands;
+        if cmds.is_empty() {
+            String::new()
+        } else {
+            path_hash_8(&cmds.join("\n"))
+        }
+    };
+
     // Language detection
     let effective_lang = opts.lang.clone().or_else(|| vibepod_config.lang());
     let detected_langs: Vec<(String, &'static str)> = if effective_lang.is_none() {
@@ -390,10 +408,17 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     let setup_cmd: Option<String> = {
-        let setup_parts: Vec<String> = lang_names
+        let mut setup_parts: Vec<String> = lang_names
             .iter()
             .filter_map(|l| get_lang_install_cmd(l).map(|s| s.to_string()))
             .collect();
+        // Phase 4.7: append template-declared setup_commands AFTER the
+        // language install chain. Order matters — commands like
+        // `rustup component add rust-analyzer` depend on rustup having
+        // already been installed by the `rust` lang step.
+        for cmd in &template_metadata.runtime.setup_commands {
+            setup_parts.push(cmd.clone());
+        }
         if setup_parts.is_empty() {
             None
         } else {
@@ -676,6 +701,19 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
+        // Phase 4.7: include the template_setup_hash so warn_config_changes
+        // can surface a drift diff. Note that legacy template containers
+        // (labels_version < 3) under a template that declares non-empty
+        // setup_commands are NOT silently reused — they are hard-failed
+        // by the reuse gate below with a `--new` hint. The presence of
+        // this label in current_labels still helps the warning path
+        // describe drift in the remaining edge cases (labels_version >= 3
+        // containers that hit the gate, host-mode reuse where the value
+        // is empty on both sides, etc.).
+        current_labels.insert(
+            "vibepod.template_setup_hash".to_string(),
+            template_setup_hash.clone(),
+        );
 
         // Template mode では mount set の変更は **critical**。
         // docker のバインドマウントはコンテナ作成時に固定されるため、
@@ -759,6 +797,62 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                             .unwrap_or_else(|| "(none)".to_string())
                     );
                 }
+            }
+
+            // Phase 4.7: template_setup_hash drift gate.
+            //
+            // setup_commands run exactly once, at container creation,
+            // chained after the language install. If a template's
+            // setup_commands list changes (entry added / removed /
+            // reordered / edited), the existing container cannot
+            // retroactively re-run the new chain, so reuse would leave
+            // the container in a half-configured state relative to the
+            // updated template. Hard-fail with a clear --new hint.
+            //
+            // Two cases:
+            //   * labels_version >= 3: compare stored hash to current.
+            //     Any difference is drift → bail.
+            //   * labels_version < 3 (pre-Phase-4.7 legacy container):
+            //     the container has no stored hash at all, so we cannot
+            //     tell whether any setup_commands have ever run inside
+            //     it. If the current template declares non-empty
+            //     setup_commands, we MUST assume the legacy container
+            //     is missing them and bail with --new. If the current
+            //     template has empty setup_commands there is nothing
+            //     to install so reuse is safe.
+            let stored_setup_hash = stored_labels
+                .get("vibepod.template_setup_hash")
+                .cloned()
+                .unwrap_or_default();
+            let setup_hash_mismatch = if labels_version >= 3 {
+                stored_setup_hash != template_setup_hash
+            } else {
+                // Legacy (no label): treat as "has ever run any
+                // setup" = false. Mismatch if the current template
+                // wants any setup done.
+                !template_metadata.runtime.setup_commands.is_empty()
+            };
+            if setup_hash_mismatch {
+                bail!(
+                    "Template '{}' setup_commands hash mismatch (stored: {:?}, \
+                     current: {:?}; labels_version={}). setup_commands run only \
+                     at container creation, so the declared commands cannot be \
+                     retroactively applied to the existing container. Run with \
+                     --new to recreate the container with the updated setup \
+                     sequence.",
+                    effective_template.as_deref().unwrap_or(""),
+                    if stored_setup_hash.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        stored_setup_hash
+                    },
+                    if template_setup_hash.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        template_setup_hash.clone()
+                    },
+                    labels_version
+                );
             }
         }
 
@@ -867,6 +961,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         worktree_dir_name,
         lang_display,
         lang_names,
+        template_setup_hash,
         store,
         deferred_session,
         extra_mounts,

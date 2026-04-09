@@ -12,3 +12,17 @@
 # returns. vibepod unions required_langs with any other language
 # sources (--lang, config, cwd detection).
 required_langs = ["rust"]
+
+# Additional container-side setup steps that run after the language
+# install chain but before Claude Code starts. vibepod chains these
+# into the container's setup_cmd via ` && `, so any failure aborts
+# container creation.
+#
+# rust-analyzer is installed as a rustup component so the LSP server
+# is available during edit/review sessions. The upstream
+# rust-analyzer-lsp Claude Code plugin package only ships LICENSE +
+# README (no runtime payload), so the binary must come from rustup
+# rather than from a bundled plugin.
+setup_commands = [
+  "rustup component add rust-analyzer",
+]

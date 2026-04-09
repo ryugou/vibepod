@@ -58,6 +58,15 @@ pub(super) struct RunContext {
     /// uniqueness without re-normalizing. `lang_display` is the
     /// separate human-readable form shown in startup logs.
     pub(super) lang_names: Vec<String>,
+    /// Fingerprint of the template `setup_commands` that will run
+    /// at container creation. Empty string when no template was
+    /// selected or the template declared no setup_commands.
+    /// Persisted in the `vibepod.template_setup_hash` label so the
+    /// Phase-4.7 reuse gate can detect when a template's setup
+    /// sequence has changed and force `--new` (setup only runs at
+    /// creation, so we cannot retrofit new commands onto an existing
+    /// container).
+    pub(super) template_setup_hash: String,
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
@@ -350,12 +359,27 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     // template-required lang is present.
     labels.insert("vibepod.lang".to_string(), ctx.lang_names.join(","));
 
-    // Label schema version. Containers created pre-Phase-4.6 do not
-    // have this label, which signals that `vibepod.lang` may be in
-    // the legacy single-token format and should NOT be used for the
-    // hard-fail template required_langs check. The reuse-side guard
-    // falls back to a warning for unversioned labels.
-    labels.insert("vibepod.labels_version".to_string(), "2".to_string());
+    // Label schema version.
+    //
+    // - Missing / "1": pre-Phase-4.6, `vibepod.lang` may be in the
+    //   legacy single-token format.
+    // - "2": Phase 4.6 — `vibepod.lang` stores the full comma-joined
+    //   lang set. Template `required_langs` hard-fail gate is enabled.
+    // - "3": Phase 4.7 — adds `vibepod.template_setup_hash`. Template
+    //   `setup_commands` hash gate is enabled. Containers labeled with
+    //   version < 3 fall back to warnings on setup_commands drift
+    //   because their stored hash is absent and cannot be trusted.
+    labels.insert("vibepod.labels_version".to_string(), "3".to_string());
+
+    // Template setup_commands fingerprint. Empty string when the
+    // container was not created with a template, or the template
+    // declared no setup_commands. Updating a template's setup_commands
+    // mutates this hash; the reuse gate then forces the user to
+    // `--new` because setup_cmd only runs at container creation.
+    labels.insert(
+        "vibepod.template_setup_hash".to_string(),
+        ctx.template_setup_hash.clone(),
+    );
 
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(

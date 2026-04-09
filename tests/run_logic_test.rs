@@ -1332,6 +1332,175 @@ required_langs = ["rust", ""]
     assert!(err.to_string().contains("invalid required_langs entry"));
 }
 
+// --- read_template_metadata: setup_commands ---
+
+#[test]
+fn test_read_template_metadata_parses_setup_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+required_langs = ["rust"]
+setup_commands = [
+  "rustup component add rust-analyzer",
+  "cargo install --locked some-tool",
+]
+"#,
+    )
+    .unwrap();
+    let meta = read_template_metadata(dir.path()).unwrap();
+    assert_eq!(
+        meta.runtime.setup_commands,
+        vec![
+            "rustup component add rust-analyzer".to_string(),
+            "cargo install --locked some-tool".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_read_template_metadata_setup_commands_default_empty() {
+    // 省略時は空 Vec
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+required_langs = ["rust"]
+"#,
+    )
+    .unwrap();
+    let meta = read_template_metadata(dir.path()).unwrap();
+    assert!(meta.runtime.setup_commands.is_empty());
+}
+
+#[test]
+fn test_read_template_metadata_rejects_empty_setup_command() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+setup_commands = ["rustup component add rust-analyzer", ""]
+"#,
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("setup_commands[1]"),
+        "expected empty-entry rejection at index 1, got: {}",
+        err
+    );
+    assert!(
+        err.to_string().contains("empty or whitespace-only"),
+        "expected empty-or-whitespace message, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_whitespace_only_setup_command() {
+    // literal "" だけでなく、空白だけの entry も reject する。
+    // そのままだと `sh -c "... &&    && ..."` になって runtime で失敗する。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        r#"[runtime]
+setup_commands = ["   "]
+"#,
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("empty or whitespace-only"),
+        "expected whitespace-only rejection, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_tab_only_setup_command() {
+    // tab のみの entry も reject される
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        "[runtime]\nsetup_commands = [\"\\t\\t\"]\n",
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("empty or whitespace-only"),
+        "expected tab-only rejection, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_setup_command_with_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("vibepod-template.toml"),
+        "[runtime]\nsetup_commands = [\"first\\nsecond\"]\n",
+    )
+    .unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("contains a newline"),
+        "expected newline rejection, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_read_template_metadata_rejects_setup_command_too_long() {
+    let dir = tempfile::tempdir().unwrap();
+    let long_cmd = "echo ".to_string() + &"x".repeat(2100);
+    let body = format!(
+        "[runtime]\nsetup_commands = [\"{}\"]\n",
+        long_cmd.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    std::fs::write(dir.path().join("vibepod-template.toml"), body).unwrap();
+    let err = read_template_metadata(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("is ") && err.to_string().contains("bytes (max"),
+        "expected length rejection, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_embedded_rust_code_template_declares_rust_analyzer_setup() {
+    // Phase 4.7: rust-code template は rustup component add rust-analyzer を
+    // setup_commands に持つ。これが欠けると rust-code で LSP が使えない
+    // spec 違反に戻る。回帰防止の gate。
+    let config_dir = tempfile::tempdir().unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "rust-code").unwrap();
+    let template_dir = config_dir.path().join("templates").join("rust-code");
+    let meta = read_template_metadata(&template_dir).unwrap();
+    assert!(
+        meta.runtime
+            .setup_commands
+            .iter()
+            .any(|c| c.contains("rustup component add rust-analyzer")),
+        "expected rust-code setup_commands to include rust-analyzer install, got: {:?}",
+        meta.runtime.setup_commands
+    );
+}
+
+#[test]
+fn test_embedded_review_template_declares_no_setup_commands() {
+    // review は language-agnostic かつ追加 setup 不要
+    let config_dir = tempfile::tempdir().unwrap();
+    extract_single_embedded_template_if_missing(config_dir.path(), "review").unwrap();
+    let template_dir = config_dir.path().join("templates").join("review");
+    let meta = read_template_metadata(&template_dir).unwrap();
+    assert!(
+        meta.runtime.setup_commands.is_empty(),
+        "expected review to have no setup_commands, got: {:?}",
+        meta.runtime.setup_commands
+    );
+}
+
+// --- read_template_metadata: required_langs (unsupported / typo) ---
+
 #[test]
 fn test_read_template_metadata_rejects_unsupported_lang() {
     // "ruby" has no install command in get_lang_install_cmd, so letting

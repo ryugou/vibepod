@@ -83,12 +83,13 @@ superpowers は host 側の Claude Code に何が install されているかに
 setup でも、同僚の machine でも、`vibepod run --template rust-code` は
 同じ plugin セットで動く。認証は一切使わない (auth 不要)。
 
-**rust-analyzer (LSP) について**: rust-analyzer binary は container 側
-で `rustup component add rust-analyzer` 等で別途 install する必要があり、
-template は Claude Code plugin として `rust-analyzer-lsp` を bundle
-しない (上流 plugin の実体が binary 無しの README/LICENSE のみのため)。
-container の Rust toolchain install は `vibepod run --lang rust` や
-container image 側で管理する責務。
+**rust-analyzer (LSP) について**: rust-analyzer binary は
+`vibepod-template.toml` の `setup_commands` で宣言した
+`rustup component add rust-analyzer` により container 作成時に自動で
+install される。別途ユーザー側で install コマンドを叩く必要はない。
+上流の Claude Code plugin `rust-analyzer-lsp` は LICENSE + README
+のみの stub であり bundle しない (binary 自体は rustup 経由で入る
+ほうが確実)。
 
 上記に加えて、template 配下の以下も直接マウントされる:
 
