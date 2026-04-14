@@ -1427,6 +1427,33 @@ required_langs = ["rsut"]
 }
 
 #[test]
+fn test_embedded_rust_impl_template_declares_rust_analyzer_setup() {
+    // v1.6 regression gate: rust/impl bundle must declare
+    // `rustup component add rust-analyzer` in [runtime] setup_commands
+    // so in-container Rust LSP works. The legacy rust-code bundle had
+    // this; dropping it on migration silently broke edit/review UX.
+    let config_dir = tempfile::tempdir().unwrap();
+    // `rust/impl` contains a `/`, which validate_template_name rejects;
+    // extract the parent container `rust` instead (lays down the whole
+    // rust/ tree, including impl/vibepod-template.toml).
+    extract_single_embedded_template_if_missing(config_dir.path(), "rust").unwrap();
+    let template_dir = config_dir
+        .path()
+        .join("templates")
+        .join("rust")
+        .join("impl");
+    let meta = read_template_metadata(&template_dir).unwrap();
+    assert!(
+        meta.runtime
+            .setup_commands
+            .iter()
+            .any(|c| c.contains("rust-analyzer")),
+        "rust/impl must declare rust-analyzer setup for in-container LSP; got: {:?}",
+        meta.runtime.setup_commands
+    );
+}
+
+#[test]
 fn test_embedded_template_names_all_pass_validation() {
     // embedded 集合に含まれる名前 (v1.6 以降は言語コンテナ) は全て
     // name validation を通ること。
