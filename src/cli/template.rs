@@ -427,9 +427,26 @@ mod tests {
             .find(|name| {
                 EMBEDDED_TEMPLATES
                     .get_dir(name.as_str())
-                    .map(|d| d.get_file(format!("{}/CLAUDE.md", name)).is_some())
+                    .map(|d| d.get_file("CLAUDE.md").is_some())
                     .unwrap_or(false)
             })
+    }
+
+    #[test]
+    fn embedded_name_or_skip_finds_flat_templates_if_any() {
+        // v1.6 removed all flat embedded templates so this helper
+        // returns None today. If a flat embedded template is ever
+        // added (e.g., a new reference bundle at top level), this
+        // test serves as a smoke gate that the path math is correct.
+        // Either the result is None (no flat embed) or it's a real
+        // top-level name with a CLAUDE.md directly inside.
+        if let Some(name) = embedded_name_or_skip() {
+            let embedded = crate::cli::run::template::embedded_template_names();
+            assert!(
+                embedded.iter().any(|n| n == &name),
+                "embedded_name_or_skip returned '{name}' not in embedded_template_names"
+            );
+        }
     }
 
     #[test]
