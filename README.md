@@ -139,7 +139,7 @@ Per-language review bundles include `santa-method` dual-reviewer convergence tri
 
 #### Content model (v1.6+)
 
-Language bundles pull their agents and skills from a local clone of [everything-claude-code (ecc)](https://github.com/) cached at `~/.config/vibepod/ecc-cache/`. `vibepod init` initializes the cache; a TTL-based background `git fetch` keeps it up-to-date. Use `vibepod template update [--ref <ref>]` for explicit refresh and `vibepod template status` to inspect cache state (repo, ref, last fetch time, current commit). Pin a specific ecc ref via the `[ecc]` section in `~/.config/vibepod/config.toml`.
+Language bundles pull their agents and skills from a local clone of [everything-claude-code (ecc)](https://github.com/affaan-m/everything-claude-code) cached at `~/.config/vibepod/ecc-cache/`. `vibepod init` initializes the cache; a TTL-based background `git fetch` keeps it up-to-date. Use `vibepod template update [--ref <ref>]` for explicit refresh and `vibepod template status` to inspect cache state (repo, ref, last fetch time, current commit). Pin a specific ecc ref via the `[ecc]` section in `~/.config/vibepod/config.toml`.
 
 Custom templates can opt into ecc content by adding an `[ecc]` section to their `vibepod-template.toml`, listing the `skills/` and `agents/` paths to pull from the cache.
 
