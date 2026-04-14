@@ -59,6 +59,12 @@ impl Default for EccConfig {
 }
 
 impl EccConfig {
+    /// Parse the configured TTL string into seconds.
+    ///
+    /// In practice this never falls back: `load_unified` calls
+    /// `validate()` which fails fast on unparseable TTLs. The
+    /// `unwrap_or` is defensive for hypothetical programmatic
+    /// constructions of `EccConfig` that bypass validation.
     pub fn refresh_ttl_seconds(&self) -> u64 {
         parse_duration_to_seconds(&self.refresh_ttl).unwrap_or(24 * 60 * 60)
     }
