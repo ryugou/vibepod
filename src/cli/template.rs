@@ -325,6 +325,21 @@ pub(crate) fn reset_in(config_dir: &Path, name: &str, force: bool) -> Result<()>
     Ok(())
 }
 
+/// Single-line sanitizer for untrusted or user-editable strings printed to the
+/// terminal. Replaces control characters with spaces, trims surrounding
+/// whitespace, and caps the length. Used for both external command output
+/// (e.g. `git` stderr) and user-editable config values loaded from
+/// `config.toml` so that malformed input cannot corrupt terminal output.
+fn sanitize_single_line(s: &str, max_len: usize) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string();
+    cleaned.chars().take(max_len).collect()
+}
+
 /// `vibepod template status`: print ecc-cache state.
 pub fn status() -> Result<()> {
     let config_dir = config::default_config_dir()?;
@@ -333,9 +348,18 @@ pub fn status() -> Result<()> {
     let unified = config::load_unified(&config_dir)?;
     let ecc_cfg = unified.ecc.unwrap_or_default();
 
-    println!("ecc repo:         {}", ecc_cfg.repo);
-    println!("configured ref:   {}", ecc_cfg.r#ref);
-    println!("refresh_ttl:      {}", ecc_cfg.refresh_ttl);
+    println!(
+        "ecc repo:         {}",
+        sanitize_single_line(&ecc_cfg.repo, 500)
+    );
+    println!(
+        "configured ref:   {}",
+        sanitize_single_line(&ecc_cfg.r#ref, 200)
+    );
+    println!(
+        "refresh_ttl:      {}",
+        sanitize_single_line(&ecc_cfg.refresh_ttl, 50)
+    );
     println!("auto_refresh:     {}", ecc_cfg.auto_refresh);
     println!("cache dir:        {}", cache.display());
 
@@ -344,15 +368,6 @@ pub fn status() -> Result<()> {
         return Ok(());
     }
 
-    fn sanitize_single_line(s: &str, max_len: usize) -> String {
-        let cleaned: String = s
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect::<String>()
-            .trim()
-            .to_string();
-        cleaned.chars().take(max_len).collect()
-    }
     let commit = match std::process::Command::new("git")
         .current_dir(&cache)
         .args(["rev-parse", "--short", "HEAD"])
