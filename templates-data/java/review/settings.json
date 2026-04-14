@@ -1,0 +1,40 @@
+{
+  "enabledPlugins": {},
+  "permissions": {
+    "deny": [
+      "Edit(*)",
+      "Write(*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)",
+      "Bash(mvn install:*)",
+      "Bash(mvn deploy:*)",
+      "Bash(mvn package:*)",
+      "Bash(mvn release:*)",
+      "Bash(mvn versions:*)",
+      "Bash(mvn dependency:purge-local-repository:*)",
+      "Bash(gradle install:*)",
+      "Bash(gradle publish:*)",
+      "Bash(gradle publishToMavenLocal:*)",
+      "Bash(gradle assemble:*)",
+      "Bash(./gradlew install:*)",
+      "Bash(./gradlew publish:*)",
+      "Bash(./gradlew publishToMavenLocal:*)",
+      "Bash(./gradlew assemble:*)",
+      "Bash(./gradlew clean:*)",
+      "Bash(gradle clean:*)",
+      "Bash(mvn clean:*)",
+      "Bash(jshell:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(cp:*)",
+      "Bash(mkdir:*)",
+      "Bash(sed -i:*)"
+    ]
+  }
+}
