@@ -102,6 +102,33 @@ pub async fn execute() -> Result<()> {
     };
     config::save_global_config(&config, &config_dir)?;
 
+    // 6. ECC cache initialization / refresh (idempotent).
+    {
+        let ecc_cfg = config::load_ecc_config(&config_dir)?;
+        ecc_cfg.validate()?;
+        let cache = crate::ecc::cache_dir(&config_dir);
+
+        if cache.join(".git").is_dir() {
+            println!("\n  Refreshing ecc cache at {}...", cache.display());
+            match crate::ecc::fetch_latest(&config_dir, &ecc_cfg) {
+                Ok(_) => println!("  Refreshed."),
+                Err(e) => eprintln!(
+                    "  Warning: ecc refresh failed: {e}\n  \
+                     Run `vibepod template update` later to retry."
+                ),
+            }
+        } else {
+            println!(
+                "\n  Cloning ecc ({}@{}) into {}...",
+                ecc_cfg.repo,
+                ecc_cfg.r#ref,
+                cache.display()
+            );
+            crate::ecc::ensure_cloned(&config_dir, &ecc_cfg)?;
+            println!("  Cloned.");
+        }
+    }
+
     println!("\n  Done! Run `vibepod run` in any git repo to start.\n");
 
     Ok(())
