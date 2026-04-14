@@ -354,7 +354,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     if opts.template.is_none() {
         if let Some(ref t) = effective_template_v16 {
             let cache = crate::ecc::cache_dir(&config_dir);
-            if !cache.join(".git").is_dir() {
+            if !cache.join(".git").exists() {
                 anyhow::bail!(
                     "Template '{t}' requires the ecc cache at {}. \
                      Run `vibepod init` first to clone it.",

@@ -108,7 +108,7 @@ pub async fn execute() -> Result<()> {
         ecc_cfg.validate()?;
         let cache = crate::ecc::cache_dir(&config_dir);
 
-        if cache.join(".git").is_dir() {
+        if cache.join(".git").exists() {
             println!("\n  Refreshing ecc cache at {}...", cache.display());
             match crate::ecc::fetch_latest(&config_dir, &ecc_cfg) {
                 Ok(_) => println!("  Refreshed."),

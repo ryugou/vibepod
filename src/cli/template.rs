@@ -363,7 +363,7 @@ pub fn status() -> Result<()> {
     println!("auto_refresh:     {}", ecc_cfg.auto_refresh);
     println!("cache dir:        {}", cache.display());
 
-    if !cache.join(".git").is_dir() {
+    if !cache.join(".git").exists() {
         println!("cache status:     not initialized — run `vibepod init`");
         return Ok(());
     }
@@ -408,7 +408,7 @@ pub fn update(ref_override: Option<&str>) -> Result<()> {
     ecc_cfg.validate()?;
 
     let cache = crate::ecc::cache_dir(&config_dir);
-    if !cache.join(".git").is_dir() {
+    if !cache.join(".git").exists() {
         anyhow::bail!(
             "ecc cache not initialized at {}: run `vibepod init` first",
             cache.display()

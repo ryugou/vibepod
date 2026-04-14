@@ -20,8 +20,10 @@ pub fn staging_dir(runtime_dir: &std::path::Path) -> PathBuf {
 
 /// Ensure `cache_dir(config_dir)` contains a clone of `cfg.repo` at `cfg.ref`.
 ///
-/// If the cache already has a `.git` directory, this is a no-op and returns Ok.
-/// Otherwise performs `git clone --depth 1 --branch <ref> <repo> <cache>`.
+/// If the cache already has a `.git` entry (directory for standard clones, or
+/// a file pointing at the real gitdir for git-worktree layouts), this is a
+/// no-op and returns Ok. Otherwise performs
+/// `git clone --depth 1 --branch <ref> <repo> <cache>`.
 ///
 /// Removes any partial cache directory left over from a previous failed clone
 /// (presence without `.git` = incomplete).
@@ -30,7 +32,7 @@ pub fn staging_dir(runtime_dir: &std::path::Path) -> PathBuf {
 pub fn ensure_cloned(config_dir: &std::path::Path, cfg: &crate::config::EccConfig) -> Result<()> {
     let cache = cache_dir(config_dir);
 
-    if cache.join(".git").is_dir() {
+    if cache.join(".git").exists() {
         return Ok(());
     }
 
@@ -95,7 +97,7 @@ pub fn ensure_cloned(config_dir: &std::path::Path, cfg: &crate::config::EccConfi
 /// Errors if the cache directory has no `.git` or if any git command fails.
 pub fn fetch_latest(config_dir: &std::path::Path, cfg: &crate::config::EccConfig) -> Result<()> {
     let cache = cache_dir(config_dir);
-    if !cache.join(".git").is_dir() {
+    if !cache.join(".git").exists() {
         anyhow::bail!(
             "ecc cache not initialized at {}: run `vibepod init` first",
             cache.display()
@@ -355,6 +357,24 @@ mod tests {
         // Verify existing .git/HEAD was not overwritten (confirms no git operation happened).
         let head = std::fs::read_to_string(cache.join(".git/HEAD")).unwrap();
         assert_eq!(head, "ref: refs/heads/main\n");
+    }
+
+    #[test]
+    fn ensure_cloned_noop_when_git_file_exists() {
+        // Simulate a git-worktree-style .git file pointer.
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path();
+        let cache = cache_dir(config_dir);
+        std::fs::create_dir_all(&cache).unwrap();
+        // `.git` as a file, not a directory (worktree format).
+        std::fs::write(cache.join(".git"), "gitdir: /some/other/path\n").unwrap();
+
+        let cfg = crate::config::EccConfig::default();
+        ensure_cloned(config_dir, &cfg).unwrap();
+
+        // .git file preserved (no re-clone).
+        let content = std::fs::read_to_string(cache.join(".git")).unwrap();
+        assert_eq!(content, "gitdir: /some/other/path\n");
     }
 
     #[test]
