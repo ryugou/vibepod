@@ -344,20 +344,19 @@ pub fn status() -> Result<()> {
         return Ok(());
     }
 
-    let commit = std::process::Command::new("git")
+    let commit = match std::process::Command::new("git")
         .current_dir(&cache)
         .args(["rev-parse", "--short", "HEAD"])
         .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout).ok()
-            } else {
-                None
-            }
-        })
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Ok(o) => format!(
+            "unknown (git rev-parse exited {}: {})",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => format!("unknown (failed to run git: {e})"),
+    };
     println!("current commit:   {commit}");
 
     if let Some(age) = crate::ecc::cache_age_seconds(&config_dir) {
