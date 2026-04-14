@@ -152,6 +152,57 @@ fn explicit_lang_wins_over_cwd_detect() {
     );
 }
 
+/// Regression: v1.6 introduced nested official-bundle names like
+/// `rust/impl`, but the template-name validator only accepted flat names
+/// (ASCII alnum + `-_`). `--lang rust` therefore hard-failed with
+/// `Template name 'rust/impl' is invalid` *before* Docker was ever
+/// touched, making the feature unusable end-to-end even though the
+/// existing `VIBEPOD_TRACE` tests (which assert only on trace output,
+/// emitted *before* validation runs) kept passing.
+///
+/// This test exercises the resolver past trace emission, past template
+/// validation, so the old code fails this assertion while the fixed
+/// validator makes it pass (even though the run still errors out
+/// downstream for other reasons, such as Docker not being available).
+#[test]
+fn rust_impl_template_name_passes_validation() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git(tmp.path());
+    seed_ecc_cache(tmp.path());
+    // Pre-extract a minimal `templates/rust/impl/` so resolve_template_dir
+    // passes without needing Docker / the real ecc cache. This simulates
+    // the state after `vibepod init` + lazy extract, so validation is the
+    // only remaining gate the test is actually asserting on.
+    let tmpl_dir = tmp.path().join(".config/vibepod/templates/rust/impl");
+    std::fs::create_dir_all(&tmpl_dir).unwrap();
+    std::fs::write(tmpl_dir.join(".vibepod-embedded"), "test\n").unwrap();
+    std::fs::write(tmpl_dir.join("CLAUDE.md"), "test\n").unwrap();
+    std::fs::write(
+        tmpl_dir.join("vibepod-template.toml"),
+        "[runtime]\nrequired_langs = [\"rust\"]\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vibepod"))
+        .current_dir(tmp.path())
+        .args(["run", "--lang", "rust", "--prompt", "x"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
+        .output()
+        .expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let combined = format!("{stdout}{stderr}");
+
+    assert!(
+        !combined.contains("Template name 'rust/impl' is invalid"),
+        "regression: --lang rust hits template-name validation. combined output:\n{combined}"
+    );
+    // The run itself is expected to still fail (Docker not available in
+    // CI, or downstream ecc/stage steps), but NOT with the nested-name
+    // validation error — that's the whole point of this test.
+}
+
 #[test]
 fn unsupported_lang_falls_through_to_host() {
     // Unknown lang like "fortran" is not an error — it soft-falls through
