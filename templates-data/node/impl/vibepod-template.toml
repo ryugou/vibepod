@@ -1,0 +1,23 @@
+# Node.js + TypeScript implementation bundle — vibepod v1.6+.
+#
+# Scope: Node.js runtime + TypeScript. Framework-specific skills
+# (Next.js, NestJS, Nuxt, Bun) are intentionally excluded — use a
+# custom template for those.
+#
+# Pulled skills/agents are sourced from ~/.config/vibepod/ecc-cache/ at
+# container start; missing entries fail-fast.
+
+[runtime]
+required_langs = ["node"]
+
+[ecc]
+skills = [
+  "skills/tdd-workflow/SKILL.md",
+]
+agents = [
+  "agents/typescript-reviewer.md",
+  "agents/code-reviewer.md",
+  "agents/code-architect.md",
+  "agents/code-explorer.md",
+  "agents/silent-failure-hunter.md",
+]
