@@ -1097,7 +1097,13 @@ pub fn assemble_staging(
 
 /// Recursively copy the contents of `src` into `dst`. Both must exist.
 /// Directories are created as needed; regular files are copied byte-for-byte.
-/// Symlinks are followed (their target content is copied).
+/// Symlinks are **rejected** — templates must be plain files/directories.
+/// This preserves the v1.5 template-mount escape protection (otherwise
+/// enforced by `resolve_template_entry`) end-to-end: a malicious template
+/// dropping a symlink to `/etc/passwd` would have its target content
+/// materialized into the staging dir and pass downstream checks since the
+/// staged copy is a real file. Refusing symlinks at copy time keeps the
+/// staging output honest.
 fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(src)
         .map_err(|e| anyhow::anyhow!("failed to read_dir {}: {e}", src.display()))?
@@ -1108,7 +1114,19 @@ fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Re
             .strip_prefix(src)
             .map_err(|e| anyhow::anyhow!("strip_prefix failed: {e}"))?;
         let target = dst.join(rel);
-        if path.is_dir() {
+
+        // Reject symlinks explicitly — do not follow them into staging.
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| anyhow::anyhow!("failed to stat {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "refusing to copy symlink into staging: {} \
+                 (templates must be plain files/directories)",
+                path.display()
+            );
+        }
+
+        if meta.is_dir() {
             std::fs::create_dir_all(&target)
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", target.display()))?;
             copy_dir_contents(&path, &target)?;

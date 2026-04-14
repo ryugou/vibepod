@@ -104,3 +104,27 @@ skills = ["skills/ghost/SKILL.md"]
         "expected missing-file error, got: {err}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn assemble_staging_rejects_symlink_in_template_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join("config");
+    let runtime_dir = tmp.path().join("runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::create_dir_all(&config_dir).unwrap();
+
+    let template_dir = runtime_dir.join("template");
+    fs::create_dir_all(&template_dir).unwrap();
+    fs::write(template_dir.join("CLAUDE.md"), "ok").unwrap();
+    // Drop a symlink inside the template dir — should be rejected.
+    std::os::unix::fs::symlink("/etc/passwd", template_dir.join("malicious")).unwrap();
+
+    let err =
+        vibepod::cli::run::prepare::assemble_staging(&config_dir, &runtime_dir, &template_dir)
+            .unwrap_err();
+    assert!(
+        format!("{err}").contains("symlink"),
+        "expected symlink rejection, got: {err}"
+    );
+}
