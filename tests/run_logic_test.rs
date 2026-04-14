@@ -1121,25 +1121,20 @@ fn test_extract_embedded_templates_preserves_existing_user_dir() {
 fn test_extract_embedded_templates_respects_user_override_same_name() {
     // ユーザーが embedded と同名の dir を自前で作っている場合、
     // extract はそれを尊重して上書きしない (marker 無しで残る)。
+    // v1.6 では embedded 名は言語コンテナ ("rust" / "go" / ...) なので
+    // そのうちの 1 つをユーザー override として用意する。
     let config_dir = tempfile::tempdir().unwrap();
     let templates = config_dir.path().join("templates");
-    std::fs::create_dir_all(templates.join("rust-code")).unwrap();
-    std::fs::write(
-        templates.join("rust-code").join("CLAUDE.md"),
-        "user override",
-    )
-    .unwrap();
+    std::fs::create_dir_all(templates.join("rust")).unwrap();
+    std::fs::write(templates.join("rust").join("CLAUDE.md"), "user override").unwrap();
 
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
 
     // 内容が維持される
-    let content = std::fs::read_to_string(templates.join("rust-code").join("CLAUDE.md")).unwrap();
+    let content = std::fs::read_to_string(templates.join("rust").join("CLAUDE.md")).unwrap();
     assert_eq!(content, "user override");
     // marker は書かれない (user override として扱う)
-    assert!(!templates
-        .join("rust-code")
-        .join(".vibepod-embedded")
-        .is_file());
+    assert!(!templates.join("rust").join(".vibepod-embedded").is_file());
 }
 
 // --- read_template_metadata ---
