@@ -1,8 +1,7 @@
 # Rust implementation bundle — toolchain + ecc selection for vibepod v1.6+.
 #
 # Pulled skills/agents are sourced from ~/.config/vibepod/ecc-cache/ at
-# container start; missing entries fail-fast. See
-# docs/superpowers/plans/2026-04-11-v1.6-ecc-migration.md for the design.
+# container start; missing entries fail-fast.
 
 [runtime]
 required_langs = ["rust"]
