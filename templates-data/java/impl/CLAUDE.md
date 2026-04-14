@@ -11,6 +11,8 @@
 - Write tests before implementation. Follow `skill: tdd-workflow`.
 - Do not write empty `catch (Exception e) {}` or `catch (Throwable t) {}`. Either re-throw with context (`throw new IllegalStateException("context", e)`), handle explicitly, or document the reason for ignoring with a comment.
 - Do not swallow `InterruptedException`. If catching is unavoidable, restore the interrupt flag before returning: `Thread.currentThread().interrupt();`.
+- Compare objects with `.equals(...)`, not `==`. `==` on boxed primitives, `String`, or enum-looking values is a bug waiting to happen. Use `Objects.equals(a, b)` when either side may be `null`.
+- If you override `equals`, override `hashCode` with a consistent implementation (or use a `record`, which derives both). Violating the contract silently breaks `HashMap` / `HashSet` lookups.
 - Use try-with-resources for `Closeable` / `AutoCloseable`. Do not write manual `try/finally { stream.close(); }` blocks.
 - Do not modify a collection while iterating over it. Use `Iterator.remove()`, stream `.filter(...)`, or iterate over a copy.
 - No stray `System.out.println` / `e.printStackTrace()` for debugging in committed code. Use `java.util.logging`, `SLF4J`, or a project-specific logger with appropriate level.
