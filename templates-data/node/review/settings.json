@@ -1,0 +1,39 @@
+{
+  "enabledPlugins": {},
+  "permissions": {
+    "deny": [
+      "Edit(*)",
+      "Write(*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)",
+      "Bash(npm install:*)",
+      "Bash(npm i:*)",
+      "Bash(npm update:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npm ci:*)",
+      "Bash(npm publish:*)",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm remove:*)",
+      "Bash(pnpm update:*)",
+      "Bash(pnpm publish:*)",
+      "Bash(yarn install:*)",
+      "Bash(yarn add:*)",
+      "Bash(yarn remove:*)",
+      "Bash(yarn upgrade:*)",
+      "Bash(yarn publish:*)",
+      "Bash(npx:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(cp:*)",
+      "Bash(mkdir:*)",
+      "Bash(sed -i:*)"
+    ]
+  }
+}
