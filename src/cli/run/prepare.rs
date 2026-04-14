@@ -445,8 +445,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // Union template-required langs into the install plan. `--lang`
     // / config / auto-detect are respected as the primary source;
-    // template required_langs are ADDED on top so a rust-code run in
-    // a Python project still installs Rust.
+    // template required_langs are ADDED on top so a `--lang rust` run
+    // in a Python project still installs Rust.
     if !template_metadata.runtime.required_langs.is_empty() {
         let mut template_added: Vec<String> = Vec::new();
         for req in &template_metadata.runtime.required_langs {
