@@ -195,10 +195,14 @@ pub fn maybe_background_refresh(config_dir: &std::path::Path, cfg: &crate::confi
 
 /// Copy selected ecc files from the cache to the staging directory.
 ///
-/// Skills keep their directory structure under `.claude/skills/`:
-/// `skills/<name>/SKILL.md` → `<staging>/.claude/skills/<name>/SKILL.md`
-/// Agents are flat files under `.claude/agents/`:
-/// `agents/<name>.md` → `<staging>/.claude/agents/<name>.md`
+/// Skills keep their directory structure under `skills/`:
+/// `skills/<name>/SKILL.md` → `<staging>/skills/<name>/SKILL.md`
+/// Agents are flat files under `agents/`:
+/// `agents/<name>.md` → `<staging>/agents/<name>.md`
+///
+/// The staging layout matches the template-root layout (not `.claude/`);
+/// the `.claude/` mount paths are applied at mount time in
+/// `build_template_mounts`, not at stage time.
 ///
 /// Callers must have previously validated `selection` via the template
 /// metadata parser (no absolute paths, no `..`, no empty strings).

@@ -1060,7 +1060,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 ///      additional files the template defines).
 ///   2. Files selected by `template_dir/vibepod-template.toml`'s `[ecc]`
 ///      section, copied from the ecc-cache into staging's
-///      `.claude/skills/<name>/SKILL.md` and `.claude/agents/<name>.md`.
+///      `skills/<name>/SKILL.md` and `agents/<name>.md` (the staging
+///      layout mirrors the template root; the `.claude/` prefix is
+///      applied at mount time via `build_template_mounts`, not at
+///      stage time).
 ///
 /// Fails fast if any `[ecc]` file is missing from the cache.
 ///
