@@ -127,4 +127,15 @@ pub enum TemplateSubcommand {
         #[arg(long)]
         force: bool,
     },
+    /// Show ecc-cache state (location, current commit, last fetch time,
+    /// configured ref, auto-refresh setting).
+    Status {},
+    /// Fetch the latest ecc ref and hard-reset the cache immediately
+    /// (blocking). Use this for explicit refresh instead of waiting for
+    /// auto-refresh.
+    Update {
+        /// Override the configured ref for this update only.
+        #[arg(long)]
+        r#ref: Option<String>,
+    },
 }

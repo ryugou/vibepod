@@ -325,6 +325,55 @@ pub(crate) fn reset_in(config_dir: &Path, name: &str, force: bool) -> Result<()>
     Ok(())
 }
 
+/// `vibepod template status`: print ecc-cache state.
+pub fn status() -> Result<()> {
+    let config_dir = config::default_config_dir()?;
+    let cache = crate::ecc::cache_dir(&config_dir);
+
+    let unified = config::load_unified(&config_dir)?;
+    let ecc_cfg = unified.ecc.unwrap_or_default();
+
+    println!("ecc repo:         {}", ecc_cfg.repo);
+    println!("configured ref:   {}", ecc_cfg.r#ref);
+    println!("refresh_ttl:      {}", ecc_cfg.refresh_ttl);
+    println!("auto_refresh:     {}", ecc_cfg.auto_refresh);
+    println!("cache dir:        {}", cache.display());
+
+    if !cache.join(".git").is_dir() {
+        println!("cache status:     not initialized — run `vibepod init`");
+        return Ok(());
+    }
+
+    let commit = std::process::Command::new("git")
+        .current_dir(&cache)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("current commit:   {commit}");
+
+    if let Some(age) = crate::ecc::cache_age_seconds(&config_dir) {
+        let hours = age / 3600;
+        let minutes = (age % 3600) / 60;
+        println!("last updated:     {hours}h{minutes}m ago");
+    }
+
+    Ok(())
+}
+
+/// Stub for Task 7; real implementation follows.
+pub fn update(_ref_override: Option<&str>) -> Result<()> {
+    anyhow::bail!("vibepod template update is not yet implemented (Task 7)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
