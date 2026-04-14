@@ -19,4 +19,5 @@ agents = [
   "agents/code-architect.md",
   "agents/code-explorer.md",
   "agents/silent-failure-hunter.md",
+  "agents/code-reviewer.md",
 ]
