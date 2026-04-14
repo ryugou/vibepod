@@ -1,6 +1,7 @@
 //! Terminal output sanitization for user-controlled strings.
 //!
-//! Strip ASCII control characters AND Unicode bidirectional
+//! Strip Unicode control characters (ASCII C0, C1, and other code
+//! points where `char::is_control()` is true) AND Unicode bidirectional
 //! overrides (the subset of format-control characters that reorder
 //! terminal output, including explicit bidi codes, isolates, directional
 //! marks, and interlinear annotations). Other invisible / format
@@ -10,8 +11,10 @@
 //! Use whenever printing values that originate from user-editable
 //! config, CLI args, or any other untrusted source.
 
-/// Sanitize `s` for single-line terminal output. Strips ASCII control
-/// characters and Unicode bidirectional overrides (explicit bidi codes,
+/// Sanitize `s` for single-line terminal output. Strips Unicode
+/// control characters (anything where `char::is_control()` is true —
+/// ASCII C0, C1, and other code points) and Unicode bidirectional
+/// overrides (explicit bidi codes,
 /// isolates, directional marks, and interlinear annotations — replacing
 /// with spaces). Other invisible / format characters (e.g. zero-width
 /// joiners) are intentionally NOT stripped. Trims leading/trailing
