@@ -1,0 +1,12 @@
+{
+  "enabledPlugins": {},
+  "permissions": {
+    "deny": [
+      "Edit(*)",
+      "Write(*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(cargo install:*)"
+    ]
+  }
+}
