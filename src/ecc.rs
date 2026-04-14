@@ -18,13 +18,6 @@ pub fn staging_dir(runtime_dir: &std::path::Path) -> PathBuf {
     runtime_dir.join("ecc-staging")
 }
 
-/// Advisory lock file used to serialize ecc-cache mutations
-/// (clone / fetch / reset). Helps prevent two concurrent
-/// `vibepod run` from stepping on each other.
-pub fn lock_file_path(config_dir: &std::path::Path) -> PathBuf {
-    config_dir.join("ecc-cache.lock")
-}
-
 /// Ensure `cache_dir(config_dir)` contains a clone of `cfg.repo` at `cfg.ref`.
 ///
 /// If the cache already has a `.git` directory, this is a no-op and returns Ok.
@@ -256,14 +249,5 @@ mod tests {
         std::fs::write(cache.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let age = cache_age_seconds(dir.path()).unwrap();
         assert!(age < 5, "fresh file should be age < 5s, got {age}");
-    }
-
-    #[test]
-    fn lock_file_path_under_config_dir() {
-        let cfg = Path::new("/tmp/vibepod");
-        assert_eq!(
-            lock_file_path(cfg),
-            Path::new("/tmp/vibepod/ecc-cache.lock")
-        );
     }
 }
