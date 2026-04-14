@@ -417,7 +417,7 @@ pub fn update(ref_override: Option<&str>) -> Result<()> {
 
     println!(
         "Fetching ecc ref '{}' into {}...",
-        ecc_cfg.r#ref,
+        sanitize_single_line(&ecc_cfg.r#ref, 200),
         cache.display()
     );
     crate::ecc::fetch_latest(&config_dir, &ecc_cfg)?;
