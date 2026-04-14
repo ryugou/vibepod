@@ -250,4 +250,24 @@ mod tests {
         let age = cache_age_seconds(dir.path()).unwrap();
         assert!(age < 5, "fresh file should be age < 5s, got {age}");
     }
+
+    #[test]
+    fn maybe_background_refresh_noop_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::EccConfig {
+            auto_refresh: false,
+            ..Default::default()
+        };
+        // Should return without panicking, without spawning anything observable.
+        maybe_background_refresh(dir.path(), &cfg);
+    }
+
+    #[test]
+    fn maybe_background_refresh_noop_when_cache_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::EccConfig::default();
+        // No `.git/FETCH_HEAD` or `.git/HEAD`, so `cache_age_seconds` → None
+        // and the function returns without trying to spawn.
+        maybe_background_refresh(dir.path(), &cfg);
+    }
 }
