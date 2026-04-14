@@ -46,11 +46,10 @@ agents = ["agents/rust-reviewer.md"]
     assert!(staging.join("settings.json").is_file());
     assert!(staging.join("vibepod-template.toml").is_file());
 
-    // [ecc] selection should be staged under .claude/
-    assert!(staging
-        .join(".claude/skills/rust-patterns/SKILL.md")
-        .is_file());
-    assert!(staging.join(".claude/agents/rust-reviewer.md").is_file());
+    // [ecc] selection should be staged at top-level (matches mount wiring
+    // that maps `<staging>/skills` → `/home/vibepod/.claude/skills`).
+    assert!(staging.join("skills/rust-patterns/SKILL.md").is_file());
+    assert!(staging.join("agents/rust-reviewer.md").is_file());
 }
 
 #[test]
@@ -71,7 +70,9 @@ fn assemble_staging_works_without_ecc_section() {
         vibepod::cli::run::prepare::assemble_staging(&config_dir, &runtime_dir, &template_dir)
             .unwrap();
     assert!(staging.join("CLAUDE.md").is_file());
-    assert!(!staging.join(".claude").exists());
+    // No [ecc] section means no skills/agents should be staged.
+    assert!(!staging.join("skills").exists());
+    assert!(!staging.join("agents").exists());
 }
 
 #[test]
