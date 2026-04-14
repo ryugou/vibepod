@@ -344,6 +344,15 @@ pub fn status() -> Result<()> {
         return Ok(());
     }
 
+    fn sanitize_single_line(s: &str, max_len: usize) -> String {
+        let cleaned: String = s
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .trim()
+            .to_string();
+        cleaned.chars().take(max_len).collect()
+    }
     let commit = match std::process::Command::new("git")
         .current_dir(&cache)
         .args(["rev-parse", "--short", "HEAD"])
@@ -353,9 +362,12 @@ pub fn status() -> Result<()> {
         Ok(o) => format!(
             "unknown (git rev-parse exited {}: {})",
             o.status,
-            String::from_utf8_lossy(&o.stderr).trim()
+            sanitize_single_line(&String::from_utf8_lossy(&o.stderr), 200)
         ),
-        Err(e) => format!("unknown (failed to run git: {e})"),
+        Err(e) => format!(
+            "unknown (failed to run git: {})",
+            sanitize_single_line(&format!("{e}"), 200)
+        ),
     };
     println!("current commit:   {commit}");
 
