@@ -279,6 +279,22 @@ pub fn build_template_mounts(
     config_dir: &Path,
 ) -> Result<Vec<(String, String)>> {
     let template_dir = resolve_template_dir(template_name, config_dir)?;
+    build_template_mounts_from_dir(&template_dir, template_name)
+}
+
+/// Build mounts from an already-resolved template directory (e.g. a staging
+/// directory assembled by `prepare::assemble_staging`). `template_name` is
+/// only used for error messages (e.g. `installed_plugins.json` validation).
+pub fn build_template_mounts_from_dir(
+    template_dir: &Path,
+    template_name: &str,
+) -> Result<Vec<(String, String)>> {
+    let template_dir = template_dir.canonicalize().with_context(|| {
+        format!(
+            "Failed to canonicalize template directory: {}",
+            template_dir.display()
+        )
+    })?;
 
     let mut mounts = Vec::new();
 

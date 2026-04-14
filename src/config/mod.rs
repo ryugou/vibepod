@@ -118,6 +118,14 @@ pub(crate) fn parse_duration_to_seconds(s: &str) -> Option<u64> {
     Some(total)
 }
 
+/// Load the `[ecc]` section from `<config_dir>/config.toml`, falling back
+/// to `EccConfig::default()` when the section is absent or the file
+/// does not exist.
+pub fn load_ecc_config(config_dir: &Path) -> Result<EccConfig> {
+    let unified = load_unified(config_dir)?;
+    Ok(unified.ecc.unwrap_or_default())
+}
+
 pub(crate) fn load_unified(config_dir: &Path) -> Result<UnifiedConfig> {
     let path = config_dir.join("config.toml");
     if !path.exists() {

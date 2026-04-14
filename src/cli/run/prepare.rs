@@ -699,13 +699,40 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // 既に container_name 計算時 (step 4) に resolve 済み。
     let home = crate::config::home_dir()?;
 
+    // Per-container runtime directory: created here (earlier than strictly
+    // needed for the temp claude.json / sanitized settings writes below)
+    // so that template-mode staging assembly can place ecc-staged files
+    // under `<runtime_dir>/ecc-staging/` before building the mount set.
+    let runtime_dir = config_dir.join("runtime").join(&container_name);
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("Failed to create runtime dir: {}", runtime_dir.display()))?;
+
     // claude_config_mounts / host_settings_exists は label 計算（9b）と
     // extra_mounts 構築（下部）の両方で共有される。1 度だけ計算して使い回す。
+    //
+    // Template mode: v1.6 から mount source は extracted template dir
+    // そのものではなく、per-container **staging dir** を使う。staging は
+    // `assemble_staging` が (1) template dir の中身を丸ごとコピーし
+    // (2) template の `[ecc]` section で選ばれた ecc-cache のファイルを
+    // `.claude/` 配下にコピーして組み立てる。これにより official bundle
+    // でも custom template でも `[ecc]` を宣言すれば ecc-cache の内容を
+    // container に持ち込める。
+    //
+    // ecc の `maybe_background_refresh` は **staging 組み立て完了後** に
+    // 発火させる: 先に fire すると fetch+reset が staging コピーと race して
+    // 中途半端なファイルを掴む可能性があるため。
     let (claude_config_mounts, host_settings_exists) =
-        if let Some(ref template_name) = effective_template {
+        if let Some((ref template_name, ref canonical)) = resolved_template {
             // template mode: vibepod 管理の template 配下のみ。
             // host の sanitized settings.json はマウントしない
-            let mounts = super::template::build_template_mounts(template_name, &config_dir)?;
+            let staging = assemble_staging(&config_dir, &runtime_dir, canonical)?;
+
+            // Staging is complete; it's now safe to kick off the background
+            // refresh of the ecc-cache. Fire-and-forget; do not await.
+            let ecc_cfg = config::load_ecc_config(&config_dir)?;
+            crate::ecc::maybe_background_refresh(&config_dir, &ecc_cfg);
+
+            let mounts = super::template::build_template_mounts_from_dir(&staging, template_name)?;
             (mounts, false)
         } else {
             // host mode: v1.4.3 互換挙動
@@ -943,14 +970,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
-    // Per-container runtime directory: all vibepod-managed runtime files for
-    // this container (temp claude.json copy, sanitized settings.json, etc.)
-    // live under ~/.config/vibepod/runtime/<container_name>/. Created up-front
-    // so disposable cleanup can target it unconditionally regardless of which
-    // artifacts ended up being created.
-    let runtime_dir = config_dir.join("runtime").join(&container_name);
-    std::fs::create_dir_all(&runtime_dir)
-        .with_context(|| format!("Failed to create runtime dir: {}", runtime_dir.display()))?;
+    // `runtime_dir` はこの関数の前半（template staging 組み立て前）で
+    // 既に作成済み。ここでは再作成しない。
 
     // Copy .claude.json to a per-container runtime file so the host file is
     // protected from container writes. Lives alongside any sanitized
@@ -1028,6 +1049,84 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         no_network: opts.no_network,
         prompt_idle_timeout: vibepod_config.prompt_idle_timeout(),
     }))
+}
+
+/// Assemble the staging directory used as the container's
+/// `/home/vibepod/.claude/` mount source.
+///
+/// Combines, in order:
+///   1. All files from `template_dir` copied as-is into the staging root
+///      (CLAUDE.md, settings.json, vibepod-template.toml, plus any
+///      additional files the template defines).
+///   2. Files selected by `template_dir/vibepod-template.toml`'s `[ecc]`
+///      section, copied from the ecc-cache into staging's
+///      `.claude/skills/<name>/SKILL.md` and `.claude/agents/<name>.md`.
+///
+/// Fails fast if any `[ecc]` file is missing from the cache.
+///
+/// Callers must complete this assembly BEFORE triggering
+/// `crate::ecc::maybe_background_refresh`, because the refresh may
+/// mutate ecc-cache contents concurrently.
+pub fn assemble_staging(
+    config_dir: &std::path::Path,
+    runtime_dir: &std::path::Path,
+    template_dir: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    let staging = crate::ecc::staging_dir(runtime_dir);
+
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| {
+            anyhow::anyhow!("failed to clear stale staging {}: {e}", staging.display())
+        })?;
+    }
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| anyhow::anyhow!("failed to create staging {}: {e}", staging.display()))?;
+
+    copy_dir_contents(template_dir, &staging)?;
+
+    let meta_path = template_dir.join("vibepod-template.toml");
+    if meta_path.is_file() {
+        let meta = crate::cli::run::template::read_template_metadata(template_dir)?;
+        if !meta.ecc.skills.is_empty() || !meta.ecc.agents.is_empty() {
+            crate::ecc::stage_files(config_dir, runtime_dir, &meta.ecc)?;
+        }
+    }
+
+    Ok(staging)
+}
+
+/// Recursively copy the contents of `src` into `dst`. Both must exist.
+/// Directories are created as needed; regular files are copied byte-for-byte.
+/// Symlinks are followed (their target content is copied).
+fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| anyhow::anyhow!("failed to read_dir {}: {e}", src.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(src)
+            .map_err(|e| anyhow::anyhow!("strip_prefix failed: {e}"))?;
+        let target = dst.join(rel);
+        if path.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", target.display()))?;
+            copy_dir_contents(&path, &target)?;
+        } else {
+            if let Some(p) = target.parent() {
+                std::fs::create_dir_all(p)
+                    .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", p.display()))?;
+            }
+            std::fs::copy(&path, &target).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to copy {} to {}: {e}",
+                    path.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

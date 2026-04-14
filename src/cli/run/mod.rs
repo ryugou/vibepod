@@ -6,7 +6,7 @@ use crate::session::SessionStore;
 
 mod interactive;
 pub mod lock;
-mod prepare;
+pub mod prepare;
 mod prompt;
 pub mod template;
 
