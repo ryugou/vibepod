@@ -12,6 +12,37 @@ use super::{
     detect_languages, get_lang_install_cmd, hash_env_vars, parse_mount_arg, RunContext, RunOptions,
 };
 
+/// Claude CLI に渡す引数列を組み立てる。
+///
+/// `prepare_context` 内の Docker チェックなどの副作用から独立させるため
+/// 純関数として切り出している。ユニットテストから直接検証できる。
+///
+/// - `interactive = true`（`--prompt` なし・`--resume` なし）のときは
+///   パーミッションバイパスを付けない（ユーザーが対話的に承認する想定）。
+/// - 非対話モードでは `mode == Impl` のときのみ
+///   `--dangerously-skip-permissions` を付与する。Review モードは
+///   `settings.json` の `permissions.deny` を尊重するため、ここでは
+///   付与しない。
+/// - `--resume` や `-p <prompt>`（`--output-format stream-json --verbose`
+///   付き）は従来通り後段で積み上げる。
+pub fn build_claude_args(opts: &RunOptions, interactive: bool) -> Vec<String> {
+    let mut claude_args: Vec<String> = Vec::new();
+    if !interactive && opts.mode == crate::cli::RunMode::Impl {
+        claude_args.push("--dangerously-skip-permissions".to_string());
+    }
+    if opts.resume {
+        claude_args.push("--resume".to_string());
+    }
+    if let Some(ref p) = opts.prompt {
+        claude_args.push("-p".to_string());
+        claude_args.push(p.clone());
+        claude_args.push("--output-format".to_string());
+        claude_args.push("stream-json".to_string());
+        claude_args.push("--verbose".to_string());
+    }
+    claude_args
+}
+
 /// プロジェクトパスの SHA256 先頭 8 文字（hex）を返す。
 fn path_hash_8(path: &str) -> String {
     let hash = Sha256::digest(path.as_bytes());
@@ -618,26 +649,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 8. Build claude args
-    let mut claude_args: Vec<String> = Vec::new();
-    if !interactive {
-        // Impl mode (default for autonomous runs): bypass permission
-        // prompts since there's no user to approve. Review mode MUST
-        // honor permissions.deny from settings.json — bypassing it
-        // would defeat the read-only contract of `--mode review`.
-        if opts.mode == crate::cli::RunMode::Impl {
-            claude_args.push("--dangerously-skip-permissions".to_string());
-        }
-    }
-    if opts.resume {
-        claude_args.push("--resume".to_string());
-    }
-    if let Some(ref p) = opts.prompt {
-        claude_args.push("-p".to_string());
-        claude_args.push(p.clone());
-        claude_args.push("--output-format".to_string());
-        claude_args.push("stream-json".to_string());
-        claude_args.push("--verbose".to_string());
-    }
+    let claude_args = build_claude_args(opts, interactive);
 
     if std::env::var("VIBEPOD_TRACE").is_ok() {
         eprintln!("vibepod: claude_args = {:?}", claude_args);
