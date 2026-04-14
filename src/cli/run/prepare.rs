@@ -122,6 +122,35 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         );
     }
 
+    // v1.6: Resolve official (lang, mode) template when the user didn't
+    // pass `--template` explicitly. `opts.template` is the explicit path
+    // for custom templates; for language bundles we compute from `--lang`
+    // or cwd auto-detect and feed the (lang, mode) matrix.
+    //
+    // This is computed here (before the git/docker checks) so the trace
+    // output is observable even when downstream checks fail — useful for
+    // debugging template selection without Docker/git setup.
+    let effective_template_v16: Option<String> = if let Some(t) = &opts.template {
+        Some(t.clone())
+    } else {
+        let cwd_for_detect = std::env::current_dir()?;
+        let lang_hint: Option<String> = opts.lang.clone().or_else(|| {
+            detect_languages(&cwd_for_detect)
+                .into_iter()
+                .next()
+                .map(|(name, _)| name)
+        });
+        super::template::resolve_official_template_dir(lang_hint.as_deref(), opts.mode)
+            .map(|s| s.to_string())
+    };
+
+    if std::env::var("VIBEPOD_TRACE").is_ok() {
+        eprintln!(
+            "vibepod: selected template = {}",
+            effective_template_v16.as_deref().unwrap_or("<host>")
+        );
+    }
+
     let interactive = !opts.resume && opts.prompt.is_none();
 
     // 1. Check git repo
@@ -290,8 +319,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // otherwise do inline near the container-name hashing step below.
     // We capture the result here and reuse it when computing the
     // container name, so extraction / resolve is not repeated.
-    let effective_template =
-        super::template::effective_template_name(opts, &vibepod_config, &config_dir);
+    // Prefer the v1.6 (lang, mode) resolver result when it produced a name;
+    // otherwise fall back to the legacy resolver which additionally consults
+    // `default_prompt_template` from config. This keeps existing behavior
+    // for users who configured a default template but adds (lang, mode)
+    // routing on top.
+    let effective_template = effective_template_v16
+        .clone()
+        .or_else(|| super::template::effective_template_name(opts, &vibepod_config, &config_dir));
     let resolved_template: Option<(String, std::path::PathBuf)> = if opts.worktree {
         None
     } else if let Some(ref tmpl) = effective_template {
