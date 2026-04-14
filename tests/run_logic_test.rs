@@ -1102,6 +1102,34 @@ fn test_user_template_names_propagates_unreadable_dir() {
 }
 
 #[test]
+fn test_extract_embedded_templates_is_idempotent() {
+    // Repeated calls must not error and must leave every embedded
+    // container extracted with its marker.
+    let config_dir = tempfile::tempdir().unwrap();
+    for _ in 0..3 {
+        extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+    }
+    let names = embedded_template_names();
+    assert!(
+        !names.is_empty(),
+        "expected at least one embedded template, got empty set"
+    );
+    for name in &names {
+        let dir = config_dir.path().join("templates").join(name);
+        assert!(
+            dir.is_dir(),
+            "embedded template {} should exist after idempotent extract",
+            name
+        );
+        assert!(
+            dir.join(".vibepod-embedded").is_file(),
+            "marker should be present on {}",
+            name
+        );
+    }
+}
+
+#[test]
 fn test_extract_embedded_templates_preserves_existing_user_dir() {
     let config_dir = tempfile::tempdir().unwrap();
     // ユーザーが独自の (embedded に含まれない) template を作っている場合、
