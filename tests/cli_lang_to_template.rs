@@ -139,3 +139,25 @@ fn explicit_lang_wins_over_cwd_detect() {
         "explicit --lang go must win over cwd Cargo.toml, stderr:\n{stderr}"
     );
 }
+
+#[test]
+fn unsupported_lang_falls_through_to_host() {
+    // Unknown lang like "fortran" is not an error — it soft-falls through
+    // to <host>. (If we ever decide to harden this into an error, this
+    // test documents the transition point.)
+    let tmp = tempfile::tempdir().unwrap();
+    init_git(tmp.path());
+    let out = Command::new(env!("CARGO_BIN_EXE_vibepod"))
+        .current_dir(tmp.path())
+        .args(["run", "--lang", "fortran", "--prompt", "x"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
+        .env("VIBEPOD_TRACE", "1")
+        .output()
+        .expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("selected template = <host>"),
+        "unsupported lang must soft-fallthrough to <host>, stderr:\n{stderr}"
+    );
+}
