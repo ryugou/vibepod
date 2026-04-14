@@ -79,6 +79,41 @@ pub fn ensure_cloned(config_dir: &std::path::Path, cfg: &crate::config::EccConfi
     Ok(())
 }
 
+/// Fetch and hard-reset the ecc cache to `cfg.ref`. Caller must ensure
+/// `ensure_cloned` has been run first.
+///
+/// Errors if the cache directory has no `.git` or if any git command fails.
+pub fn fetch_latest(config_dir: &std::path::Path, cfg: &crate::config::EccConfig) -> Result<()> {
+    let cache = cache_dir(config_dir);
+    if !cache.join(".git").is_dir() {
+        anyhow::bail!(
+            "ecc cache not initialized at {}: run `vibepod init` first",
+            cache.display()
+        );
+    }
+
+    let run = |args: &[&str]| -> Result<()> {
+        let output = std::process::Command::new("git")
+            .current_dir(&cache)
+            .args(args)
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to spawn git: {e}"))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {} failed ({}): {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    };
+
+    run(&["fetch", "--depth", "1", "origin", &cfg.r#ref])?;
+    run(&["reset", "--hard", "FETCH_HEAD"])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +148,18 @@ mod tests {
         // Verify existing .git/HEAD was not overwritten (confirms no git operation happened).
         let head = std::fs::read_to_string(cache.join(".git/HEAD")).unwrap();
         assert_eq!(head, "ref: refs/heads/main\n");
+    }
+
+    #[test]
+    fn fetch_latest_errors_when_cache_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::EccConfig::default();
+        let err = fetch_latest(dir.path(), &cfg).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("vibepod init"),
+            "expected init hint in error, got: {msg}"
+        );
     }
 
     #[test]
