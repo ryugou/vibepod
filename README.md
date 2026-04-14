@@ -112,15 +112,36 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
-| `--lang <name>` | Install language toolchain in container (`rust`, `node`, `python`, `go`, `java`). Auto-detected from project files if omitted |
+| `--lang <name>` | Select an official bundle (`rust`, `node`, `python`, `go`, `java`) — installs the language toolchain **and** mounts the matching agents/skills from the ecc cache. Auto-detected from project files if omitted |
+| `--mode <impl\|review>` | Select bundle mode. `impl` (default) mounts an implementation-focused bundle; `review` mounts a read-only reviewer bundle with state-mutating shell commands blocked. See "Review mode" below |
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 | `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
-| `--template <name>` | Mount a vibepod-managed template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/` instead of the host's `~/.claude/`. Template names must match `[a-zA-Z0-9_-]+`. See "Templates" below |
+| `--template <name>` | Mount a **custom** template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/` instead of the host's `~/.claude/`. For official language bundles, use `--lang` instead. Template names must match `[a-zA-Z0-9_-]+`. Cannot be combined with `--mode review`. See "Templates" below |
 
 **Container reuse is the default.** VibePod creates one container per project (named `vibepod-{project}-{hash}`) and reuses it across runs. Setup only runs once; subsequent `vibepod run` calls skip setup and connect instantly via `docker exec`. Use `--new` to force a fresh container.
 
 When `--template <name>` is passed, each `(project, template)` combination gets its own persistent container, so you can switch between host mode and multiple templates on the same project without `--new`.
+
+#### Review mode (read-only evaluation)
+
+`--mode review` mounts a reviewer-focused bundle that blocks `Edit`/`Write` and most state-mutating shell commands via `permissions.deny`, so the agent can inspect a codebase without modifying it.
+
+```bash
+# Language-agnostic reviewer
+vibepod run --mode review --prompt "review the uncommitted changes"
+
+# Language-specific reviewer (Rust-aware rules, unsafe-block triggers, etc.)
+vibepod run --lang rust --mode review --prompt "review this PR"
+```
+
+Per-language review bundles include `santa-method` dual-reviewer convergence triggers keyed to each language's highest-risk primitives (Rust `unsafe`, Go `cgo`/`unsafe`, Node `eval`/prototype pollution, Python `pickle`/`eval`, Java JNDI/reflection/XXE). Combining `--template <name>` with `--mode review` is rejected at CLI parse-time.
+
+#### Content model (v1.6+)
+
+Language bundles pull their agents and skills from a local clone of [everything-claude-code (ecc)](https://github.com/) cached at `~/.config/vibepod/ecc-cache/`. `vibepod init` initializes the cache; a TTL-based background `git fetch` keeps it up-to-date. Use `vibepod template update [--ref <ref>]` for explicit refresh and `vibepod template status` to inspect cache state (repo, ref, last fetch time, current commit). Pin a specific ecc ref via the `[ecc]` section in `~/.config/vibepod/config.toml`.
+
+Custom templates can opt into ecc content by adding an `[ecc]` section to their `vibepod-template.toml`, listing the `skills/` and `agents/` paths to pull from the cache.
 
 #### Templates (Phase 2 preview)
 
