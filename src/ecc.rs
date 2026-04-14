@@ -438,7 +438,11 @@ mod tests {
 
         let sel = crate::cli::run::template::EccSelection::default();
         stage_files(&config_dir, &runtime_dir, &sel).unwrap();
-        // staging dir may or may not be created; function should not error.
+
+        assert!(
+            !staging_dir(&runtime_dir).exists(),
+            "empty selection should not create staging directory"
+        );
     }
 
     #[test]
