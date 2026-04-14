@@ -404,10 +404,19 @@ mod tests {
 
     fn embedded_name_or_skip() -> Option<String> {
         // Phase 4+ では rust-code / review が embed される。どちらかが
-        // 存在すれば十分。テストでは最初の 1 つを採用する。
+        // 存在すれば十分。テストでは CLAUDE.md を直下に持つ flat な
+        // 埋め込み template を選ぶ（v1.6 で導入された <lang>/<mode>
+        // 形式のネスト container は CLAUDE.md を直下に持たないため、
+        // このテストの対象にはならない）。
+        use crate::cli::run::template::EMBEDDED_TEMPLATES;
         crate::cli::run::template::embedded_template_names()
             .into_iter()
-            .next()
+            .find(|name| {
+                EMBEDDED_TEMPLATES
+                    .get_dir(name.as_str())
+                    .map(|d| d.get_file(format!("{}/CLAUDE.md", name)).is_some())
+                    .unwrap_or(false)
+            })
     }
 
     #[test]
