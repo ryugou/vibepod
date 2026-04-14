@@ -442,6 +442,38 @@ mod tests {
     }
 
     #[test]
+    fn stage_files_leaves_prior_entries_staged_when_later_entry_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
+        let cache = cache_dir(&config_dir);
+        std::fs::create_dir_all(cache.join("skills/first")).unwrap();
+        std::fs::write(cache.join("skills/first/SKILL.md"), "first").unwrap();
+        // Note: skills/missing/SKILL.md is intentionally NOT created
+
+        let sel = crate::cli::run::template::EccSelection {
+            skills: vec![
+                "skills/first/SKILL.md".to_string(),
+                "skills/missing/SKILL.md".to_string(),
+            ],
+            agents: vec![],
+        };
+        let err = stage_files(&config_dir, &runtime_dir, &sel).unwrap_err();
+        assert!(format!("{err}").contains("skills/missing"));
+
+        // First entry was copied before the failure; we do NOT roll it back.
+        let first_staged = staging_dir(&runtime_dir).join(".claude/skills/first/SKILL.md");
+        assert!(
+            first_staged.is_file(),
+            "first entry should remain staged on fail-fast; found: {}",
+            first_staged.display()
+        );
+    }
+
+    #[test]
     fn stage_files_preserves_nested_skill_directory_structure() {
         let tmp = tempfile::tempdir().unwrap();
         let config_dir = tmp.path().join("config");
