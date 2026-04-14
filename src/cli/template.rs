@@ -354,7 +354,7 @@ pub fn status() -> Result<()> {
         return Ok(());
     }
 
-    let commit = match std::process::Command::new("git")
+    let commit = match crate::ecc::git_command()
         .current_dir(&cache)
         .args(["rev-parse", "--short", "HEAD"])
         .output()
