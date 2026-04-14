@@ -242,31 +242,66 @@ fn copy_selection(
     entries: &[String],
 ) -> Result<()> {
     for rel in entries {
-        let src = cache.join(rel);
-        // Reject symlinks. Compromised/malicious ecc repos could
-        // symlink listed paths to host files; copying their target
-        // content into staging would be a confidentiality leak.
-        // Same rationale as copy_dir_contents in prepare.rs.
-        let meta = std::fs::symlink_metadata(&src).map_err(|e| {
-            anyhow::anyhow!(
-                "ecc {kind} not accessible: '{}' (at {}): {e}",
-                rel,
-                src.display()
-            )
-        })?;
-        if meta.file_type().is_symlink() {
+        // Walk each path component under `cache` and reject if ANY
+        // intermediate (or the final) component is a symlink. Without
+        // this, an attacker-controlled `skills/evil -> /etc` directory
+        // symlink combined with a selection entry like
+        // `skills/evil/passwd` would bypass the final-component
+        // symlink check and copy out-of-cache content.
+        let mut cur = cache.to_path_buf();
+        for component in std::path::Path::new(rel).components() {
+            match component {
+                std::path::Component::Normal(c) => {
+                    cur.push(c);
+                    match std::fs::symlink_metadata(&cur) {
+                        Ok(meta) => {
+                            if meta.file_type().is_symlink() {
+                                anyhow::bail!(
+                                    "ecc {kind} path '{}' traverses a symlink at '{}'; \
+                                     symlinks are not allowed inside the cache",
+                                    rel,
+                                    cur.display()
+                                );
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            anyhow::bail!(
+                                "ecc {kind} not found in cache: '{}' (missing at {})",
+                                rel,
+                                cur.display()
+                            );
+                        }
+                        Err(e) => {
+                            anyhow::bail!(
+                                "ecc {kind} access failed: '{}' at {}: {e}",
+                                rel,
+                                cur.display()
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    // Path validation upstream already rejects `..`,
+                    // absolute, and empty segments. If we see a
+                    // non-Normal component here, it's a programming error.
+                    anyhow::bail!(
+                        "ecc {kind} path '{}' contains unexpected component (validator regression?)",
+                        rel
+                    );
+                }
+            }
+        }
+        // `cur` is now the final path. Verify it's a regular file.
+        let final_meta = std::fs::symlink_metadata(&cur)?;
+        if !final_meta.is_file() {
             anyhow::bail!(
-                "ecc {kind} entry '{}' is a symlink; symlinks are not allowed in the cache (would bypass containment)",
-                rel
+                "ecc {kind} entry '{}' is not a regular file (at {})",
+                rel,
+                cur.display()
             );
         }
-        if !meta.is_file() {
-            anyhow::bail!(
-                "ecc {kind} not found in cache: '{}' (expected at {})",
-                rel,
-                src.display()
-            );
-        }
+
+        // Strip the declared prefix and compute destination.
         let stripped = rel.strip_prefix(prefix).ok_or_else(|| {
             anyhow::anyhow!("ecc {kind} path '{}' must start with '{}'", rel, prefix)
         })?;
@@ -275,10 +310,10 @@ fn copy_selection(
             std::fs::create_dir_all(parent)
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
         }
-        std::fs::copy(&src, &dest).map_err(|e| {
+        std::fs::copy(&cur, &dest).map_err(|e| {
             anyhow::anyhow!(
                 "failed to copy {} to {}: {e}",
-                src.display(),
+                cur.display(),
                 dest.display()
             )
         })?;
@@ -524,6 +559,60 @@ mod tests {
 
         let out = staging_dir(&runtime_dir).join("skills/nested/deep/SKILL.md");
         assert!(out.is_file(), "nested skill path should be preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_files_rejects_intermediate_symlink_in_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
+        let cache = cache_dir(&config_dir);
+        std::fs::create_dir_all(cache.join("skills")).unwrap();
+        // Plant an intermediate directory symlink: skills/evil -> /etc
+        std::os::unix::fs::symlink("/etc", cache.join("skills/evil")).unwrap();
+
+        // Selection tries to fetch skills/evil/passwd which would
+        // resolve to /etc/passwd via the intermediate symlink.
+        let sel = crate::cli::run::template::EccSelection {
+            skills: vec!["skills/evil/passwd".to_string()],
+            agents: vec![],
+        };
+        let err = stage_files(&config_dir, &runtime_dir, &sel).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("symlink"),
+            "expected intermediate-symlink rejection, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_files_rejects_final_symlink_in_cache_still_works() {
+        // Regression gate for the existing final-component check — make
+        // sure the new component-wise walk doesn't accidentally skip it.
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
+        let cache = cache_dir(&config_dir);
+        std::fs::create_dir_all(cache.join("skills/evil")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", cache.join("skills/evil/SKILL.md")).unwrap();
+
+        let sel = crate::cli::run::template::EccSelection {
+            skills: vec!["skills/evil/SKILL.md".to_string()],
+            agents: vec![],
+        };
+        let err = stage_files(&config_dir, &runtime_dir, &sel).unwrap_err();
+        assert!(
+            format!("{err}").contains("symlink"),
+            "expected symlink rejection"
+        );
     }
 
     #[cfg(unix)]
