@@ -11,6 +11,24 @@ pub mod template;
 
 use clap::{Parser, Subcommand};
 
+/// Usage mode for `vibepod run`: code-writing (`impl`, default) or
+/// read-only review (`review`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum RunMode {
+    #[default]
+    Impl,
+    Review,
+}
+
+impl RunMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RunMode::Impl => "impl",
+            RunMode::Review => "review",
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "vibepod",
@@ -65,6 +83,9 @@ pub enum Commands {
         /// ~/.config/vibepod/templates/<name>/.
         #[arg(long)]
         template: Option<String>,
+        /// Usage mode: `impl` (default, write code) or `review` (read-only review).
+        #[arg(long, value_enum, default_value_t = RunMode::Impl)]
+        mode: RunMode,
     },
     /// List running VibePod containers
     Ps {},
@@ -126,5 +147,16 @@ pub enum TemplateSubcommand {
         /// Confirm that existing edits in the target directory will be lost
         #[arg(long)]
         force: bool,
+    },
+    /// Show ecc-cache state (location, current commit, last fetch time,
+    /// configured ref, auto-refresh setting).
+    Status {},
+    /// Fetch the latest ecc ref and hard-reset the cache immediately
+    /// (blocking). Use this for explicit refresh instead of waiting for
+    /// auto-refresh.
+    Update {
+        /// Override the configured ref for this update only.
+        #[arg(long)]
+        r#ref: Option<String>,
     },
 }

@@ -448,6 +448,7 @@ fn make_run_options(template: Option<&str>, prompt: Option<&str>) -> RunOptions 
         mount: Vec::new(),
         new_container: false,
         template: template.map(|s| s.to_string()),
+        mode: vibepod::cli::RunMode::default(),
     }
 }
 
@@ -904,12 +905,39 @@ fn test_build_template_mounts_rejects_path_traversal() {
 }
 
 #[test]
-fn test_build_template_mounts_rejects_slash_in_name() {
+fn test_build_template_mounts_rejects_three_segment_name() {
+    // v1.6 以降、2 セグメント (例: `rust/impl`) の公式 bundle 名は
+    // 許可されるが、3 セグメント以上は依然として validator で reject
+    // されるべき ( `a/b/c` のような path traversal 様のネスト逸脱を防ぐ)。
     let config_dir = tempfile::tempdir().unwrap();
-    let err = build_template_mounts("foo/bar", config_dir.path()).unwrap_err();
+    let err = build_template_mounts("foo/bar/baz", config_dir.path()).unwrap_err();
     assert!(
         err.to_string().contains("invalid"),
         "expected 'invalid' error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_empty_nested_segment() {
+    // `foo/` や `/bar` のように空セグメントを含む名前は依然 reject。
+    let config_dir = tempfile::tempdir().unwrap();
+    let err = build_template_mounts("foo/", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error for 'foo/', got: {}",
+        err
+    );
+    let err = build_template_mounts("/bar", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error for '/bar', got: {}",
+        err
+    );
+    let err = build_template_mounts("foo//bar", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error for 'foo//bar', got: {}",
         err
     );
 }
@@ -1101,75 +1129,31 @@ fn test_user_template_names_propagates_unreadable_dir() {
 }
 
 #[test]
-fn test_extract_embedded_templates_creates_official_templates() {
-    // Phase 4 で templates-data/ に rust-code と review が追加されたので、
-    // extract で `~/.config/vibepod/templates/rust-code/` と
-    // `~/.config/vibepod/templates/review/` が作られることを確認する。
+fn test_extract_embedded_templates_is_idempotent() {
+    // Repeated calls must not error and must leave every embedded
+    // container extracted with its marker.
     let config_dir = tempfile::tempdir().unwrap();
-    assert!(!config_dir.path().join("templates").exists());
-
-    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
-
-    let templates = config_dir.path().join("templates");
-    assert!(templates.is_dir(), "templates root should be created");
+    for _ in 0..3 {
+        extract_embedded_templates_if_missing(config_dir.path()).unwrap();
+    }
+    let names = embedded_template_names();
     assert!(
-        templates.join("rust-code").is_dir(),
-        "rust-code template should be extracted"
+        !names.is_empty(),
+        "expected at least one embedded template, got empty set"
     );
-    assert!(
-        templates.join("review").is_dir(),
-        "review template should be extracted"
-    );
-    // トップ階層に marker が書かれていること
-    assert!(
-        templates
-            .join("rust-code")
-            .join(".vibepod-embedded")
-            .is_file(),
-        "rust-code should have embedded marker"
-    );
-    assert!(
-        templates.join("review").join(".vibepod-embedded").is_file(),
-        "review should have embedded marker"
-    );
-    // CLAUDE.md が存在すること (template の中身が再帰的に展開されている)
-    assert!(templates.join("rust-code").join("CLAUDE.md").is_file());
-    assert!(templates.join("review").join("CLAUDE.md").is_file());
-
-    // Phase 4.5: plugins/ も bundle されており、installed_plugins.json と
-    // superpowers の cache が展開されている
-    for template_name in ["rust-code", "review"] {
-        let plugins = templates.join(template_name).join("plugins");
+    for name in &names {
+        let dir = config_dir.path().join("templates").join(name);
         assert!(
-            plugins.is_dir(),
-            "{} plugins/ should be extracted",
-            template_name
+            dir.is_dir(),
+            "embedded template {} should exist after idempotent extract",
+            name
         );
         assert!(
-            plugins.join("installed_plugins.json").is_file(),
-            "{} plugins/installed_plugins.json should be extracted",
-            template_name
-        );
-        assert!(
-            plugins
-                .join("cache/claude-plugins-official/superpowers/5.0.7/CLAUDE.md")
-                .is_file(),
-            "{} should have superpowers plugin extracted",
-            template_name
+            dir.join(".vibepod-embedded").is_file(),
+            "marker should be present on {}",
+            name
         );
     }
-}
-
-#[test]
-fn test_extract_embedded_templates_is_idempotent() {
-    let config_dir = tempfile::tempdir().unwrap();
-    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
-    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
-    extract_embedded_templates_if_missing(config_dir.path()).unwrap();
-    // 再呼び出しでもエラーにならず、結果が安定していること
-    let templates = config_dir.path().join("templates");
-    assert!(templates.join("rust-code").is_dir());
-    assert!(templates.join("review").is_dir());
 }
 
 #[test]
@@ -1186,37 +1170,26 @@ fn test_extract_embedded_templates_preserves_existing_user_dir() {
 
     let content = std::fs::read_to_string(user_template.join("CLAUDE.md")).unwrap();
     assert_eq!(content, "user content");
-    // 公式 template も同時に展開される
-    assert!(config_dir
-        .path()
-        .join("templates")
-        .join("rust-code")
-        .is_dir());
 }
 
 #[test]
 fn test_extract_embedded_templates_respects_user_override_same_name() {
     // ユーザーが embedded と同名の dir を自前で作っている場合、
     // extract はそれを尊重して上書きしない (marker 無しで残る)。
+    // v1.6 では embedded 名は言語コンテナ ("rust" / "go" / ...) なので
+    // そのうちの 1 つをユーザー override として用意する。
     let config_dir = tempfile::tempdir().unwrap();
     let templates = config_dir.path().join("templates");
-    std::fs::create_dir_all(templates.join("rust-code")).unwrap();
-    std::fs::write(
-        templates.join("rust-code").join("CLAUDE.md"),
-        "user override",
-    )
-    .unwrap();
+    std::fs::create_dir_all(templates.join("rust")).unwrap();
+    std::fs::write(templates.join("rust").join("CLAUDE.md"), "user override").unwrap();
 
     extract_embedded_templates_if_missing(config_dir.path()).unwrap();
 
     // 内容が維持される
-    let content = std::fs::read_to_string(templates.join("rust-code").join("CLAUDE.md")).unwrap();
+    let content = std::fs::read_to_string(templates.join("rust").join("CLAUDE.md")).unwrap();
     assert_eq!(content, "user override");
     // marker は書かれない (user override として扱う)
-    assert!(!templates
-        .join("rust-code")
-        .join(".vibepod-embedded")
-        .is_file());
+    assert!(!templates.join("rust").join(".vibepod-embedded").is_file());
 }
 
 // --- read_template_metadata ---
@@ -1466,39 +1439,6 @@ fn test_read_template_metadata_rejects_setup_command_too_long() {
     );
 }
 
-#[test]
-fn test_embedded_rust_code_template_declares_rust_analyzer_setup() {
-    // Phase 4.7: rust-code template は rustup component add rust-analyzer を
-    // setup_commands に持つ。これが欠けると rust-code で LSP が使えない
-    // spec 違反に戻る。回帰防止の gate。
-    let config_dir = tempfile::tempdir().unwrap();
-    extract_single_embedded_template_if_missing(config_dir.path(), "rust-code").unwrap();
-    let template_dir = config_dir.path().join("templates").join("rust-code");
-    let meta = read_template_metadata(&template_dir).unwrap();
-    assert!(
-        meta.runtime
-            .setup_commands
-            .iter()
-            .any(|c| c.contains("rustup component add rust-analyzer")),
-        "expected rust-code setup_commands to include rust-analyzer install, got: {:?}",
-        meta.runtime.setup_commands
-    );
-}
-
-#[test]
-fn test_embedded_review_template_declares_no_setup_commands() {
-    // review は language-agnostic かつ追加 setup 不要
-    let config_dir = tempfile::tempdir().unwrap();
-    extract_single_embedded_template_if_missing(config_dir.path(), "review").unwrap();
-    let template_dir = config_dir.path().join("templates").join("review");
-    let meta = read_template_metadata(&template_dir).unwrap();
-    assert!(
-        meta.runtime.setup_commands.is_empty(),
-        "expected review to have no setup_commands, got: {:?}",
-        meta.runtime.setup_commands
-    );
-}
-
 // --- read_template_metadata: required_langs (unsupported / typo) ---
 
 #[test]
@@ -1542,46 +1482,37 @@ required_langs = ["rsut"]
 }
 
 #[test]
-fn test_embedded_rust_code_template_declares_rust_requirement() {
-    // 公式 rust-code template の vibepod-template.toml が "rust" を要求する
-    // こと。これが欠けると rust-code の quality gate が container で動かない
-    // spec 違反に戻る。回帰防止の gate。
+fn test_embedded_rust_impl_template_declares_rust_analyzer_setup() {
+    // v1.6 regression gate: rust/impl bundle must declare
+    // `rustup component add rust-analyzer` in [runtime] setup_commands
+    // so in-container Rust LSP works. The legacy rust-code bundle had
+    // this; dropping it on migration silently broke edit/review UX.
     let config_dir = tempfile::tempdir().unwrap();
-    extract_single_embedded_template_if_missing(config_dir.path(), "rust-code").unwrap();
-    let template_dir = config_dir.path().join("templates").join("rust-code");
-    let meta = read_template_metadata(&template_dir).unwrap();
-    assert_eq!(meta.runtime.required_langs, vec!["rust".to_string()]);
-}
-
-#[test]
-fn test_embedded_review_template_declares_no_required_langs() {
-    // review template は language-agnostic なので required_langs は空
-    let config_dir = tempfile::tempdir().unwrap();
-    extract_single_embedded_template_if_missing(config_dir.path(), "review").unwrap();
-    let template_dir = config_dir.path().join("templates").join("review");
+    // `rust/impl` contains a `/`, which validate_template_name rejects;
+    // extract the parent container `rust` instead (lays down the whole
+    // rust/ tree, including impl/vibepod-template.toml).
+    extract_single_embedded_template_if_missing(config_dir.path(), "rust").unwrap();
+    let template_dir = config_dir
+        .path()
+        .join("templates")
+        .join("rust")
+        .join("impl");
     let meta = read_template_metadata(&template_dir).unwrap();
     assert!(
-        meta.runtime.required_langs.is_empty(),
-        "expected review to have no required_langs, got: {:?}",
-        meta.runtime.required_langs
+        meta.runtime
+            .setup_commands
+            .iter()
+            .any(|c| c.contains("rust-analyzer")),
+        "rust/impl must declare rust-analyzer setup for in-container LSP; got: {:?}",
+        meta.runtime.setup_commands
     );
 }
 
 #[test]
-fn test_embedded_template_names_contains_official_templates() {
-    // Phase 4 で rust-code と review が embed される。
+fn test_embedded_template_names_all_pass_validation() {
+    // embedded 集合に含まれる名前 (v1.6 以降は言語コンテナ) は全て
+    // name validation を通ること。
     let names = embedded_template_names();
-    assert!(
-        names.contains(&"rust-code".to_string()),
-        "expected rust-code in embedded templates, got {:?}",
-        names
-    );
-    assert!(
-        names.contains(&"review".to_string()),
-        "expected review in embedded templates, got {:?}",
-        names
-    );
-    // 全て name validation を通る
     for name in &names {
         assert!(!name.is_empty());
         assert!(
@@ -1594,20 +1525,30 @@ fn test_embedded_template_names_contains_official_templates() {
 }
 
 #[test]
-fn test_extract_single_embedded_template_installs_only_target() {
-    // 単一ターゲット抽出は「要求された 1 つだけ」を展開し、他の embedded
-    // template (rust-code / review) を巻き込まない。
+fn test_extract_single_embedded_template_survives_sibling_conflict() {
+    // 他の embedded 名が壊れた entry (regular file) として存在していても、
+    // 要求された embedded template は正常に展開されることを確認する。
+    // これは単一-ターゲット API の本質: sibling の破損が target 展開を
+    // 巻き込まないこと。v1.6 では embedded 名は言語コンテナ
+    // ("rust" / "generic" / ...) で、どちらも現在の embedded 集合にある。
     let config_dir = tempfile::tempdir().unwrap();
-    extract_single_embedded_template_if_missing(config_dir.path(), "rust-code").unwrap();
-
     let templates = config_dir.path().join("templates");
-    assert!(templates.join("rust-code").is_dir());
-    assert!(templates
-        .join("rust-code")
-        .join(".vibepod-embedded")
-        .is_file());
-    // 他の template は展開されない (単一ターゲットモード)
-    assert!(!templates.join("review").exists());
+    std::fs::create_dir_all(&templates).unwrap();
+    // Plant a blocking regular file at a sibling's expected dir path.
+    std::fs::write(templates.join("generic"), "garbage").unwrap();
+
+    // Target extraction should still succeed.
+    extract_single_embedded_template_if_missing(config_dir.path(), "rust").unwrap();
+
+    // Sibling remains untouched garbage file.
+    let sibling_meta = std::fs::symlink_metadata(templates.join("generic")).unwrap();
+    assert!(sibling_meta.file_type().is_file());
+    let content = std::fs::read_to_string(templates.join("generic")).unwrap();
+    assert_eq!(content, "garbage");
+
+    // Target exists as a directory with the embedded marker.
+    assert!(templates.join("rust").is_dir());
+    assert!(templates.join("rust").join(".vibepod-embedded").is_file());
 }
 
 #[test]
@@ -1617,37 +1558,8 @@ fn test_extract_single_embedded_template_noop_for_unknown_name() {
     // 呼ぶ場合の防御でもある。
     let config_dir = tempfile::tempdir().unwrap();
     extract_single_embedded_template_if_missing(config_dir.path(), "does-not-exist").unwrap();
-    // ensure_templates_root だけは呼ばれるので templates/ は作られる
-    // (あるいは作られないかもしれないが、少なくともこの呼び出しでは
-    //  rust-code や review は生まれない)
     let templates = config_dir.path().join("templates");
     assert!(!templates.join("does-not-exist").exists());
-    assert!(!templates.join("rust-code").exists());
-    assert!(!templates.join("review").exists());
-}
-
-#[test]
-fn test_extract_single_embedded_template_survives_sibling_conflict() {
-    // 他の embedded 名が壊れた entry (regular file) として存在していても、
-    // 要求された embedded template は正常に展開されることを確認する。
-    // これが Phase 4 で単一-ターゲット API を導入した主な理由。
-    let config_dir = tempfile::tempdir().unwrap();
-    let templates = config_dir.path().join("templates");
-    std::fs::create_dir_all(&templates).unwrap();
-    // `review` を意図的にファイルとして置く → bulk extract だと他の
-    // template まで止まるが、単一ターゲット (rust-code) は通るはず
-    std::fs::write(templates.join("review"), "blocking file").unwrap();
-
-    extract_single_embedded_template_if_missing(config_dir.path(), "rust-code").unwrap();
-
-    assert!(templates.join("rust-code").is_dir());
-    assert!(templates
-        .join("rust-code")
-        .join(".vibepod-embedded")
-        .is_file());
-    // 壊れた review はそのまま残る (単一ターゲット API は他を触らない)
-    let content = std::fs::read_to_string(templates.join("review")).unwrap();
-    assert_eq!(content, "blocking file");
 }
 
 #[test]

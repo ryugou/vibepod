@@ -1,0 +1,22 @@
+# Go implementation bundle — toolchain + ecc selection for vibepod v1.6+.
+#
+# Pulled skills/agents are sourced from ~/.config/vibepod/ecc-cache/ at
+# container start; missing entries fail-fast.
+
+[runtime]
+required_langs = ["go"]
+
+[ecc]
+skills = [
+  "skills/golang-patterns/SKILL.md",
+  "skills/golang-testing/SKILL.md",
+  "skills/tdd-workflow/SKILL.md",
+]
+agents = [
+  "agents/go-reviewer.md",
+  "agents/go-build-resolver.md",
+  "agents/code-architect.md",
+  "agents/code-explorer.md",
+  "agents/silent-failure-hunter.md",
+  "agents/code-reviewer.md",
+]

@@ -27,7 +27,9 @@ use super::RunOptions;
 /// set-default` は列挙のみで展開は行わないため、read-only な
 /// `~/.config/vibepod/` setup を壊さない。
 ///
-/// Phase 4 で公式 template (`rust-code` / `review`) が追加された。
+/// v1.6 で公式 bundle は `<lang>/<mode>` 形式のネスト構造
+/// (`rust/impl`, `rust/review`, `go/impl`, ..., `generic/review`) に
+/// 再編された。エージェント/スキル本体は ecc cache から供給する。
 pub static EMBEDDED_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates-data");
 
 /// 適用すべき template 名を決定する。
@@ -121,21 +123,49 @@ pub fn effective_template_name(
 /// 有効な template 名であることを検証する。
 ///
 /// Path traversal 攻撃（`../` で `~/.config/vibepod/templates/` 外に
-/// 逃げる）を防ぐため、template 名は「空でない、かつ ASCII 英数字 /
-/// ハイフン / アンダースコアのみ」を許可する。これで `.`, `/`, `\`,
-/// 空白、制御文字などが全て弾かれる。
+/// 逃げる）を防ぐため、template 名は次のいずれかのパターンだけを許可する:
+///
+/// - フラット名: ASCII 英数字 / ハイフン / アンダースコアのみ
+///   (例: `my-template`, `custom_review`)
+/// - ネスト名: 上記ルールを満たす 2 セグメントを `/` で 1 つだけ連結
+///   (例: `rust/impl`, `generic/review` — v1.6 公式 bundle 形式)
+///
+/// 3 段以上のネスト (`a/b/c`)、空セグメント (`rust/`, `/impl`,
+/// `rust//impl`)、セグメント内の不許可文字 (`.`, `\`, 空白, 制御文字,
+/// 非 ASCII) は全て reject する。各セグメントが ASCII 英数字 / `-` /
+/// `_` のみなので、`.` や `..` が混ざることはなく path traversal には
+/// ならない。
 fn validate_template_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("Template name must not be empty");
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    let segments: Vec<&str> = name.split('/').collect();
+    if segments.len() > 2 {
         bail!(
-            "Template name '{}' is invalid: only ASCII letters, digits, '-', and '_' are allowed",
+            "Template name '{}' is invalid: at most one '/' separator is allowed \
+             (nested official bundles use '<container>/<sub>' form)",
             name
         );
+    }
+    for seg in &segments {
+        if seg.is_empty() {
+            bail!(
+                "Template name '{}' is invalid: empty segment (no leading, trailing, \
+                 or doubled '/')",
+                name
+            );
+        }
+        if !seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            bail!(
+                "Template name '{}' is invalid: only ASCII letters, digits, '-', and '_' \
+                 are allowed within each segment (plus at most one '/' separator for \
+                 nested bundles)",
+                name
+            );
+        }
     }
     Ok(())
 }
@@ -189,6 +219,38 @@ pub fn resolve_template_dir(template_name: &str, config_dir: &Path) -> Result<Pa
     }
 
     Ok(canonical_template)
+}
+
+/// Resolve `(lang, mode)` to an official embedded template directory name relative to `templates-data/`.
+///
+/// Returns `None` when the pair has no official bundle — the caller is
+/// responsible for fallback:
+///
+/// - `(None, Impl)` → host template (existing v1.x behavior)
+/// - `(Some("fortran"), _)` → error or fall through to custom/host
+///
+/// v1.6 supported languages: rust, go, node, python, java.
+/// `generic/review` is returned for `(None, Review)` — a language-agnostic
+/// review bundle.
+pub fn resolve_official_template_dir(
+    lang: Option<&str>,
+    mode: crate::cli::RunMode,
+) -> Option<&'static str> {
+    use crate::cli::RunMode;
+    match (lang, mode) {
+        (Some("rust"), RunMode::Impl) => Some("rust/impl"),
+        (Some("rust"), RunMode::Review) => Some("rust/review"),
+        (Some("go"), RunMode::Impl) => Some("go/impl"),
+        (Some("go"), RunMode::Review) => Some("go/review"),
+        (Some("node"), RunMode::Impl) => Some("node/impl"),
+        (Some("node"), RunMode::Review) => Some("node/review"),
+        (Some("python"), RunMode::Impl) => Some("python/impl"),
+        (Some("python"), RunMode::Review) => Some("python/review"),
+        (Some("java"), RunMode::Impl) => Some("java/impl"),
+        (Some("java"), RunMode::Review) => Some("java/review"),
+        (None, RunMode::Review) => Some("generic/review"),
+        _ => None,
+    }
 }
 
 /// `template_dir` 配下にある `entry` が存在し、symlink で外部を指して
@@ -247,6 +309,22 @@ pub fn build_template_mounts(
     config_dir: &Path,
 ) -> Result<Vec<(String, String)>> {
     let template_dir = resolve_template_dir(template_name, config_dir)?;
+    build_template_mounts_from_dir(&template_dir, template_name)
+}
+
+/// Build mounts from an already-resolved template directory (e.g. a staging
+/// directory assembled by `prepare::assemble_staging`). `template_name` is
+/// only used for error messages (e.g. `installed_plugins.json` validation).
+pub fn build_template_mounts_from_dir(
+    template_dir: &Path,
+    template_name: &str,
+) -> Result<Vec<(String, String)>> {
+    let template_dir = template_dir.canonicalize().with_context(|| {
+        format!(
+            "Failed to canonicalize template directory: {}",
+            template_dir.display()
+        )
+    })?;
 
     let mut mounts = Vec::new();
 
@@ -585,8 +663,8 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
 ///
 /// `extract_embedded_templates_if_missing` と違い、**他の embedded
 /// template に conflict や破損があっても、要求された 1 つだけを展開**
-/// する。これにより `vibepod run --template rust-code` が
-/// 無関係な `review` dir の破損で失敗する regression を防ぐ。
+/// する。これにより `vibepod run --lang rust` (= `rust/impl`) が
+/// 無関係な `go/review` dir の破損で失敗する regression を防ぐ。
 ///
 /// `name` が embedded 集合に存在しなければ `Ok(())` を返す (呼び出し側
 /// がすでに存在確認しているか、user-provided だった場合に no-op で通す)。
@@ -808,6 +886,29 @@ pub struct TemplateMetadata {
     /// `[runtime]` section.
     #[serde(default)]
     pub runtime: TemplateRuntimeMetadata,
+
+    /// `[ecc]` section. Lists files from the ecc-cache to pull into
+    /// the container's `.claude/` at mount time. Missing section is
+    /// equivalent to empty lists.
+    #[serde(default)]
+    pub ecc: EccSelection,
+}
+
+/// `[ecc]` section: which files from the ecc-cache to pull into the
+/// container's `.claude/` at mount time. Paths are relative to the
+/// ecc-cache root (`~/.config/vibepod/ecc-cache/`).
+///
+/// Skill paths conventionally start with `skills/` and end in `SKILL.md`.
+/// Agent paths conventionally start with `agents/` and are single `.md` files.
+/// Path safety is enforced: no absolute paths, no `..` traversal, no empty strings.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EccSelection {
+    #[serde(default)]
+    pub skills: Vec<String>,
+
+    #[serde(default)]
+    pub agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -951,6 +1052,59 @@ pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
         }
     }
 
+    // Validate [ecc] path entries. Paths are relative to the ecc-cache
+    // root, which is mounted read-only at stage time. We reject absolute
+    // paths (which would escape the cache root entirely) and '..'
+    // components (which would traverse out of the cache root via
+    // symlink-like joins). Empty strings are rejected because they would
+    // resolve to the cache root itself and silently no-op.
+    for (field_name, paths) in [
+        ("skills", &metadata.ecc.skills),
+        ("agents", &metadata.ecc.agents),
+    ] {
+        for p in paths {
+            if p.is_empty() {
+                bail!(
+                    "Template metadata {}: [ecc] {field_name} entry is empty",
+                    metadata_path.display()
+                );
+            }
+            let path = std::path::Path::new(p);
+            if path.is_absolute() {
+                bail!(
+                    "Template metadata {}: [ecc] {field_name} entry '{}' is absolute; \
+                     paths must be relative to the ecc-cache root",
+                    metadata_path.display(),
+                    p
+                );
+            }
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                bail!(
+                    "Template metadata {}: [ecc] {field_name} entry '{}' contains '..'; \
+                     path traversal is not allowed",
+                    metadata_path.display(),
+                    p
+                );
+            }
+            let required_prefix = if field_name == "skills" {
+                "skills/"
+            } else {
+                "agents/"
+            };
+            if !p.starts_with(required_prefix) {
+                bail!(
+                    "Template metadata {}: [ecc] {field_name} entry '{}' must start with '{}'",
+                    metadata_path.display(),
+                    p,
+                    required_prefix
+                );
+            }
+        }
+    }
+
     Ok(metadata)
 }
 
@@ -1058,4 +1212,270 @@ fn should_be_executable(path: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_metadata(toml_content: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join(TEMPLATE_METADATA_FILENAME);
+        std::fs::write(&path, toml_content).expect("write metadata");
+        dir
+    }
+
+    #[test]
+    fn parses_ecc_section() {
+        let toml_content = r#"
+[runtime]
+required_langs = ["rust"]
+
+[ecc]
+skills = ["skills/rust-patterns/SKILL.md"]
+agents = ["agents/rust-reviewer.md"]
+"#;
+        let dir = write_metadata(toml_content);
+        let meta = read_template_metadata(dir.path()).unwrap();
+        assert_eq!(meta.ecc.skills, vec!["skills/rust-patterns/SKILL.md"]);
+        assert_eq!(meta.ecc.agents, vec!["agents/rust-reviewer.md"]);
+    }
+
+    #[test]
+    fn rejects_absolute_ecc_path() {
+        let toml_content = r#"
+[ecc]
+skills = ["/etc/passwd"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("absolute"),
+            "expected absolute-path rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_ecc_path_with_parent_traversal() {
+        let toml_content = r#"
+[ecc]
+agents = ["../../etc/passwd"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(".."),
+            "expected .. rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_ecc_entry() {
+        let toml_content = r#"
+[ecc]
+skills = [""]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("empty"),
+            "expected empty-entry rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_embedded_parent_traversal_in_ecc_path() {
+        let toml_content = r#"
+[ecc]
+skills = ["skills/foo/../../etc/passwd"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(".."),
+            "expected embedded-traversal rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_skill_without_skills_prefix() {
+        let toml_content = r#"
+[ecc]
+skills = ["README.md"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("skills/"),
+            "expected prefix rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_agent_without_agents_prefix() {
+        let toml_content = r#"
+[ecc]
+agents = ["reviewer.md"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("agents/"),
+            "expected prefix rejection, got: {err:#}"
+        );
+    }
+
+    use crate::cli::RunMode;
+
+    #[test]
+    fn resolve_rust_impl_returns_rust_impl() {
+        assert_eq!(
+            resolve_official_template_dir(Some("rust"), RunMode::Impl),
+            Some("rust/impl")
+        );
+    }
+
+    #[test]
+    fn resolve_rust_review_returns_rust_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("rust"), RunMode::Review),
+            Some("rust/review")
+        );
+    }
+
+    #[test]
+    fn resolve_go_impl_and_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("go"), RunMode::Impl),
+            Some("go/impl")
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("go"), RunMode::Review),
+            Some("go/review")
+        );
+    }
+
+    #[test]
+    fn resolve_node_impl_and_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("node"), RunMode::Impl),
+            Some("node/impl")
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("node"), RunMode::Review),
+            Some("node/review")
+        );
+    }
+
+    #[test]
+    fn resolve_python_impl_and_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("python"), RunMode::Impl),
+            Some("python/impl")
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("python"), RunMode::Review),
+            Some("python/review")
+        );
+    }
+
+    #[test]
+    fn resolve_java_impl_and_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("java"), RunMode::Impl),
+            Some("java/impl")
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("java"), RunMode::Review),
+            Some("java/review")
+        );
+    }
+
+    #[test]
+    fn resolve_no_lang_impl_returns_none_for_host_fallback() {
+        assert_eq!(resolve_official_template_dir(None, RunMode::Impl), None);
+    }
+
+    #[test]
+    fn resolve_no_lang_review_returns_generic_review() {
+        assert_eq!(
+            resolve_official_template_dir(None, RunMode::Review),
+            Some("generic/review")
+        );
+    }
+
+    #[test]
+    fn resolve_unsupported_lang_returns_none() {
+        assert_eq!(
+            resolve_official_template_dir(Some("fortran"), RunMode::Impl),
+            None
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("fortran"), RunMode::Review),
+            None
+        );
+    }
+
+    #[test]
+    fn validate_template_name_accepts_flat_names() {
+        assert!(validate_template_name("my-template").is_ok());
+        assert!(validate_template_name("custom_review").is_ok());
+        assert!(validate_template_name("abc123").is_ok());
+        assert!(validate_template_name("A").is_ok());
+    }
+
+    #[test]
+    fn validate_template_name_accepts_nested_official_bundles() {
+        assert!(validate_template_name("rust/impl").is_ok());
+        assert!(validate_template_name("rust/review").is_ok());
+        assert!(validate_template_name("go/impl").is_ok());
+        assert!(validate_template_name("go/review").is_ok());
+        assert!(validate_template_name("generic/review").is_ok());
+        assert!(validate_template_name("node/impl").is_ok());
+        assert!(validate_template_name("python/review").is_ok());
+        assert!(validate_template_name("java/impl").is_ok());
+    }
+
+    #[test]
+    fn validate_template_name_rejects_three_or_more_segments() {
+        let err = validate_template_name("rust/impl/extra").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("at most one '/'"),
+            "expected at-most-one-slash rejection, got: {err:#}"
+        );
+        assert!(validate_template_name("a/b/c/d").is_err());
+    }
+
+    #[test]
+    fn validate_template_name_rejects_empty_segments() {
+        assert!(validate_template_name("rust/").is_err());
+        assert!(validate_template_name("/impl").is_err());
+        assert!(validate_template_name("rust//impl").is_err());
+        assert!(validate_template_name("/").is_err());
+    }
+
+    #[test]
+    fn validate_template_name_rejects_empty_and_bad_characters() {
+        assert!(validate_template_name("").is_err());
+        assert!(validate_template_name("..").is_err());
+        assert!(validate_template_name("rust/..").is_err());
+        assert!(validate_template_name("../impl").is_err());
+        assert!(validate_template_name("foo bar").is_err());
+        assert!(validate_template_name("foo.bar").is_err());
+        assert!(validate_template_name("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_field_in_ecc_section() {
+        let toml_content = r#"
+[ecc]
+skills = []
+unknown_field = []
+"#;
+        let dir = write_metadata(toml_content);
+        assert!(
+            read_template_metadata(dir.path()).is_err(),
+            "expected unknown-field rejection due to #[serde(deny_unknown_fields)]"
+        );
+    }
 }

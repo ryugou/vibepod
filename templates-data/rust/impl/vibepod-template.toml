@@ -1,0 +1,37 @@
+# Rust implementation bundle — toolchain + ecc selection for vibepod v1.6+.
+#
+# Pulled skills/agents are sourced from ~/.config/vibepod/ecc-cache/ at
+# container start; missing entries fail-fast.
+
+[runtime]
+required_langs = ["rust"]
+
+# Additional container-side setup steps that run after the language
+# install chain but before Claude Code starts. vibepod chains these
+# into the container's setup_cmd via ` && `, so any failure aborts
+# container creation.
+#
+# rust-analyzer is installed as a rustup component so the LSP server
+# is available during edit/review sessions. The upstream
+# rust-analyzer-lsp Claude Code plugin package only ships LICENSE +
+# README (no runtime payload), so the binary must come from rustup
+# rather than from a bundled plugin. Regression gate: see
+# test_embedded_rust_impl_template_declares_rust_analyzer_setup.
+setup_commands = [
+  "rustup component add rust-analyzer",
+]
+
+[ecc]
+skills = [
+  "skills/rust-patterns/SKILL.md",
+  "skills/rust-testing/SKILL.md",
+  "skills/tdd-workflow/SKILL.md",
+]
+agents = [
+  "agents/rust-reviewer.md",
+  "agents/rust-build-resolver.md",
+  "agents/code-architect.md",
+  "agents/code-explorer.md",
+  "agents/silent-failure-hunter.md",
+  "agents/code-reviewer.md",
+]

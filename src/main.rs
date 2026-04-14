@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
             mount,
             new,
             template,
+            mode,
         } => {
             vibepod::cli::run::execute(vibepod::cli::run::RunOptions {
                 resume,
@@ -41,6 +42,7 @@ async fn main() -> Result<()> {
                 mount,
                 new_container: new,
                 template,
+                mode,
             })
             .await?;
         }
@@ -72,6 +74,10 @@ async fn main() -> Result<()> {
             }
             TemplateSubcommand::Reset { name, force } => {
                 vibepod::cli::template::reset(&name, force)?;
+            }
+            TemplateSubcommand::Status {} => vibepod::cli::template::status()?,
+            TemplateSubcommand::Update { r#ref } => {
+                vibepod::cli::template::update(r#ref.as_deref())?
             }
         },
     }

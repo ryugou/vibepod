@@ -6,7 +6,7 @@ use crate::session::SessionStore;
 
 mod interactive;
 pub mod lock;
-mod prepare;
+pub mod prepare;
 mod prompt;
 pub mod template;
 
@@ -28,6 +28,9 @@ pub struct RunOptions {
     /// `/home/vibepod/.claude/` にマウントする。未指定時は host の
     /// `~/.claude/` をマウントする（v1.4.3 互換挙動）
     pub template: Option<String>,
+    /// `--mode` フラグ: `impl`（デフォルト、コード編集）または `review`（読み取り専用レビュー）。
+    /// 現時点では主に実行モードの分岐（permissions.deny の適用や template 選択）に使用する。
+    pub mode: crate::cli::RunMode,
 }
 
 pub(super) struct RunContext {

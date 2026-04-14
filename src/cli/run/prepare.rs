@@ -12,6 +12,37 @@ use super::{
     detect_languages, get_lang_install_cmd, hash_env_vars, parse_mount_arg, RunContext, RunOptions,
 };
 
+/// Claude CLI に渡す引数列を組み立てる。
+///
+/// `prepare_context` 内の Docker チェックなどの副作用から独立させるため
+/// 純関数として切り出している。ユニットテストから直接検証できる。
+///
+/// - `interactive = true`（`--prompt` なし・`--resume` なし）のときは
+///   パーミッションバイパスを付けない（ユーザーが対話的に承認する想定）。
+/// - 非対話モードでは `mode == Impl` のときのみ
+///   `--dangerously-skip-permissions` を付与する。Review モードは
+///   `settings.json` の `permissions.deny` を尊重するため、ここでは
+///   付与しない。
+/// - `--resume` や `-p <prompt>`（`--output-format stream-json --verbose`
+///   付き）は従来通り後段で積み上げる。
+pub fn build_claude_args(opts: &RunOptions, interactive: bool) -> Vec<String> {
+    let mut claude_args: Vec<String> = Vec::new();
+    if !interactive && opts.mode == crate::cli::RunMode::Impl {
+        claude_args.push("--dangerously-skip-permissions".to_string());
+    }
+    if opts.resume {
+        claude_args.push("--resume".to_string());
+    }
+    if let Some(ref p) = opts.prompt {
+        claude_args.push("-p".to_string());
+        claude_args.push(p.clone());
+        claude_args.push("--output-format".to_string());
+        claude_args.push("stream-json".to_string());
+        claude_args.push("--verbose".to_string());
+    }
+    claude_args
+}
+
 /// プロジェクトパスの SHA256 先頭 8 文字（hex）を返す。
 fn path_hash_8(path: &str) -> String {
     let hash = Sha256::digest(path.as_bytes());
@@ -115,6 +146,35 @@ fn warn_config_changes(
 }
 
 pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
+    if opts.template.is_some() && opts.mode == crate::cli::RunMode::Review {
+        anyhow::bail!(
+            "--mode review cannot be combined with --template: custom templates \
+             define their own behavior (use one or the other)."
+        );
+    }
+
+    // v1.6: Resolve official (lang, mode) template when the user didn't
+    // pass `--template` explicitly. `opts.template` is the explicit path
+    // for custom templates; for language bundles we compute from `--lang`
+    // or cwd auto-detect and feed the (lang, mode) matrix.
+    //
+    // This is computed here (before the git/docker checks) so the trace
+    // output is observable even when downstream checks fail — useful for
+    // debugging template selection without Docker/git setup.
+    let effective_template_v16: Option<String> = if let Some(t) = &opts.template {
+        Some(t.clone())
+    } else {
+        let cwd_for_detect = std::env::current_dir()?;
+        let lang_hint: Option<String> = opts.lang.clone().or_else(|| {
+            detect_languages(&cwd_for_detect)
+                .into_iter()
+                .next()
+                .map(|(name, _)| name)
+        });
+        super::template::resolve_official_template_dir(lang_hint.as_deref(), opts.mode)
+            .map(|s| s.to_string())
+    };
+
     let interactive = !opts.resume && opts.prompt.is_none();
 
     // 1. Check git repo
@@ -283,8 +343,37 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // otherwise do inline near the container-name hashing step below.
     // We capture the result here and reuse it when computing the
     // container name, so extraction / resolve is not repeated.
-    let effective_template =
-        super::template::effective_template_name(opts, &vibepod_config, &config_dir);
+    // Prefer the v1.6 (lang, mode) resolver result when it produced a name;
+    // otherwise fall back to the legacy resolver which additionally consults
+    // `default_prompt_template` from config. This keeps existing behavior
+    // for users who configured a default template but adds (lang, mode)
+    // routing on top.
+    // v1.6: Official (lang-based) bundles require the ecc cache. Custom
+    // templates (`opts.template.is_some()`) are exempt — their [ecc]
+    // selection (if any) is validated by stage_files at mount time.
+    if opts.template.is_none() {
+        if let Some(ref t) = effective_template_v16 {
+            let cache = crate::ecc::cache_dir(&config_dir);
+            if !cache.join(".git").exists() {
+                anyhow::bail!(
+                    "Template '{t}' requires the ecc cache at {}. \
+                     Run `vibepod init` first to clone it.",
+                    cache.display()
+                );
+            }
+        }
+    }
+
+    let effective_template = effective_template_v16
+        .or_else(|| super::template::effective_template_name(opts, &vibepod_config, &config_dir));
+
+    if std::env::var("VIBEPOD_TRACE").is_ok() {
+        eprintln!(
+            "vibepod: selected template = {}",
+            effective_template.as_deref().unwrap_or("<host>")
+        );
+    }
+
     let resolved_template: Option<(String, std::path::PathBuf)> = if opts.worktree {
         None
     } else if let Some(ref tmpl) = effective_template {
@@ -296,13 +385,26 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                 // Only trigger embedded extraction on an exact name match
                 // (case-sensitive). See the comment in the earlier inline
                 // location for the rationale (typo mutation / read-only).
+                // v1.6 official bundles use nested names like "rust/impl".
+                // embedded_template_names() returns top-level container names
+                // only, so match the top-level parent segment of `tmpl`.
+                // split("/").next() always yields Some on any non-empty
+                // string; unwrap_or defensive fallback to the whole name
+                // handles hypothetical empty-name edge cases.
+                let container_name: &str = tmpl.split('/').next().unwrap_or(tmpl.as_str());
                 let is_embedded = super::template::embedded_template_names()
                     .iter()
-                    .any(|n| n == tmpl);
+                    .any(|n| n == container_name);
                 if !is_embedded {
                     return Err(first_err);
                 }
-                super::template::extract_single_embedded_template_if_missing(&config_dir, tmpl)?;
+                // Extract the embedded container — for nested bundles
+                // (e.g., `rust/impl`) this lays down the whole `rust/`
+                // subtree including sibling modes (`rust/review`).
+                super::template::extract_single_embedded_template_if_missing(
+                    &config_dir,
+                    container_name,
+                )?;
                 super::template::resolve_template_dir(tmpl, &config_dir)?
             }
         };
@@ -387,8 +489,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     // Union template-required langs into the install plan. `--lang`
     // / config / auto-detect are respected as the primary source;
-    // template required_langs are ADDED on top so a rust-code run in
-    // a Python project still installs Rust.
+    // template required_langs are ADDED on top so a `--lang rust` run
+    // in a Python project still installs Rust.
     if !template_metadata.runtime.required_langs.is_empty() {
         let mut template_added: Vec<String> = Vec::new();
         for req in &template_metadata.runtime.required_langs {
@@ -547,19 +649,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 8. Build claude args
-    let mut claude_args: Vec<String> = Vec::new();
-    if !interactive {
-        claude_args.push("--dangerously-skip-permissions".to_string());
-    }
-    if opts.resume {
-        claude_args.push("--resume".to_string());
-    }
-    if let Some(ref p) = opts.prompt {
-        claude_args.push("-p".to_string());
-        claude_args.push(p.clone());
-        claude_args.push("--output-format".to_string());
-        claude_args.push("stream-json".to_string());
-        claude_args.push("--verbose".to_string());
+    let claude_args = build_claude_args(opts, interactive);
+
+    if std::env::var("VIBEPOD_TRACE").is_ok() {
+        eprintln!("vibepod: claude_args = {:?}", claude_args);
     }
 
     // 9. Resolve env file if provided
@@ -641,13 +734,40 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // 既に container_name 計算時 (step 4) に resolve 済み。
     let home = crate::config::home_dir()?;
 
+    // Per-container runtime directory: created here (earlier than strictly
+    // needed for the temp claude.json / sanitized settings writes below)
+    // so that template-mode staging assembly can place ecc-staged files
+    // under `<runtime_dir>/ecc-staging/` before building the mount set.
+    let runtime_dir = config_dir.join("runtime").join(&container_name);
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("Failed to create runtime dir: {}", runtime_dir.display()))?;
+
     // claude_config_mounts / host_settings_exists は label 計算（9b）と
     // extra_mounts 構築（下部）の両方で共有される。1 度だけ計算して使い回す。
+    //
+    // Template mode: v1.6 から mount source は extracted template dir
+    // そのものではなく、per-container **staging dir** を使う。staging は
+    // `assemble_staging` が (1) template dir の中身を丸ごとコピーし
+    // (2) template の `[ecc]` section で選ばれた ecc-cache のファイルを
+    // `.claude/` 配下にコピーして組み立てる。これにより official bundle
+    // でも custom template でも `[ecc]` を宣言すれば ecc-cache の内容を
+    // container に持ち込める。
+    //
+    // ecc の `maybe_background_refresh` は **staging 組み立て完了後** に
+    // 発火させる: 先に fire すると fetch+reset が staging コピーと race して
+    // 中途半端なファイルを掴む可能性があるため。
     let (claude_config_mounts, host_settings_exists) =
-        if let Some(ref template_name) = effective_template {
+        if let Some((ref template_name, ref canonical)) = resolved_template {
             // template mode: vibepod 管理の template 配下のみ。
             // host の sanitized settings.json はマウントしない
-            let mounts = super::template::build_template_mounts(template_name, &config_dir)?;
+            let staging = assemble_staging(&config_dir, &runtime_dir, canonical)?;
+
+            // Staging is complete; it's now safe to kick off the background
+            // refresh of the ecc-cache. Fire-and-forget; do not await.
+            let ecc_cfg = config::load_ecc_config(&config_dir)?;
+            crate::ecc::maybe_background_refresh(&config_dir, &ecc_cfg);
+
+            let mounts = super::template::build_template_mounts_from_dir(&staging, template_name)?;
             (mounts, false)
         } else {
             // host mode: v1.4.3 互換挙動
@@ -885,14 +1005,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
-    // Per-container runtime directory: all vibepod-managed runtime files for
-    // this container (temp claude.json copy, sanitized settings.json, etc.)
-    // live under ~/.config/vibepod/runtime/<container_name>/. Created up-front
-    // so disposable cleanup can target it unconditionally regardless of which
-    // artifacts ended up being created.
-    let runtime_dir = config_dir.join("runtime").join(&container_name);
-    std::fs::create_dir_all(&runtime_dir)
-        .with_context(|| format!("Failed to create runtime dir: {}", runtime_dir.display()))?;
+    // `runtime_dir` はこの関数の前半（template staging 組み立て前）で
+    // 既に作成済み。ここでは再作成しない。
 
     // Copy .claude.json to a per-container runtime file so the host file is
     // protected from container writes. Lives alongside any sanitized
@@ -970,6 +1084,105 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         no_network: opts.no_network,
         prompt_idle_timeout: vibepod_config.prompt_idle_timeout(),
     }))
+}
+
+/// Assemble the staging directory used as the container's
+/// `/home/vibepod/.claude/` mount source.
+///
+/// Combines, in order:
+///   1. All files from `template_dir` copied as-is into the staging root
+///      (CLAUDE.md, settings.json, vibepod-template.toml, plus any
+///      additional files the template defines).
+///   2. Files selected by `template_dir/vibepod-template.toml`'s `[ecc]`
+///      section, copied from the ecc-cache into staging's
+///      `skills/<name>/SKILL.md` and `agents/<name>.md` (the staging
+///      layout mirrors the template root; the `.claude/` prefix is
+///      applied at mount time via `build_template_mounts`, not at
+///      stage time).
+///
+/// Fails fast if any `[ecc]` file is missing from the cache.
+///
+/// Callers must complete this assembly BEFORE triggering
+/// `crate::ecc::maybe_background_refresh`, because the refresh may
+/// mutate ecc-cache contents concurrently.
+pub fn assemble_staging(
+    config_dir: &std::path::Path,
+    runtime_dir: &std::path::Path,
+    template_dir: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    let staging = crate::ecc::staging_dir(runtime_dir);
+
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| {
+            anyhow::anyhow!("failed to clear stale staging {}: {e}", staging.display())
+        })?;
+    }
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| anyhow::anyhow!("failed to create staging {}: {e}", staging.display()))?;
+
+    copy_dir_contents(template_dir, &staging)?;
+
+    let meta_path = template_dir.join("vibepod-template.toml");
+    if meta_path.is_file() {
+        let meta = crate::cli::run::template::read_template_metadata(template_dir)?;
+        if !meta.ecc.skills.is_empty() || !meta.ecc.agents.is_empty() {
+            crate::ecc::stage_files(config_dir, runtime_dir, &meta.ecc)?;
+        }
+    }
+
+    Ok(staging)
+}
+
+/// Recursively copy the contents of `src` into `dst`. Both must exist.
+/// Directories are created as needed; regular files are copied byte-for-byte.
+/// Symlinks are **rejected** — templates must be plain files/directories.
+/// This preserves the v1.5 template-mount escape protection (otherwise
+/// enforced by `resolve_template_entry`) end-to-end: a malicious template
+/// dropping a symlink to `/etc/passwd` would have its target content
+/// materialized into the staging dir and pass downstream checks since the
+/// staged copy is a real file. Refusing symlinks at copy time keeps the
+/// staging output honest.
+fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| anyhow::anyhow!("failed to read_dir {}: {e}", src.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(src)
+            .map_err(|e| anyhow::anyhow!("strip_prefix failed: {e}"))?;
+        let target = dst.join(rel);
+
+        // Reject symlinks explicitly — do not follow them into staging.
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| anyhow::anyhow!("failed to stat {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "refusing to copy symlink into staging: {} \
+                 (templates must be plain files/directories)",
+                path.display()
+            );
+        }
+
+        if meta.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", target.display()))?;
+            copy_dir_contents(&path, &target)?;
+        } else {
+            if let Some(p) = target.parent() {
+                std::fs::create_dir_all(p)
+                    .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", p.display()))?;
+            }
+            std::fs::copy(&path, &target).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to copy {} to {}: {e}",
+                    path.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

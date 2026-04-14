@@ -1,0 +1,21 @@
+# Java review bundle — read-only evaluation of Java code. Reviewer
+# agents + santa-method dual-convergence skill. Complements java/impl.
+#
+# Scope: JDK 17+ LTS, framework-agnostic (no Spring Boot review),
+# build-tool-agnostic (Gradle/Maven). Pulled skills/agents are sourced
+# from ~/.config/vibepod/ecc-cache/ at container start; missing entries
+# fail-fast.
+
+[runtime]
+required_langs = ["java"]
+
+[ecc]
+skills = [
+  "skills/santa-method/SKILL.md",
+]
+agents = [
+  "agents/java-reviewer.md",
+  "agents/security-reviewer.md",
+  "agents/silent-failure-hunter.md",
+  "agents/code-reviewer.md",
+]

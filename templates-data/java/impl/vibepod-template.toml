@@ -1,0 +1,25 @@
+# Java implementation bundle — vibepod v1.6+.
+#
+# Scope: JDK 17+ LTS, framework-agnostic. Spring Boot skills are
+# intentionally excluded — use a custom template for framework-specific
+# workflows. Build-tool-agnostic (Gradle or Maven).
+#
+# Pulled skills/agents are sourced from ~/.config/vibepod/ecc-cache/ at
+# container start; missing entries fail-fast.
+
+[runtime]
+required_langs = ["java"]
+
+[ecc]
+skills = [
+  "skills/java-coding-standards/SKILL.md",
+  "skills/tdd-workflow/SKILL.md",
+]
+agents = [
+  "agents/java-reviewer.md",
+  "agents/java-build-resolver.md",
+  "agents/code-architect.md",
+  "agents/code-explorer.md",
+  "agents/silent-failure-hunter.md",
+  "agents/code-reviewer.md",
+]

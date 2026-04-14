@@ -1,0 +1,20 @@
+# Node.js + TypeScript review bundle — read-only evaluation. Reviewer
+# agents + santa-method dual-convergence skill. Complements node/impl.
+#
+# Scope: Node.js runtime + TypeScript (no Bun/Deno, no framework-specific
+# review). Pulled skills/agents are sourced from ~/.config/vibepod/
+# ecc-cache/ at container start; missing entries fail-fast.
+
+[runtime]
+required_langs = ["node"]
+
+[ecc]
+skills = [
+  "skills/santa-method/SKILL.md",
+]
+agents = [
+  "agents/typescript-reviewer.md",
+  "agents/security-reviewer.md",
+  "agents/silent-failure-hunter.md",
+  "agents/code-reviewer.md",
+]

@@ -1,0 +1,19 @@
+# Go review bundle — read-only evaluation of Go code. Reviewer agents +
+# santa-method dual-convergence skill. Complements the go/impl bundle.
+#
+# Pulled skills/agents are sourced from ~/.config/vibepod/ecc-cache/ at
+# container start; missing entries fail-fast.
+
+[runtime]
+required_langs = ["go"]
+
+[ecc]
+skills = [
+  "skills/santa-method/SKILL.md",
+]
+agents = [
+  "agents/go-reviewer.md",
+  "agents/security-reviewer.md",
+  "agents/silent-failure-hunter.md",
+  "agents/code-reviewer.md",
+]

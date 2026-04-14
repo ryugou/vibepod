@@ -10,6 +10,7 @@ use crate::cli::run::template::{
     embedded_template_names, is_embedded_extracted, user_template_names,
 };
 use crate::config;
+use crate::ui::sanitize::sanitize_single_line;
 
 /// グローバル `~/.config/vibepod/config.toml` から `[run] default_prompt_template`
 /// の値を直接読む（プロジェクト設定の override は適用しない）。
@@ -74,10 +75,15 @@ fn read_global_default_prompt_template(global_config_dir: &Path) -> Result<Optio
 ///
 /// 出力形式:
 /// ```text
-/// rust-code(embedded) <<default>>
-/// review(embedded)
+/// rust(embedded) <<default>>
+/// generic(embedded)
 /// my-custom
 /// ```
+///
+/// 表示する embedded 名は `embedded_template_names()` が返す
+/// トップレベル container 名 (`rust`, `go`, `node`, `python`,
+/// `java`, `generic`)。`--lang` / `--mode` で選ばれる内部 bundle
+/// 名 (`rust/impl`, `generic/review` 等) とは粒度が異なる。
 ///
 /// ユーザー追加 template に embedded と同名のものがあれば、それは
 /// 「ユーザー override」として embedded 側を非表示にする。
@@ -325,16 +331,129 @@ pub(crate) fn reset_in(config_dir: &Path, name: &str, force: bool) -> Result<()>
     Ok(())
 }
 
+/// `vibepod template status`: print ecc-cache state.
+pub fn status() -> Result<()> {
+    let config_dir = config::default_config_dir()?;
+    let cache = crate::ecc::cache_dir(&config_dir);
+
+    let unified = config::load_unified(&config_dir)?;
+    let ecc_cfg = unified.ecc.unwrap_or_default();
+
+    println!(
+        "ecc repo:         {}",
+        sanitize_single_line(&ecc_cfg.repo, 500)
+    );
+    println!(
+        "configured ref:   {}",
+        sanitize_single_line(&ecc_cfg.r#ref, 200)
+    );
+    println!(
+        "refresh_ttl:      {}",
+        sanitize_single_line(&ecc_cfg.refresh_ttl, 50)
+    );
+    println!("auto_refresh:     {}", ecc_cfg.auto_refresh);
+    println!("cache dir:        {}", cache.display());
+
+    if !cache.join(".git").exists() {
+        println!("cache status:     not initialized — run `vibepod init`");
+        return Ok(());
+    }
+
+    let commit = match crate::ecc::git_command()
+        .current_dir(&cache)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Ok(o) => format!(
+            "unknown (git rev-parse exited {}: {})",
+            o.status,
+            sanitize_single_line(&String::from_utf8_lossy(&o.stderr), 200)
+        ),
+        Err(e) => format!(
+            "unknown (failed to run git: {})",
+            sanitize_single_line(&format!("{e}"), 200)
+        ),
+    };
+    println!("current commit:   {commit}");
+
+    if let Some(age) = crate::ecc::cache_age_seconds(&config_dir) {
+        let hours = age / 3600;
+        let minutes = (age % 3600) / 60;
+        println!("last updated:     {hours}h{minutes}m ago");
+    }
+
+    Ok(())
+}
+
+/// `vibepod template update [--ref <ref>]`: blocking fetch + reset of
+/// the ecc cache. Optional `ref_override` overrides the configured ref
+/// for this update only (does NOT persist to config.toml).
+pub fn update(ref_override: Option<&str>) -> Result<()> {
+    let config_dir = config::default_config_dir()?;
+    let unified = config::load_unified(&config_dir)?;
+    let mut ecc_cfg = unified.ecc.unwrap_or_default();
+    if let Some(r) = ref_override {
+        ecc_cfg.r#ref = r.to_string();
+    }
+    ecc_cfg.validate()?;
+
+    let cache = crate::ecc::cache_dir(&config_dir);
+    if !cache.join(".git").exists() {
+        anyhow::bail!(
+            "ecc cache not initialized at {}: run `vibepod init` first",
+            cache.display()
+        );
+    }
+
+    println!(
+        "Fetching ecc ref '{}' into {}...",
+        sanitize_single_line(&ecc_cfg.r#ref, 200),
+        cache.display()
+    );
+    crate::ecc::fetch_latest(&config_dir, &ecc_cfg)?;
+    println!("Updated.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn embedded_name_or_skip() -> Option<String> {
-        // Phase 4+ では rust-code / review が embed される。どちらかが
-        // 存在すれば十分。テストでは最初の 1 つを採用する。
+        // v1.6 以降は <lang>/<mode> 形式のネストされた公式 bundle
+        // (例: rust/impl, generic/review) のみが embed される。ネスト
+        // container は CLAUDE.md を直下に持たないため、このテストは
+        // CLAUDE.md を直下に持つ flat な埋め込み template のみを対象
+        // にする (現状は該当なしで skip される想定だが、将来 flat な
+        // embedded template が再追加された場合のガードとして残す)。
+        use crate::cli::run::template::EMBEDDED_TEMPLATES;
         crate::cli::run::template::embedded_template_names()
             .into_iter()
-            .next()
+            .find(|name| {
+                EMBEDDED_TEMPLATES
+                    .get_dir(name.as_str())
+                    .map(|d| d.get_file("CLAUDE.md").is_some())
+                    .unwrap_or(false)
+            })
+    }
+
+    #[test]
+    fn embedded_name_or_skip_matches_v1_6_invariant() {
+        // v1.6 has zero flat embedded templates (all bundles are nested
+        // `<lang>/<mode>`). If this assertion ever starts failing, it
+        // means either (a) a flat template was added to
+        // templates-data/, or (b) the path math in embedded_name_or_skip
+        // was broken again. Either way, the test author must
+        // investigate — do not reflexively update the assertion.
+        let found = embedded_name_or_skip();
+        assert_eq!(
+            found, None,
+            "v1.6 expected zero flat embedded templates, but found {:?}. \
+             Either a new top-level template was added (update this test and \
+             reset_in_* siblings) or embedded_name_or_skip's path math regressed.",
+            found
+        );
     }
 
     #[test]

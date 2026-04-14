@@ -63,7 +63,13 @@ async fn create_and_setup(ctx: &RunContext, opts: &RunOptions) -> Result<()> {
 }
 
 pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> Result<()> {
-    let mode_label = if opts.resume {
+    let mode_label = if opts.mode == crate::cli::RunMode::Review {
+        if opts.resume {
+            "resume (review, permissions enforced)"
+        } else {
+            "fire-and-forget (review, permissions enforced)"
+        }
+    } else if opts.resume {
         "resume (--dangerously-skip-permissions)"
     } else {
         "fire-and-forget (--dangerously-skip-permissions)"
