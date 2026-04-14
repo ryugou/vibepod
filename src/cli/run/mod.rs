@@ -29,7 +29,7 @@ pub struct RunOptions {
     /// `~/.claude/` をマウントする（v1.4.3 互換挙動）
     pub template: Option<String>,
     /// `--mode` フラグ: `impl`（デフォルト、コード編集）または `review`（読み取り専用レビュー）。
-    /// Task 10 ではルーティングのみ。prepare.rs での利用は Task 13/15 で行う。
+    /// 現時点では主に実行モードの分岐（permissions.deny の適用や template 選択）に使用する。
     pub mode: crate::cli::RunMode,
 }
 
