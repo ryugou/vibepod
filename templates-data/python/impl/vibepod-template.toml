@@ -1,0 +1,24 @@
+# Python implementation bundle — vibepod v1.6+.
+#
+# Scope: Python 3.11+, framework-agnostic. Django/Flask/FastAPI skills
+# are intentionally excluded — use a custom template for those.
+#
+# Pulled skills/agents are sourced from ~/.config/vibepod/ecc-cache/ at
+# container start; missing entries fail-fast.
+
+[runtime]
+required_langs = ["python"]
+
+[ecc]
+skills = [
+  "skills/python-patterns/SKILL.md",
+  "skills/python-testing/SKILL.md",
+  "skills/tdd-workflow/SKILL.md",
+]
+agents = [
+  "agents/python-reviewer.md",
+  "agents/code-architect.md",
+  "agents/code-explorer.md",
+  "agents/silent-failure-hunter.md",
+  "agents/code-reviewer.md",
+]
