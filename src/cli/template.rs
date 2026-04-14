@@ -74,8 +74,8 @@ fn read_global_default_prompt_template(global_config_dir: &Path) -> Result<Optio
 ///
 /// 出力形式:
 /// ```text
-/// rust-code(embedded) <<default>>
-/// review(embedded)
+/// rust/impl(embedded) <<default>>
+/// generic/review(embedded)
 /// my-custom
 /// ```
 ///
@@ -403,11 +403,12 @@ mod tests {
     use super::*;
 
     fn embedded_name_or_skip() -> Option<String> {
-        // Phase 4+ では rust-code / review が embed される。どちらかが
-        // 存在すれば十分。テストでは CLAUDE.md を直下に持つ flat な
-        // 埋め込み template を選ぶ（v1.6 で導入された <lang>/<mode>
-        // 形式のネスト container は CLAUDE.md を直下に持たないため、
-        // このテストの対象にはならない）。
+        // v1.6 以降は <lang>/<mode> 形式のネストされた公式 bundle
+        // (例: rust/impl, generic/review) のみが embed される。ネスト
+        // container は CLAUDE.md を直下に持たないため、このテストは
+        // CLAUDE.md を直下に持つ flat な埋め込み template のみを対象
+        // にする (現状は該当なしで skip される想定だが、将来 flat な
+        // embedded template が再追加された場合のガードとして残す)。
         use crate::cli::run::template::EMBEDDED_TEMPLATES;
         crate::cli::run::template::embedded_template_names()
             .into_iter()

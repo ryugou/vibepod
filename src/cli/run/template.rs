@@ -27,7 +27,9 @@ use super::RunOptions;
 /// set-default` は列挙のみで展開は行わないため、read-only な
 /// `~/.config/vibepod/` setup を壊さない。
 ///
-/// Phase 4 で公式 template (`rust-code` / `review`) が追加された。
+/// v1.6 で公式 bundle は `<lang>/<mode>` 形式のネスト構造
+/// (`rust/impl`, `rust/review`, `go/impl`, ..., `generic/review`) に
+/// 再編された。エージェント/スキル本体は ecc cache から供給する。
 pub static EMBEDDED_TEMPLATES: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates-data");
 
 /// 適用すべき template 名を決定する。
@@ -633,8 +635,8 @@ pub fn extract_embedded_templates_if_missing(config_dir: &Path) -> Result<()> {
 ///
 /// `extract_embedded_templates_if_missing` と違い、**他の embedded
 /// template に conflict や破損があっても、要求された 1 つだけを展開**
-/// する。これにより `vibepod run --template rust-code` が
-/// 無関係な `review` dir の破損で失敗する regression を防ぐ。
+/// する。これにより `vibepod run --lang rust` (= `rust/impl`) が
+/// 無関係な `go/review` dir の破損で失敗する regression を防ぐ。
 ///
 /// `name` が embedded 集合に存在しなければ `Ok(())` を返す (呼び出し側
 /// がすでに存在確認しているか、user-provided だった場合に no-op で通す)。
