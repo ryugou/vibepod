@@ -10,6 +10,7 @@ use crate::cli::run::template::{
     embedded_template_names, is_embedded_extracted, user_template_names,
 };
 use crate::config;
+use crate::ui::sanitize::sanitize_single_line;
 
 /// グローバル `~/.config/vibepod/config.toml` から `[run] default_prompt_template`
 /// の値を直接読む（プロジェクト設定の override は適用しない）。
@@ -325,45 +326,6 @@ pub(crate) fn reset_in(config_dir: &Path, name: &str, force: bool) -> Result<()>
     Ok(())
 }
 
-/// Single-line sanitizer for untrusted or user-editable strings printed to the
-/// terminal. Replaces control characters with spaces, trims surrounding
-/// whitespace, and caps the length. Used for both external command output
-/// (e.g. `git` stderr) and user-editable config values loaded from
-/// `config.toml` so that malformed input cannot corrupt terminal output.
-fn sanitize_single_line(s: &str, max_len: usize) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| {
-            if c.is_control() || is_bidi_override(c) {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .to_string();
-    cleaned.chars().take(max_len).collect()
-}
-
-/// Unicode bidirectional / interlinear annotation format controls that
-/// can visually reorder or spoof text in terminals. These are distinct
-/// from the ASCII control-character range and must be filtered separately
-/// when displaying untrusted input.
-fn is_bidi_override(c: char) -> bool {
-    matches!(
-        c,
-        // Explicit bidi overrides
-        '\u{202A}' | '\u{202B}' | '\u{202C}' | '\u{202D}' | '\u{202E}'
-        // Isolates
-        | '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}'
-        // Arabic letter mark, left-to-right mark, right-to-left mark
-        | '\u{200E}' | '\u{200F}' | '\u{061C}'
-        // Interlinear annotation
-        | '\u{FFF9}' | '\u{FFFA}' | '\u{FFFB}'
-    )
-}
-
 /// `vibepod template status`: print ecc-cache state.
 pub fn status() -> Result<()> {
     let config_dir = config::default_config_dir()?;
@@ -638,35 +600,5 @@ mod tests {
             "expected user override rejection (file has no marker), got: {}",
             msg
         );
-    }
-}
-
-#[cfg(test)]
-mod sanitize_tests {
-    use super::sanitize_single_line;
-
-    #[test]
-    fn strips_bidi_override_chars() {
-        let evil = "safe\u{202E}text"; // Right-to-left override
-        let out = sanitize_single_line(evil, 100);
-        assert!(
-            !out.chars().any(|c| c == '\u{202E}'),
-            "bidi override should be stripped; got: {:?}",
-            out
-        );
-    }
-
-    #[test]
-    fn strips_ascii_control_chars() {
-        let s = "hello\x07world\x1bbell";
-        let out = sanitize_single_line(s, 100);
-        assert!(!out.chars().any(|c| c.is_control()));
-    }
-
-    #[test]
-    fn preserves_normal_text() {
-        let s = "normal ASCII and 日本語 text";
-        let out = sanitize_single_line(s, 100);
-        assert_eq!(out, "normal ASCII and 日本語 text");
     }
 }

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use crate::config::{self, GlobalConfig};
 use crate::runtime::DockerRuntime;
+use crate::ui::sanitize::sanitize_single_line;
 use crate::ui::{banner, prompts};
 
 pub async fn execute() -> Result<()> {
@@ -120,8 +121,8 @@ pub async fn execute() -> Result<()> {
         } else {
             println!(
                 "\n  Cloning ecc ({}@{}) into {}...",
-                ecc_cfg.repo,
-                ecc_cfg.r#ref,
+                sanitize_single_line(&ecc_cfg.repo, 500),
+                sanitize_single_line(&ecc_cfg.r#ref, 200),
                 cache.display()
             );
             crate::ecc::ensure_cloned(&config_dir, &ecc_cfg)?;
