@@ -207,22 +207,43 @@ pub fn stage_files(
 ) -> Result<()> {
     let cache = cache_dir(config_dir);
     let staging = staging_dir(runtime_dir);
-    let staging_skills = staging.join(".claude/skills");
-    let staging_agents = staging.join(".claude/agents");
+    copy_selection(
+        &cache,
+        &staging.join(".claude/skills"),
+        "skill",
+        "skills/",
+        &selection.skills,
+    )?;
+    copy_selection(
+        &cache,
+        &staging.join(".claude/agents"),
+        "agent",
+        "agents/",
+        &selection.agents,
+    )?;
+    Ok(())
+}
 
-    for rel in &selection.skills {
+fn copy_selection(
+    cache: &std::path::Path,
+    dest_root: &std::path::Path,
+    kind: &str,
+    prefix: &str,
+    entries: &[String],
+) -> Result<()> {
+    for rel in entries {
         let src = cache.join(rel);
         if !src.is_file() {
             anyhow::bail!(
-                "ecc skill not found in cache: '{}' (expected at {})",
+                "ecc {kind} not found in cache: '{}' (expected at {})",
                 rel,
                 src.display()
             );
         }
-        let stripped = rel
-            .strip_prefix("skills/")
-            .ok_or_else(|| anyhow::anyhow!("ecc skill path '{}' must start with 'skills/'", rel))?;
-        let dest = staging_skills.join(stripped);
+        let stripped = rel.strip_prefix(prefix).ok_or_else(|| {
+            anyhow::anyhow!("ecc {kind} path '{}' must start with '{}'", rel, prefix)
+        })?;
+        let dest = dest_root.join(stripped);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
@@ -235,33 +256,6 @@ pub fn stage_files(
             )
         })?;
     }
-
-    for rel in &selection.agents {
-        let src = cache.join(rel);
-        if !src.is_file() {
-            anyhow::bail!(
-                "ecc agent not found in cache: '{}' (expected at {})",
-                rel,
-                src.display()
-            );
-        }
-        let stripped = rel
-            .strip_prefix("agents/")
-            .ok_or_else(|| anyhow::anyhow!("ecc agent path '{}' must start with 'agents/'", rel))?;
-        let dest = staging_agents.join(stripped);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
-        }
-        std::fs::copy(&src, &dest).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to copy {} to {}: {e}",
-                src.display(),
-                dest.display()
-            )
-        })?;
-    }
-
     Ok(())
 }
 
