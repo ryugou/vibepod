@@ -808,6 +808,29 @@ pub struct TemplateMetadata {
     /// `[runtime]` section.
     #[serde(default)]
     pub runtime: TemplateRuntimeMetadata,
+
+    /// `[ecc]` section. Lists files from the ecc-cache to pull into
+    /// the container's `.claude/` at mount time. Missing section is
+    /// equivalent to empty lists.
+    #[serde(default)]
+    pub ecc: EccSelection,
+}
+
+/// `[ecc]` section: which files from the ecc-cache to pull into the
+/// container's `.claude/` at mount time. Paths are relative to the
+/// ecc-cache root (`~/.config/vibepod/ecc-cache/`).
+///
+/// Skill paths conventionally start with `skills/` and end in `SKILL.md`.
+/// Agent paths conventionally start with `agents/` and are single `.md` files.
+/// Path safety is enforced: no absolute paths, no `..` traversal, no empty strings.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EccSelection {
+    #[serde(default)]
+    pub skills: Vec<String>,
+
+    #[serde(default)]
+    pub agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -951,6 +974,46 @@ pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
         }
     }
 
+    // Validate [ecc] path entries. Paths are relative to the ecc-cache
+    // root, which is mounted read-only at stage time. We reject absolute
+    // paths (which would escape the cache root entirely) and '..'
+    // components (which would traverse out of the cache root via
+    // symlink-like joins). Empty strings are rejected because they would
+    // resolve to the cache root itself and silently no-op.
+    for (field_name, paths) in [
+        ("skills", &metadata.ecc.skills),
+        ("agents", &metadata.ecc.agents),
+    ] {
+        for p in paths {
+            if p.is_empty() {
+                bail!(
+                    "Template metadata {}: [ecc] {field_name} entry is empty",
+                    metadata_path.display()
+                );
+            }
+            let path = std::path::Path::new(p);
+            if path.is_absolute() {
+                bail!(
+                    "Template metadata {}: [ecc] {field_name} entry '{}' is absolute; \
+                     paths must be relative to the ecc-cache root",
+                    metadata_path.display(),
+                    p
+                );
+            }
+            if path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                bail!(
+                    "Template metadata {}: [ecc] {field_name} entry '{}' contains '..'; \
+                     path traversal is not allowed",
+                    metadata_path.display(),
+                    p
+                );
+            }
+        }
+    }
+
     Ok(metadata)
 }
 
@@ -1058,4 +1121,74 @@ fn should_be_executable(path: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_metadata(toml_content: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join(TEMPLATE_METADATA_FILENAME);
+        std::fs::write(&path, toml_content).expect("write metadata");
+        dir
+    }
+
+    #[test]
+    fn parses_ecc_section() {
+        let toml_content = r#"
+[runtime]
+required_langs = ["rust"]
+
+[ecc]
+skills = ["skills/rust-patterns/SKILL.md"]
+agents = ["agents/rust-reviewer.md"]
+"#;
+        let dir = write_metadata(toml_content);
+        let meta = read_template_metadata(dir.path()).unwrap();
+        assert_eq!(meta.ecc.skills, vec!["skills/rust-patterns/SKILL.md"]);
+        assert_eq!(meta.ecc.agents, vec!["agents/rust-reviewer.md"]);
+    }
+
+    #[test]
+    fn rejects_absolute_ecc_path() {
+        let toml_content = r#"
+[ecc]
+skills = ["/etc/passwd"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("absolute"),
+            "expected absolute-path rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_ecc_path_with_parent_traversal() {
+        let toml_content = r#"
+[ecc]
+agents = ["../../etc/passwd"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(".."),
+            "expected .. rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_ecc_entry() {
+        let toml_content = r#"
+[ecc]
+skills = [""]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("empty"),
+            "expected empty-entry rejection, got: {err:#}"
+        );
+    }
 }
