@@ -1,13 +1,21 @@
 //! Terminal output sanitization for user-controlled strings.
 //!
-//! Strip ASCII control characters AND Unicode bidi/format overrides
-//! that can visually reorder or spoof terminal output. Use whenever
-//! printing values that originate from user-editable config, CLI
-//! args, or any other untrusted source.
+//! Strip ASCII control characters AND Unicode bidirectional
+//! overrides (the subset of format-control characters that reorder
+//! terminal output, including explicit bidi codes, isolates, directional
+//! marks, and interlinear annotations). Other invisible / format
+//! characters like zero-width joiners are NOT stripped to avoid
+//! over-blocking legitimate text in CJK / Emoji contexts.
+//!
+//! Use whenever printing values that originate from user-editable
+//! config, CLI args, or any other untrusted source.
 
 /// Sanitize `s` for single-line terminal output. Strips ASCII control
-/// characters and Unicode bidi/format overrides (replacing with spaces),
-/// trims leading/trailing whitespace, and truncates to `max_len` chars.
+/// characters and Unicode bidirectional overrides (explicit bidi codes,
+/// isolates, directional marks, and interlinear annotations — replacing
+/// with spaces). Other invisible / format characters (e.g. zero-width
+/// joiners) are intentionally NOT stripped. Trims leading/trailing
+/// whitespace and truncates to `max_len` chars.
 pub fn sanitize_single_line(s: &str, max_len: usize) -> String {
     let cleaned: String = s
         .chars()
