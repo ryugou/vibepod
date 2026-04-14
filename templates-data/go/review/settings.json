@@ -1,0 +1,28 @@
+{
+  "enabledPlugins": {},
+  "permissions": {
+    "deny": [
+      "Edit(*)",
+      "Write(*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)",
+      "Bash(go install:*)",
+      "Bash(go get:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(go mod init:*)",
+      "Bash(go work init:*)",
+      "Bash(go fix:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(cp:*)",
+      "Bash(mkdir:*)",
+      "Bash(sed -i:*)"
+    ]
+  }
+}
