@@ -354,13 +354,26 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
                 // Only trigger embedded extraction on an exact name match
                 // (case-sensitive). See the comment in the earlier inline
                 // location for the rationale (typo mutation / read-only).
+                // v1.6 official bundles use nested names like "rust/impl".
+                // embedded_template_names() returns top-level container names
+                // only, so match the top-level parent segment of `tmpl`.
+                // split("/").next() always yields Some on any non-empty
+                // string; unwrap_or defensive fallback to the whole name
+                // handles hypothetical empty-name edge cases.
+                let container_name: &str = tmpl.split('/').next().unwrap_or(tmpl.as_str());
                 let is_embedded = super::template::embedded_template_names()
                     .iter()
-                    .any(|n| n == tmpl);
+                    .any(|n| n == container_name);
                 if !is_embedded {
                     return Err(first_err);
                 }
-                super::template::extract_single_embedded_template_if_missing(&config_dir, tmpl)?;
+                // Extract the embedded container — for nested bundles
+                // (e.g., `rust/impl`) this lays down the whole `rust/`
+                // subtree including sibling modes (`rust/review`).
+                super::template::extract_single_embedded_template_if_missing(
+                    &config_dir,
+                    container_name,
+                )?;
                 super::template::resolve_template_dir(tmpl, &config_dir)?
             }
         };
