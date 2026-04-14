@@ -76,6 +76,23 @@ pub fn ensure_cloned(config_dir: &std::path::Path, cfg: &crate::config::EccConfi
         anyhow::bail!("git clone failed ({}): {}", output.status, stderr.trim());
     }
 
+    // Create a FETCH_HEAD marker so `cache_age_seconds` has a
+    // canonical "last network refresh" mtime to read. Without this,
+    // age is computed from `.git/HEAD` which can be inadvertently
+    // touched by `git checkout` / `git reset` inside the cache.
+    let fetch_head = cache.join(".git").join("FETCH_HEAD");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&fetch_head)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create FETCH_HEAD marker at {}: {e}",
+                fetch_head.display()
+            )
+        })?;
+
     Ok(())
 }
 
