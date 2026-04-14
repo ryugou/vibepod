@@ -448,6 +448,7 @@ fn make_run_options(template: Option<&str>, prompt: Option<&str>) -> RunOptions 
         mount: Vec::new(),
         new_container: false,
         template: template.map(|s| s.to_string()),
+        mode: vibepod::cli::RunMode::default(),
     }
 }
 

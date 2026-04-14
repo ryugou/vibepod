@@ -28,6 +28,9 @@ pub struct RunOptions {
     /// `/home/vibepod/.claude/` にマウントする。未指定時は host の
     /// `~/.claude/` をマウントする（v1.4.3 互換挙動）
     pub template: Option<String>,
+    /// `--mode` フラグ: `impl`（デフォルト、コード編集）または `review`（読み取り専用レビュー）。
+    /// Task 10 ではルーティングのみ。prepare.rs での利用は Task 13/15 で行う。
+    pub mode: crate::cli::RunMode,
 }
 
 pub(super) struct RunContext {

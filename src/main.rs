@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
             mount,
             new,
             template,
+            mode,
         } => {
             vibepod::cli::run::execute(vibepod::cli::run::RunOptions {
                 resume,
@@ -41,6 +42,7 @@ async fn main() -> Result<()> {
                 mount,
                 new_container: new,
                 template,
+                mode,
             })
             .await?;
         }
