@@ -70,10 +70,13 @@ impl EccConfig {
                 self.refresh_ttl
             )
         })?;
-        if self.repo.is_empty() {
+        if parse_duration_to_seconds(&self.refresh_ttl) == Some(0) {
+            anyhow::bail!("invalid [ecc] refresh_ttl: must be > 0");
+        }
+        if self.repo.trim().is_empty() {
             anyhow::bail!("invalid [ecc] repo: must not be empty");
         }
-        if self.r#ref.is_empty() {
+        if self.r#ref.trim().is_empty() {
             anyhow::bail!("invalid [ecc] ref: must not be empty");
         }
         Ok(())
@@ -161,6 +164,13 @@ pub(crate) fn save_unified(config: &UnifiedConfig, config_dir: &Path) -> Result<
         table.insert("projects".to_string(), projects_value);
     }
 
+    // Update [ecc] section only
+    if let Some(ref ecc) = config.ecc {
+        table.insert("ecc".to_string(), toml::Value::try_from(ecc)?);
+    } else {
+        table.remove("ecc");
+    }
+
     let content = toml::to_string_pretty(&toml::Value::Table(table))?;
     std::fs::write(&path, content)?;
     Ok(())
@@ -224,5 +234,35 @@ refresh_ttl = "garbage"
             format!("{err}").contains("refresh_ttl"),
             "expected ttl error, got: {err}"
         );
+    }
+
+    #[test]
+    fn ecc_config_rejects_empty_repo() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[ecc]
+repo = ""
+"#,
+        )
+        .unwrap();
+        let err = load_unified(dir.path()).unwrap_err();
+        assert!(format!("{err}").contains("repo"), "got: {err}");
+    }
+
+    #[test]
+    fn ecc_config_rejects_empty_ref() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[ecc]
+ref = ""
+"#,
+        )
+        .unwrap();
+        let err = load_unified(dir.path()).unwrap_err();
+        assert!(format!("{err}").contains("ref"), "got: {err}");
     }
 }
