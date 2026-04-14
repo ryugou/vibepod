@@ -187,6 +187,84 @@ pub fn maybe_background_refresh(config_dir: &std::path::Path, cfg: &crate::confi
     });
 }
 
+/// Copy selected ecc files from the cache to the staging directory.
+///
+/// Skills keep their directory structure under `.claude/skills/`:
+/// `skills/<name>/SKILL.md` → `<staging>/.claude/skills/<name>/SKILL.md`
+/// Agents are flat files under `.claude/agents/`:
+/// `agents/<name>.md` → `<staging>/.claude/agents/<name>.md`
+///
+/// Callers must have previously validated `selection` via the template
+/// metadata parser (no absolute paths, no `..`, no empty strings).
+/// This function assumes structural safety and only guards against
+/// missing source files.
+///
+/// Fails fast if any listed file is missing in the cache.
+pub fn stage_files(
+    config_dir: &std::path::Path,
+    runtime_dir: &std::path::Path,
+    selection: &crate::cli::run::template::EccSelection,
+) -> Result<()> {
+    let cache = cache_dir(config_dir);
+    let staging = staging_dir(runtime_dir);
+    let staging_skills = staging.join(".claude/skills");
+    let staging_agents = staging.join(".claude/agents");
+
+    for rel in &selection.skills {
+        let src = cache.join(rel);
+        if !src.is_file() {
+            anyhow::bail!(
+                "ecc skill not found in cache: '{}' (expected at {})",
+                rel,
+                src.display()
+            );
+        }
+        let stripped = rel
+            .strip_prefix("skills/")
+            .ok_or_else(|| anyhow::anyhow!("ecc skill path '{}' must start with 'skills/'", rel))?;
+        let dest = staging_skills.join(stripped);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&src, &dest).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to copy {} to {}: {e}",
+                src.display(),
+                dest.display()
+            )
+        })?;
+    }
+
+    for rel in &selection.agents {
+        let src = cache.join(rel);
+        if !src.is_file() {
+            anyhow::bail!(
+                "ecc agent not found in cache: '{}' (expected at {})",
+                rel,
+                src.display()
+            );
+        }
+        let stripped = rel
+            .strip_prefix("agents/")
+            .ok_or_else(|| anyhow::anyhow!("ecc agent path '{}' must start with 'agents/'", rel))?;
+        let dest = staging_agents.join(stripped);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(&src, &dest).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to copy {} to {}: {e}",
+                src.display(),
+                dest.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +347,125 @@ mod tests {
         // No `.git/FETCH_HEAD` or `.git/HEAD`, so `cache_age_seconds` → None
         // and the function returns without trying to spawn.
         maybe_background_refresh(dir.path(), &cfg);
+    }
+
+    #[test]
+    fn stage_files_copies_selected_skill_and_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
+        // Fake ecc-cache layout
+        let cache = cache_dir(&config_dir);
+        std::fs::create_dir_all(cache.join("skills/rust-patterns")).unwrap();
+        std::fs::write(
+            cache.join("skills/rust-patterns/SKILL.md"),
+            "# Rust Patterns",
+        )
+        .unwrap();
+        std::fs::create_dir_all(cache.join("agents")).unwrap();
+        std::fs::write(cache.join("agents/rust-reviewer.md"), "# Rust Reviewer").unwrap();
+
+        let sel = crate::cli::run::template::EccSelection {
+            skills: vec!["skills/rust-patterns/SKILL.md".to_string()],
+            agents: vec!["agents/rust-reviewer.md".to_string()],
+        };
+        stage_files(&config_dir, &runtime_dir, &sel).unwrap();
+
+        let staging = staging_dir(&runtime_dir);
+        let skill_out = staging.join(".claude/skills/rust-patterns/SKILL.md");
+        assert!(
+            skill_out.is_file(),
+            "skill should be staged at {}",
+            skill_out.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&skill_out).unwrap(),
+            "# Rust Patterns"
+        );
+
+        let agent_out = staging.join(".claude/agents/rust-reviewer.md");
+        assert!(agent_out.is_file());
+        assert_eq!(
+            std::fs::read_to_string(&agent_out).unwrap(),
+            "# Rust Reviewer"
+        );
+    }
+
+    #[test]
+    fn stage_files_fails_when_skill_missing_in_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::create_dir_all(cache_dir(&config_dir)).unwrap();
+
+        let sel = crate::cli::run::template::EccSelection {
+            skills: vec!["skills/nonexistent/SKILL.md".to_string()],
+            agents: vec![],
+        };
+        let err = stage_files(&config_dir, &runtime_dir, &sel).unwrap_err();
+        assert!(
+            format!("{err}").contains("skills/nonexistent"),
+            "expected missing-file error mentioning path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stage_files_fails_when_agent_missing_in_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::create_dir_all(cache_dir(&config_dir)).unwrap();
+
+        let sel = crate::cli::run::template::EccSelection {
+            skills: vec![],
+            agents: vec!["agents/missing.md".to_string()],
+        };
+        let err = stage_files(&config_dir, &runtime_dir, &sel).unwrap_err();
+        assert!(
+            format!("{err}").contains("agents/missing.md"),
+            "expected missing-file error mentioning agent path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stage_files_noop_when_selection_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
+        let sel = crate::cli::run::template::EccSelection::default();
+        stage_files(&config_dir, &runtime_dir, &sel).unwrap();
+        // staging dir may or may not be created; function should not error.
+    }
+
+    #[test]
+    fn stage_files_preserves_nested_skill_directory_structure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
+        let cache = cache_dir(&config_dir);
+        std::fs::create_dir_all(cache.join("skills/nested/deep")).unwrap();
+        std::fs::write(cache.join("skills/nested/deep/SKILL.md"), "deep").unwrap();
+
+        let sel = crate::cli::run::template::EccSelection {
+            skills: vec!["skills/nested/deep/SKILL.md".to_string()],
+            agents: vec![],
+        };
+        stage_files(&config_dir, &runtime_dir, &sel).unwrap();
+
+        let out = staging_dir(&runtime_dir).join(".claude/skills/nested/deep/SKILL.md");
+        assert!(out.is_file(), "nested skill path should be preserved");
     }
 }
