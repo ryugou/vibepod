@@ -10,8 +10,9 @@
 - Write tests before implementation. Follow `skill: tdd-workflow`.
 - No bare `except:` or `except BaseException:`. Catch specific exception classes; re-raise with context (`raise NewError(...) from e`) rather than swallowing.
 - No mutable default arguments (`def f(x=[])` / `def f(x={})`). Use `None` as the sentinel and construct inside the function. This is a universal Python bug.
+- Do not use `assert` for runtime validation or security checks. `assert` is stripped under `python -O`, leaving the check absent in optimized builds. Use explicit `if not cond: raise ValueError(...)` instead. Tests are the exception.
 - Do not apply `eval`, `exec`, `pickle.loads`, `yaml.unsafe_load`, or `subprocess(..., shell=True)` to untrusted input.
-- No stray `print` / `pprint.pprint` / `breakpoint()` in committed code. Use the standard `logging` module (or a project-specific logger) with appropriate level.
+- No stray `print` / `pprint.pprint` / `breakpoint()` left over from debugging. User-facing CLI output via `print` is fine; diagnostics and logs should go through the `logging` module (or a project-specific logger) with appropriate level.
 - No hardcoded secrets.
 - Before declaring work complete: project's formatter (Black/Ruff format/autopep8), linter (Ruff/Flake8/Pylint), type checker (mypy/pyright), and tests must all pass. The exact tools are project-specific; vibepod enforces the discipline of running them all, not the choice.
 
