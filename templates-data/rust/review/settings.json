@@ -6,7 +6,24 @@
       "Write(*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(cargo install:*)"
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)",
+      "Bash(cargo install:*)",
+      "Bash(cargo add:*)",
+      "Bash(cargo remove:*)",
+      "Bash(cargo update:*)",
+      "Bash(cargo fix:*)",
+      "Bash(cargo new:*)",
+      "Bash(cargo init:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(cp:*)",
+      "Bash(mkdir:*)",
+      "Bash(sed -i:*)"
     ]
   }
 }
