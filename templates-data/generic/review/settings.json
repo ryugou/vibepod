@@ -16,11 +16,7 @@
       "Bash(mv:*)",
       "Bash(cp:*)",
       "Bash(mkdir:*)",
-      "Bash(sed -i:*)",
-      "Bash(chmod:*)",
-      "Bash(chown:*)",
-      "Bash(curl:*)",
-      "Bash(wget:*)"
+      "Bash(sed -i:*)"
     ]
   }
 }
