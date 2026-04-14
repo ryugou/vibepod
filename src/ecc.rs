@@ -209,14 +209,14 @@ pub fn stage_files(
     let staging = staging_dir(runtime_dir);
     copy_selection(
         &cache,
-        &staging.join(".claude/skills"),
+        &staging.join("skills"),
         "skill",
         "skills/",
         &selection.skills,
     )?;
     copy_selection(
         &cache,
-        &staging.join(".claude/agents"),
+        &staging.join("agents"),
         "agent",
         "agents/",
         &selection.agents,
