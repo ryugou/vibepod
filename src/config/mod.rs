@@ -72,7 +72,7 @@ impl EccConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         let ttl = parse_duration_to_seconds(&self.refresh_ttl).ok_or_else(|| {
             anyhow::anyhow!(
-                "invalid [ecc] refresh_ttl '{}': expected format like '24h', '30m', '2h30m'",
+                "invalid [ecc] refresh_ttl '{}': expected duration like '24h', '30m', '1d', or '2h30m'; mixed units must fully specify each unit (e.g. '2h30' is invalid — use '2h30m')",
                 self.refresh_ttl
             )
         })?;
