@@ -369,9 +369,34 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-/// Stub for Task 7; real implementation follows.
-pub fn update(_ref_override: Option<&str>) -> Result<()> {
-    anyhow::bail!("vibepod template update is not yet implemented (Task 7)")
+/// `vibepod template update [--ref <ref>]`: blocking fetch + reset of
+/// the ecc cache. Optional `ref_override` overrides the configured ref
+/// for this update only (does NOT persist to config.toml).
+pub fn update(ref_override: Option<&str>) -> Result<()> {
+    let config_dir = config::default_config_dir()?;
+    let unified = config::load_unified(&config_dir)?;
+    let mut ecc_cfg = unified.ecc.unwrap_or_default();
+    if let Some(r) = ref_override {
+        ecc_cfg.r#ref = r.to_string();
+    }
+    ecc_cfg.validate()?;
+
+    let cache = crate::ecc::cache_dir(&config_dir);
+    if !cache.join(".git").is_dir() {
+        anyhow::bail!(
+            "ecc cache not initialized at {}: run `vibepod init` first",
+            cache.display()
+        );
+    }
+
+    println!(
+        "Fetching ecc ref '{}' into {}...",
+        ecc_cfg.r#ref,
+        cache.display()
+    );
+    crate::ecc::fetch_latest(&config_dir, &ecc_cfg)?;
+    println!("Updated.");
+    Ok(())
 }
 
 #[cfg(test)]
