@@ -243,7 +243,24 @@ fn copy_selection(
 ) -> Result<()> {
     for rel in entries {
         let src = cache.join(rel);
-        if !src.is_file() {
+        // Reject symlinks. Compromised/malicious ecc repos could
+        // symlink listed paths to host files; copying their target
+        // content into staging would be a confidentiality leak.
+        // Same rationale as copy_dir_contents in prepare.rs.
+        let meta = std::fs::symlink_metadata(&src).map_err(|e| {
+            anyhow::anyhow!(
+                "ecc {kind} not accessible: '{}' (at {}): {e}",
+                rel,
+                src.display()
+            )
+        })?;
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "ecc {kind} entry '{}' is a symlink; symlinks are not allowed in the cache (would bypass containment)",
+                rel
+            );
+        }
+        if !meta.is_file() {
             anyhow::bail!(
                 "ecc {kind} not found in cache: '{}' (expected at {})",
                 rel,
@@ -507,5 +524,30 @@ mod tests {
 
         let out = staging_dir(&runtime_dir).join("skills/nested/deep/SKILL.md");
         assert!(out.is_file(), "nested skill path should be preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_files_rejects_symlink_in_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+
+        let cache = cache_dir(&config_dir);
+        std::fs::create_dir_all(cache.join("skills/evil")).unwrap();
+        // Plant a symlink to /etc/passwd inside the cache.
+        std::os::unix::fs::symlink("/etc/passwd", cache.join("skills/evil/SKILL.md")).unwrap();
+
+        let sel = crate::cli::run::template::EccSelection {
+            skills: vec!["skills/evil/SKILL.md".to_string()],
+            agents: vec![],
+        };
+        let err = stage_files(&config_dir, &runtime_dir, &sel).unwrap_err();
+        assert!(
+            format!("{err}").contains("symlink"),
+            "expected symlink rejection, got: {err}"
+        );
     }
 }
