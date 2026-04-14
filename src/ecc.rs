@@ -130,7 +130,7 @@ pub fn cache_age_seconds(config_dir: &std::path::Path) -> Option<u64> {
 }
 
 /// If `cfg.auto_refresh` is true AND the cache is older than `refresh_ttl`,
-/// spawn a detached background `git fetch + reset --hard` process and return
+/// spawn a thread-based background `git fetch + reset --hard` and return
 /// immediately. No-op when cache is fresh, missing, or auto_refresh is off.
 ///
 /// CAUTION: this mutates the cache directory in the background. Callers
@@ -150,25 +150,31 @@ pub fn maybe_background_refresh(config_dir: &std::path::Path, cfg: &crate::confi
     }
 
     let cache = cache_dir(config_dir);
-    let script = format!(
-        "cd {cache} && git fetch --depth 1 origin {ref_arg} && git reset --hard FETCH_HEAD",
-        cache = shell_escape(&cache.to_string_lossy()),
-        ref_arg = shell_escape(&cfg.r#ref),
-    );
-    // Fire-and-forget: ignore both the spawn result and the child's outcome.
-    let _ = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(script)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::null())
-        .spawn();
-}
+    let reference = cfg.r#ref.clone();
 
-/// POSIX shell single-quote escaping. Wraps `s` in single quotes and
-/// escapes any embedded single quote by closing, inserting `\'`, reopening.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
+    // Fire-and-forget: spawn a background thread that runs fetch + reset
+    // via direct `Command` invocations. No shell involved — safer (no
+    // escape edge cases) and no dependency on `/bin/sh`. The thread dies
+    // with the process, which is fine: the TTL will trigger another
+    // attempt on the next vibepod invocation if this one was killed mid-flight.
+    std::thread::spawn(move || {
+        let fetch_status = std::process::Command::new("git")
+            .current_dir(&cache)
+            .args(["fetch", "--depth", "1", "origin", &reference])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(fetch_status, Ok(s) if s.success()) {
+            let _ = std::process::Command::new("git")
+                .current_dir(&cache)
+                .args(["reset", "--hard", "FETCH_HEAD"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    });
 }
 
 #[cfg(test)]
