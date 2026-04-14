@@ -369,7 +369,7 @@ mod tests {
         stage_files(&config_dir, &runtime_dir, &sel).unwrap();
 
         let staging = staging_dir(&runtime_dir);
-        let skill_out = staging.join(".claude/skills/rust-patterns/SKILL.md");
+        let skill_out = staging.join("skills/rust-patterns/SKILL.md");
         assert!(
             skill_out.is_file(),
             "skill should be staged at {}",
@@ -380,7 +380,7 @@ mod tests {
             "# Rust Patterns"
         );
 
-        let agent_out = staging.join(".claude/agents/rust-reviewer.md");
+        let agent_out = staging.join("agents/rust-reviewer.md");
         assert!(agent_out.is_file());
         assert_eq!(
             std::fs::read_to_string(&agent_out).unwrap(),
@@ -469,7 +469,7 @@ mod tests {
         assert!(format!("{err}").contains("skills/missing"));
 
         // First entry was copied before the failure; we do NOT roll it back.
-        let first_staged = staging_dir(&runtime_dir).join(".claude/skills/first/SKILL.md");
+        let first_staged = staging_dir(&runtime_dir).join("skills/first/SKILL.md");
         assert!(
             first_staged.is_file(),
             "first entry should remain staged on fail-fast; found: {}",
@@ -495,7 +495,7 @@ mod tests {
         };
         stage_files(&config_dir, &runtime_dir, &sel).unwrap();
 
-        let out = staging_dir(&runtime_dir).join(".claude/skills/nested/deep/SKILL.md");
+        let out = staging_dir(&runtime_dir).join("skills/nested/deep/SKILL.md");
         assert!(out.is_file(), "nested skill path should be preserved");
     }
 }
