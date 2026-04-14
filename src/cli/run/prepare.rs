@@ -144,13 +144,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             .map(|s| s.to_string())
     };
 
-    if std::env::var("VIBEPOD_TRACE").is_ok() {
-        eprintln!(
-            "vibepod: selected template = {}",
-            effective_template_v16.as_deref().unwrap_or("<host>")
-        );
-    }
-
     let interactive = !opts.resume && opts.prompt.is_none();
 
     // 1. Check git repo
@@ -325,8 +318,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // for users who configured a default template but adds (lang, mode)
     // routing on top.
     let effective_template = effective_template_v16
-        .clone()
         .or_else(|| super::template::effective_template_name(opts, &vibepod_config, &config_dir));
+
+    if std::env::var("VIBEPOD_TRACE").is_ok() {
+        eprintln!(
+            "vibepod: selected template = {}",
+            effective_template.as_deref().unwrap_or("<host>")
+        );
+    }
     let resolved_template: Option<(String, std::path::PathBuf)> = if opts.worktree {
         None
     } else if let Some(ref tmpl) = effective_template {
