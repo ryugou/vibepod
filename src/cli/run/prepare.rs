@@ -317,6 +317,22 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // `default_prompt_template` from config. This keeps existing behavior
     // for users who configured a default template but adds (lang, mode)
     // routing on top.
+    // v1.6: Official (lang-based) bundles require the ecc cache. Custom
+    // templates (`opts.template.is_some()`) are exempt — their [ecc]
+    // selection (if any) is validated by stage_files at mount time.
+    if opts.template.is_none() {
+        if let Some(ref t) = effective_template_v16 {
+            let cache = crate::ecc::cache_dir(&config_dir);
+            if !cache.join(".git").is_dir() {
+                anyhow::bail!(
+                    "Template '{t}' requires the ecc cache at {}. \
+                     Run `vibepod init` first to clone it.",
+                    cache.display()
+                );
+            }
+        }
+    }
+
     let effective_template = effective_template_v16
         .or_else(|| super::template::effective_template_name(opts, &vibepod_config, &config_dir));
 
@@ -326,6 +342,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             effective_template.as_deref().unwrap_or("<host>")
         );
     }
+
     let resolved_template: Option<(String, std::path::PathBuf)> = if opts.worktree {
         None
     } else if let Some(ref tmpl) = effective_template {

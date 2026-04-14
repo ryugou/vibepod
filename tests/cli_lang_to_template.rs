@@ -35,10 +35,19 @@ fn init_git(dir: &Path) {
     run(&["commit", "--allow-empty", "-q", "-m", "init"]);
 }
 
+/// Pre-seed a fake ecc-cache `.git` dir so the Task 14 fail-fast check
+/// does not bail before we reach the VIBEPOD_TRACE emission. The trace
+/// is what we assert on; the real clone is not needed for these tests.
+fn seed_ecc_cache(home: &Path) {
+    let cache_git = home.join(".config/vibepod/ecc-cache/.git");
+    std::fs::create_dir_all(&cache_git).expect("mkdir ecc-cache/.git");
+}
+
 #[test]
 fn lang_rust_routes_to_rust_impl() {
     let tmp = tempfile::tempdir().unwrap();
     init_git(tmp.path());
+    seed_ecc_cache(tmp.path());
     let out = Command::new(env!("CARGO_BIN_EXE_vibepod"))
         .current_dir(tmp.path())
         .args(["run", "--lang", "rust", "--prompt", "x"])
@@ -58,6 +67,7 @@ fn lang_rust_routes_to_rust_impl() {
 fn lang_and_mode_review_routes_to_rust_review() {
     let tmp = tempfile::tempdir().unwrap();
     init_git(tmp.path());
+    seed_ecc_cache(tmp.path());
     let out = Command::new(env!("CARGO_BIN_EXE_vibepod"))
         .current_dir(tmp.path())
         .args(["run", "--lang", "rust", "--mode", "review", "--prompt", "x"])
@@ -77,6 +87,7 @@ fn lang_and_mode_review_routes_to_rust_review() {
 fn mode_review_without_lang_routes_to_generic_review() {
     let tmp = tempfile::tempdir().unwrap();
     init_git(tmp.path());
+    seed_ecc_cache(tmp.path());
     let out = Command::new(env!("CARGO_BIN_EXE_vibepod"))
         .current_dir(tmp.path())
         .args(["run", "--mode", "review", "--prompt", "x"])
@@ -117,6 +128,7 @@ fn no_lang_no_mode_routes_to_host() {
 fn explicit_lang_wins_over_cwd_detect() {
     let tmp = tempfile::tempdir().unwrap();
     init_git(tmp.path());
+    seed_ecc_cache(tmp.path());
     // Write a Cargo.toml so cwd-detect would pick rust,
     // but pass --lang go to prove explicit flag takes priority.
     std::fs::write(
