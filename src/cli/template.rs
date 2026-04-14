@@ -75,10 +75,15 @@ fn read_global_default_prompt_template(global_config_dir: &Path) -> Result<Optio
 ///
 /// 出力形式:
 /// ```text
-/// rust/impl(embedded) <<default>>
-/// generic/review(embedded)
+/// rust(embedded) <<default>>
+/// generic(embedded)
 /// my-custom
 /// ```
+///
+/// 表示する embedded 名は `embedded_template_names()` が返す
+/// トップレベル container 名 (`rust`, `go`, `node`, `python`,
+/// `java`, `generic`)。`--lang` / `--mode` で選ばれる内部 bundle
+/// 名 (`rust/impl`, `generic/review` 等) とは粒度が異なる。
 ///
 /// ユーザー追加 template に embedded と同名のものがあれば、それは
 /// 「ユーザー override」として embedded 側を非表示にする。
