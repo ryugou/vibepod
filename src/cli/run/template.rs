@@ -123,21 +123,49 @@ pub fn effective_template_name(
 /// 有効な template 名であることを検証する。
 ///
 /// Path traversal 攻撃（`../` で `~/.config/vibepod/templates/` 外に
-/// 逃げる）を防ぐため、template 名は「空でない、かつ ASCII 英数字 /
-/// ハイフン / アンダースコアのみ」を許可する。これで `.`, `/`, `\`,
-/// 空白、制御文字などが全て弾かれる。
+/// 逃げる）を防ぐため、template 名は次のいずれかのパターンだけを許可する:
+///
+/// - フラット名: ASCII 英数字 / ハイフン / アンダースコアのみ
+///   (例: `my-template`, `custom_review`)
+/// - ネスト名: 上記ルールを満たす 2 セグメントを `/` で 1 つだけ連結
+///   (例: `rust/impl`, `generic/review` — v1.6 公式 bundle 形式)
+///
+/// 3 段以上のネスト (`a/b/c`)、空セグメント (`rust/`, `/impl`,
+/// `rust//impl`)、セグメント内の不許可文字 (`.`, `\`, 空白, 制御文字,
+/// 非 ASCII) は全て reject する。各セグメントが ASCII 英数字 / `-` /
+/// `_` のみなので、`.` や `..` が混ざることはなく path traversal には
+/// ならない。
 fn validate_template_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("Template name must not be empty");
     }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    let segments: Vec<&str> = name.split('/').collect();
+    if segments.len() > 2 {
         bail!(
-            "Template name '{}' is invalid: only ASCII letters, digits, '-', and '_' are allowed",
+            "Template name '{}' is invalid: at most one '/' separator is allowed \
+             (nested official bundles use '<container>/<sub>' form)",
             name
         );
+    }
+    for seg in &segments {
+        if seg.is_empty() {
+            bail!(
+                "Template name '{}' is invalid: empty segment (no leading, trailing, \
+                 or doubled '/')",
+                name
+            );
+        }
+        if !seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            bail!(
+                "Template name '{}' is invalid: only ASCII letters, digits, '-', and '_' \
+                 are allowed within each segment (plus at most one '/' separator for \
+                 nested bundles)",
+                name
+            );
+        }
     }
     Ok(())
 }
@@ -1386,6 +1414,55 @@ agents = ["reviewer.md"]
             resolve_official_template_dir(Some("fortran"), RunMode::Review),
             None
         );
+    }
+
+    #[test]
+    fn validate_template_name_accepts_flat_names() {
+        assert!(validate_template_name("my-template").is_ok());
+        assert!(validate_template_name("custom_review").is_ok());
+        assert!(validate_template_name("abc123").is_ok());
+        assert!(validate_template_name("A").is_ok());
+    }
+
+    #[test]
+    fn validate_template_name_accepts_nested_official_bundles() {
+        assert!(validate_template_name("rust/impl").is_ok());
+        assert!(validate_template_name("rust/review").is_ok());
+        assert!(validate_template_name("go/impl").is_ok());
+        assert!(validate_template_name("go/review").is_ok());
+        assert!(validate_template_name("generic/review").is_ok());
+        assert!(validate_template_name("node/impl").is_ok());
+        assert!(validate_template_name("python/review").is_ok());
+        assert!(validate_template_name("java/impl").is_ok());
+    }
+
+    #[test]
+    fn validate_template_name_rejects_three_or_more_segments() {
+        let err = validate_template_name("rust/impl/extra").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("at most one '/'"),
+            "expected at-most-one-slash rejection, got: {err:#}"
+        );
+        assert!(validate_template_name("a/b/c/d").is_err());
+    }
+
+    #[test]
+    fn validate_template_name_rejects_empty_segments() {
+        assert!(validate_template_name("rust/").is_err());
+        assert!(validate_template_name("/impl").is_err());
+        assert!(validate_template_name("rust//impl").is_err());
+        assert!(validate_template_name("/").is_err());
+    }
+
+    #[test]
+    fn validate_template_name_rejects_empty_and_bad_characters() {
+        assert!(validate_template_name("").is_err());
+        assert!(validate_template_name("..").is_err());
+        assert!(validate_template_name("rust/..").is_err());
+        assert!(validate_template_name("../impl").is_err());
+        assert!(validate_template_name("foo bar").is_err());
+        assert!(validate_template_name("foo.bar").is_err());
+        assert!(validate_template_name("foo\\bar").is_err());
     }
 
     #[test]

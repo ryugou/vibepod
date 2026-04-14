@@ -905,12 +905,39 @@ fn test_build_template_mounts_rejects_path_traversal() {
 }
 
 #[test]
-fn test_build_template_mounts_rejects_slash_in_name() {
+fn test_build_template_mounts_rejects_three_segment_name() {
+    // v1.6 以降、2 セグメント (例: `rust/impl`) の公式 bundle 名は
+    // 許可されるが、3 セグメント以上は依然として validator で reject
+    // されるべき ( `a/b/c` のような path traversal 様のネスト逸脱を防ぐ)。
     let config_dir = tempfile::tempdir().unwrap();
-    let err = build_template_mounts("foo/bar", config_dir.path()).unwrap_err();
+    let err = build_template_mounts("foo/bar/baz", config_dir.path()).unwrap_err();
     assert!(
         err.to_string().contains("invalid"),
         "expected 'invalid' error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_build_template_mounts_rejects_empty_nested_segment() {
+    // `foo/` や `/bar` のように空セグメントを含む名前は依然 reject。
+    let config_dir = tempfile::tempdir().unwrap();
+    let err = build_template_mounts("foo/", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error for 'foo/', got: {}",
+        err
+    );
+    let err = build_template_mounts("/bar", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error for '/bar', got: {}",
+        err
+    );
+    let err = build_template_mounts("foo//bar", config_dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("invalid"),
+        "expected 'invalid' error for 'foo//bar', got: {}",
         err
     );
 }
