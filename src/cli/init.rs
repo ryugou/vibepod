@@ -114,8 +114,9 @@ pub async fn execute() -> Result<()> {
             match crate::ecc::fetch_latest(&config_dir, &ecc_cfg) {
                 Ok(_) => println!("  Refreshed."),
                 Err(e) => eprintln!(
-                    "  Warning: ecc refresh failed: {e}\n  \
-                     Run `vibepod template update` later to retry."
+                    "  Warning: ecc refresh failed: {}\n  \
+                     Run `vibepod template update` later to retry.",
+                    sanitize_single_line(&format!("{e}"), 500)
                 ),
             }
         } else {
