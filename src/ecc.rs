@@ -147,6 +147,12 @@ pub fn cache_age_seconds(config_dir: &std::path::Path) -> Option<u64> {
 /// that need to read ecc files from the cache in THIS run MUST complete
 /// those reads BEFORE calling this function, or copy the files to a
 /// staging directory first.
+///
+/// This function is only invoked from the template-mode code path in
+/// `prepare_context`, after staging assembly completes. Host-mode runs
+/// (no `--template`, no `--lang`, no cwd lang detection) do not read
+/// from the ecc cache, so they also do not trigger refreshes —
+/// intentional, not a bug.
 pub fn maybe_background_refresh(config_dir: &std::path::Path, cfg: &crate::config::EccConfig) {
     if !cfg.auto_refresh {
         return;
