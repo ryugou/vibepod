@@ -114,6 +114,63 @@ pub fn fetch_latest(config_dir: &std::path::Path, cfg: &crate::config::EccConfig
     Ok(())
 }
 
+/// Age of the ecc cache in seconds. Uses the mtime of `.git/FETCH_HEAD`
+/// or `.git/HEAD`, whichever is newer. Returns None when the cache
+/// doesn't exist.
+pub fn cache_age_seconds(config_dir: &std::path::Path) -> Option<u64> {
+    let cache = cache_dir(config_dir);
+    let candidates = [cache.join(".git/FETCH_HEAD"), cache.join(".git/HEAD")];
+    let newest = candidates
+        .iter()
+        .filter_map(|p| p.metadata().ok())
+        .filter_map(|m| m.modified().ok())
+        .max()?;
+    let now = std::time::SystemTime::now();
+    now.duration_since(newest).ok().map(|d| d.as_secs())
+}
+
+/// If `cfg.auto_refresh` is true AND the cache is older than `refresh_ttl`,
+/// spawn a detached background `git fetch + reset --hard` process and return
+/// immediately. No-op when cache is fresh, missing, or auto_refresh is off.
+///
+/// CAUTION: this mutates the cache directory in the background. Callers
+/// that need to read ecc files from the cache in THIS run MUST complete
+/// those reads BEFORE calling this function, or copy the files to a
+/// staging directory first.
+pub fn maybe_background_refresh(config_dir: &std::path::Path, cfg: &crate::config::EccConfig) {
+    if !cfg.auto_refresh {
+        return;
+    }
+    let age = match cache_age_seconds(config_dir) {
+        Some(a) => a,
+        None => return,
+    };
+    if age < cfg.refresh_ttl_seconds() {
+        return;
+    }
+
+    let cache = cache_dir(config_dir);
+    let script = format!(
+        "cd {cache} && git fetch --depth 1 origin {ref_arg} && git reset --hard FETCH_HEAD",
+        cache = shell_escape(&cache.to_string_lossy()),
+        ref_arg = shell_escape(&cfg.r#ref),
+    );
+    // Fire-and-forget: ignore both the spawn result and the child's outcome.
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .spawn();
+}
+
+/// POSIX shell single-quote escaping. Wraps `s` in single quotes and
+/// escapes any embedded single quote by closing, inserting `\'`, reopening.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +217,22 @@ mod tests {
             msg.contains("vibepod init"),
             "expected init hint in error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn cache_age_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cache_age_seconds(dir.path()).is_none());
+    }
+
+    #[test]
+    fn cache_age_reflects_head_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache_dir(dir.path());
+        std::fs::create_dir_all(cache.join(".git")).unwrap();
+        std::fs::write(cache.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let age = cache_age_seconds(dir.path()).unwrap();
+        assert!(age < 5, "fresh file should be age < 5s, got {age}");
     }
 
     #[test]
