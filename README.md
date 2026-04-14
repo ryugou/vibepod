@@ -117,7 +117,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 | `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
-| `--template <name>` | Mount a **custom** template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/` instead of the host's `~/.claude/`. For official language bundles, use `--lang` instead. Template names must match `[a-zA-Z0-9_-]+`. Cannot be combined with `--mode review`. See "Templates" below |
+| `--template <name>` | Mount a **custom** template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/` instead of the host's `~/.claude/`. For official language bundles, use `--lang` instead. Template names may be a single segment or nested slash-separated segments (e.g., `foo` or `foo/bar`); each segment must match `[a-zA-Z0-9_-]+`. Absolute paths and `..` are rejected. Cannot be combined with `--mode review`. See "Templates" below |
 
 **Container reuse is the default.** VibePod creates one container per project (named `vibepod-{project}-{hash}`) and reuses it across runs. Setup only runs once; subsequent `vibepod run` calls skip setup and connect instantly via `docker exec`. Use `--new` to force a fresh container.
 
