@@ -191,6 +191,38 @@ pub fn resolve_template_dir(template_name: &str, config_dir: &Path) -> Result<Pa
     Ok(canonical_template)
 }
 
+/// Resolve `(lang, mode)` to an official embedded template directory name relative to `templates-data/`.
+///
+/// Returns `None` when the pair has no official bundle — the caller is
+/// responsible for fallback:
+///
+/// - `(None, Impl)` → host template (existing v1.x behavior)
+/// - `(Some("fortran"), _)` → error or fall through to custom/host
+///
+/// v1.6 supported languages: rust, go, node, python, java.
+/// `generic/review` is returned for `(None, Review)` — a language-agnostic
+/// review bundle.
+pub fn resolve_official_template_dir(
+    lang: Option<&str>,
+    mode: crate::cli::RunMode,
+) -> Option<&'static str> {
+    use crate::cli::RunMode;
+    match (lang, mode) {
+        (Some("rust"), RunMode::Impl) => Some("rust/impl"),
+        (Some("rust"), RunMode::Review) => Some("rust/review"),
+        (Some("go"), RunMode::Impl) => Some("go/impl"),
+        (Some("go"), RunMode::Review) => Some("go/review"),
+        (Some("node"), RunMode::Impl) => Some("node/impl"),
+        (Some("node"), RunMode::Review) => Some("node/review"),
+        (Some("python"), RunMode::Impl) => Some("python/impl"),
+        (Some("python"), RunMode::Review) => Some("python/review"),
+        (Some("java"), RunMode::Impl) => Some("java/impl"),
+        (Some("java"), RunMode::Review) => Some("java/review"),
+        (None, RunMode::Review) => Some("generic/review"),
+        _ => None,
+    }
+}
+
 /// `template_dir` 配下にある `entry` が存在し、symlink で外部を指して
 /// いない場合のみ canonical path を返す。存在しなければ `Ok(None)`、
 /// symlink escape なら `Err`。
@@ -1244,6 +1276,97 @@ agents = ["reviewer.md"]
         assert!(
             format!("{err:#}").contains("agents/"),
             "expected prefix rejection, got: {err:#}"
+        );
+    }
+
+    use crate::cli::RunMode;
+
+    #[test]
+    fn resolve_rust_impl_returns_rust_impl() {
+        assert_eq!(
+            resolve_official_template_dir(Some("rust"), RunMode::Impl),
+            Some("rust/impl")
+        );
+    }
+
+    #[test]
+    fn resolve_rust_review_returns_rust_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("rust"), RunMode::Review),
+            Some("rust/review")
+        );
+    }
+
+    #[test]
+    fn resolve_go_impl_and_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("go"), RunMode::Impl),
+            Some("go/impl")
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("go"), RunMode::Review),
+            Some("go/review")
+        );
+    }
+
+    #[test]
+    fn resolve_node_impl_and_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("node"), RunMode::Impl),
+            Some("node/impl")
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("node"), RunMode::Review),
+            Some("node/review")
+        );
+    }
+
+    #[test]
+    fn resolve_python_impl_and_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("python"), RunMode::Impl),
+            Some("python/impl")
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("python"), RunMode::Review),
+            Some("python/review")
+        );
+    }
+
+    #[test]
+    fn resolve_java_impl_and_review() {
+        assert_eq!(
+            resolve_official_template_dir(Some("java"), RunMode::Impl),
+            Some("java/impl")
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("java"), RunMode::Review),
+            Some("java/review")
+        );
+    }
+
+    #[test]
+    fn resolve_no_lang_impl_returns_none_for_host_fallback() {
+        assert_eq!(resolve_official_template_dir(None, RunMode::Impl), None);
+    }
+
+    #[test]
+    fn resolve_no_lang_review_returns_generic_review() {
+        assert_eq!(
+            resolve_official_template_dir(None, RunMode::Review),
+            Some("generic/review")
+        );
+    }
+
+    #[test]
+    fn resolve_unsupported_lang_returns_none() {
+        assert_eq!(
+            resolve_official_template_dir(Some("fortran"), RunMode::Impl),
+            None
+        );
+        assert_eq!(
+            resolve_official_template_dir(Some("fortran"), RunMode::Review),
+            None
         );
     }
 
