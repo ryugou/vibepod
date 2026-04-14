@@ -204,6 +204,44 @@ fn rust_impl_template_name_passes_validation() {
 }
 
 #[test]
+fn lang_rust_triggers_embedded_extract_on_first_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git(tmp.path());
+    seed_ecc_cache(tmp.path());
+    // Crucially: do NOT pre-create templates/rust/impl — we want to prove
+    // that --lang rust triggers the embedded extract.
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vibepod"))
+        .current_dir(tmp.path())
+        .args(["run", "--lang", "rust", "--prompt", "x"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
+        .output()
+        .expect("spawn");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Regression gate: the "not found" error signals that extract did NOT
+    // fire. After this fix, extract should lay down templates/rust/impl
+    // and the run should proceed past template resolution (failing later
+    // on Docker or similar in the test environment).
+    assert!(
+        !combined.contains("Template 'rust/impl' not found"),
+        "regression: --lang rust did not trigger embedded extract; output:\n{combined}"
+    );
+    // Positive assertion: the rust/impl dir should exist on disk after
+    // the run attempt.
+    assert!(
+        tmp.path()
+            .join(".config/vibepod/templates/rust/impl")
+            .is_dir(),
+        "rust/impl should have been extracted"
+    );
+}
+
+#[test]
 fn unsupported_lang_falls_through_to_host() {
     // Unknown lang like "fortran" is not an error — it soft-falls through
     // to <host>. (If we ever decide to harden this into an error, this
