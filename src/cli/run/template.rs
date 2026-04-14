@@ -1011,6 +1011,19 @@ pub fn read_template_metadata(template_dir: &Path) -> Result<TemplateMetadata> {
                     p
                 );
             }
+            let required_prefix = if field_name == "skills" {
+                "skills/"
+            } else {
+                "agents/"
+            };
+            if !p.starts_with(required_prefix) {
+                bail!(
+                    "Template metadata {}: [ecc] {field_name} entry '{}' must start with '{}'",
+                    metadata_path.display(),
+                    p,
+                    required_prefix
+                );
+            }
         }
     }
 
@@ -1203,6 +1216,34 @@ skills = ["skills/foo/../../etc/passwd"]
         assert!(
             format!("{err:#}").contains(".."),
             "expected embedded-traversal rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_skill_without_skills_prefix() {
+        let toml_content = r#"
+[ecc]
+skills = ["README.md"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("skills/"),
+            "expected prefix rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_agent_without_agents_prefix() {
+        let toml_content = r#"
+[ecc]
+agents = ["reviewer.md"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("agents/"),
+            "expected prefix rejection, got: {err:#}"
         );
     }
 
