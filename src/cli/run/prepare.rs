@@ -620,7 +620,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // 8. Build claude args
     let mut claude_args: Vec<String> = Vec::new();
     if !interactive {
-        claude_args.push("--dangerously-skip-permissions".to_string());
+        // Impl mode (default for autonomous runs): bypass permission
+        // prompts since there's no user to approve. Review mode MUST
+        // honor permissions.deny from settings.json — bypassing it
+        // would defeat the read-only contract of `--mode review`.
+        if opts.mode == crate::cli::RunMode::Impl {
+            claude_args.push("--dangerously-skip-permissions".to_string());
+        }
     }
     if opts.resume {
         claude_args.push("--resume".to_string());
@@ -631,6 +637,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         claude_args.push("--output-format".to_string());
         claude_args.push("stream-json".to_string());
         claude_args.push("--verbose".to_string());
+    }
+
+    if std::env::var("VIBEPOD_TRACE").is_ok() {
+        eprintln!("vibepod: claude_args = {:?}", claude_args);
     }
 
     // 9. Resolve env file if provided
