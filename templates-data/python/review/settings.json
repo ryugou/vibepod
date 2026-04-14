@@ -4,6 +4,7 @@
     "deny": [
       "Edit(*)",
       "Write(*)",
+      "NotebookEdit(*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(git add:*)",
