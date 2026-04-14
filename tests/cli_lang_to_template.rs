@@ -112,3 +112,30 @@ fn no_lang_no_mode_routes_to_host() {
         "expected host fallback, stderr:\n{stderr}"
     );
 }
+
+#[test]
+fn explicit_lang_wins_over_cwd_detect() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_git(tmp.path());
+    // Write a Cargo.toml so cwd-detect would pick rust,
+    // but pass --lang go to prove explicit flag takes priority.
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"fake\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vibepod"))
+        .current_dir(tmp.path())
+        .args(["run", "--lang", "go", "--prompt", "x"])
+        .env("HOME", tmp.path())
+        .env("XDG_CONFIG_HOME", tmp.path().join(".config"))
+        .env("VIBEPOD_TRACE", "1")
+        .output()
+        .expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("selected template = go/impl"),
+        "explicit --lang go must win over cwd Cargo.toml, stderr:\n{stderr}"
+    );
+}
