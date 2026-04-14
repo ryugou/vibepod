@@ -64,13 +64,13 @@ impl EccConfig {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        parse_duration_to_seconds(&self.refresh_ttl).ok_or_else(|| {
+        let ttl = parse_duration_to_seconds(&self.refresh_ttl).ok_or_else(|| {
             anyhow::anyhow!(
                 "invalid [ecc] refresh_ttl '{}': expected format like '24h', '30m', '2h30m'",
                 self.refresh_ttl
             )
         })?;
-        if parse_duration_to_seconds(&self.refresh_ttl) == Some(0) {
+        if ttl == 0 {
             anyhow::bail!("invalid [ecc] refresh_ttl: must be > 0");
         }
         if self.repo.trim().is_empty() {
