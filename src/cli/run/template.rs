@@ -1191,4 +1191,32 @@ skills = [""]
             "expected empty-entry rejection, got: {err:#}"
         );
     }
+
+    #[test]
+    fn rejects_embedded_parent_traversal_in_ecc_path() {
+        let toml_content = r#"
+[ecc]
+skills = ["skills/foo/../../etc/passwd"]
+"#;
+        let dir = write_metadata(toml_content);
+        let err = read_template_metadata(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(".."),
+            "expected embedded-traversal rejection, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_field_in_ecc_section() {
+        let toml_content = r#"
+[ecc]
+skills = []
+unknown_field = []
+"#;
+        let dir = write_metadata(toml_content);
+        assert!(
+            read_template_metadata(dir.path()).is_err(),
+            "expected unknown-field rejection due to #[serde(deny_unknown_fields)]"
+        );
+    }
 }
