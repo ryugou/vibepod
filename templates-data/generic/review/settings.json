@@ -1,0 +1,26 @@
+{
+  "enabledPlugins": {},
+  "permissions": {
+    "deny": [
+      "Edit(*)",
+      "Write(*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git merge:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(cp:*)",
+      "Bash(mkdir:*)",
+      "Bash(sed -i:*)",
+      "Bash(chmod:*)",
+      "Bash(chown:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)"
+    ]
+  }
+}
