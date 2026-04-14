@@ -115,6 +115,13 @@ fn warn_config_changes(
 }
 
 pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
+    if opts.template.is_some() && opts.mode == crate::cli::RunMode::Review {
+        anyhow::bail!(
+            "--mode review cannot be combined with --template: custom templates \
+             define their own behavior (use one or the other)."
+        );
+    }
+
     let interactive = !opts.resume && opts.prompt.is_none();
 
     // 1. Check git repo
