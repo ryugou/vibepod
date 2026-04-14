@@ -82,8 +82,26 @@ impl EccConfig {
         if self.repo.trim().is_empty() {
             anyhow::bail!("invalid [ecc] repo: must not be empty");
         }
+        if self.repo.starts_with('-') {
+            anyhow::bail!(
+                "invalid [ecc] repo '{}': must not start with '-' (would be interpreted as a git option)",
+                self.repo
+            );
+        }
+        if self.repo.chars().any(|c| c.is_control()) {
+            anyhow::bail!("invalid [ecc] repo: must not contain control characters");
+        }
         if self.r#ref.trim().is_empty() {
             anyhow::bail!("invalid [ecc] ref: must not be empty");
+        }
+        if self.r#ref.starts_with('-') {
+            anyhow::bail!(
+                "invalid [ecc] ref '{}': must not start with '-' (would be interpreted as a git option)",
+                self.r#ref
+            );
+        }
+        if self.r#ref.chars().any(|c| c.is_control()) {
+            anyhow::bail!("invalid [ecc] ref: must not contain control characters");
         }
         Ok(())
     }
@@ -278,5 +296,54 @@ ref = ""
         .unwrap();
         let err = load_unified(dir.path()).unwrap_err();
         assert!(format!("{err}").contains("ref"), "got: {err}");
+    }
+
+    #[test]
+    fn ecc_config_rejects_repo_with_leading_dash() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[ecc]
+repo = "--upload-pack=evil"
+"#,
+        )
+        .unwrap();
+        let err = load_unified(dir.path()).unwrap_err();
+        assert!(
+            format!("{err}").contains("must not start with '-'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ecc_config_rejects_ref_with_leading_dash() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[ecc]
+ref = "-upload-pack=evil"
+"#,
+        )
+        .unwrap();
+        let err = load_unified(dir.path()).unwrap_err();
+        assert!(
+            format!("{err}").contains("must not start with '-'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn ecc_config_rejects_repo_with_control_chars() {
+        let dir = tempdir().unwrap();
+        // Bell character (U+0007) embedded in a TOML basic string via escape.
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[ecc]\nrepo = \"foo\\u0007bar\"\n",
+        )
+        .unwrap();
+        let err = load_unified(dir.path()).unwrap_err();
+        assert!(format!("{err}").contains("control character"), "got: {err}");
     }
 }
