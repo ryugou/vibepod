@@ -1470,6 +1470,33 @@ fn test_embedded_template_names_all_pass_validation() {
 }
 
 #[test]
+fn test_extract_single_embedded_template_survives_sibling_conflict() {
+    // 他の embedded 名が壊れた entry (regular file) として存在していても、
+    // 要求された embedded template は正常に展開されることを確認する。
+    // これは単一-ターゲット API の本質: sibling の破損が target 展開を
+    // 巻き込まないこと。v1.6 では embedded 名は言語コンテナ
+    // ("rust" / "generic" / ...) で、どちらも現在の embedded 集合にある。
+    let config_dir = tempfile::tempdir().unwrap();
+    let templates = config_dir.path().join("templates");
+    std::fs::create_dir_all(&templates).unwrap();
+    // Plant a blocking regular file at a sibling's expected dir path.
+    std::fs::write(templates.join("generic"), "garbage").unwrap();
+
+    // Target extraction should still succeed.
+    extract_single_embedded_template_if_missing(config_dir.path(), "rust").unwrap();
+
+    // Sibling remains untouched garbage file.
+    let sibling_meta = std::fs::symlink_metadata(templates.join("generic")).unwrap();
+    assert!(sibling_meta.file_type().is_file());
+    let content = std::fs::read_to_string(templates.join("generic")).unwrap();
+    assert_eq!(content, "garbage");
+
+    // Target exists as a directory with the embedded marker.
+    assert!(templates.join("rust").is_dir());
+    assert!(templates.join("rust").join(".vibepod-embedded").is_file());
+}
+
+#[test]
 fn test_extract_single_embedded_template_noop_for_unknown_name() {
     // embed 集合に存在しない名前は no-op (エラーにならず、templates dir
     // も変化しない)。呼び出し側 (prepare.rs) が existence check 後に
