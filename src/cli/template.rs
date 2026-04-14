@@ -448,20 +448,21 @@ mod tests {
     }
 
     #[test]
-    fn embedded_name_or_skip_finds_flat_templates_if_any() {
-        // v1.6 removed all flat embedded templates so this helper
-        // returns None today. If a flat embedded template is ever
-        // added (e.g., a new reference bundle at top level), this
-        // test serves as a smoke gate that the path math is correct.
-        // Either the result is None (no flat embed) or it's a real
-        // top-level name with a CLAUDE.md directly inside.
-        if let Some(name) = embedded_name_or_skip() {
-            let embedded = crate::cli::run::template::embedded_template_names();
-            assert!(
-                embedded.iter().any(|n| n == &name),
-                "embedded_name_or_skip returned '{name}' not in embedded_template_names"
-            );
-        }
+    fn embedded_name_or_skip_matches_v1_6_invariant() {
+        // v1.6 has zero flat embedded templates (all bundles are nested
+        // `<lang>/<mode>`). If this assertion ever starts failing, it
+        // means either (a) a flat template was added to
+        // templates-data/, or (b) the path math in embedded_name_or_skip
+        // was broken again. Either way, the test author must
+        // investigate — do not reflexively update the assertion.
+        let found = embedded_name_or_skip();
+        assert_eq!(
+            found, None,
+            "v1.6 expected zero flat embedded templates, but found {:?}. \
+             Either a new top-level template was added (update this test and \
+             reset_in_* siblings) or embedded_name_or_skip's path math regressed.",
+            found
+        );
     }
 
     #[test]
