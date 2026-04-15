@@ -2,7 +2,7 @@
 
 ## Scope
 
-- JDK version: 25+ (LTS, released 2025-09). Use modern Java idioms (records, pattern matching for switch, sealed classes, `var` inference, text blocks, switch expressions, virtual threads, `Optional`, scoped values).
+- JDK version: JDK 25 (LTS, released 2025-09) baseline; newer JDK versions are acceptable. Earlier versions are out of scope. Use modern Java idioms (records, pattern matching for switch, sealed classes, `var` inference, text blocks, switch expressions, virtual threads, `Optional`, scoped values).
 - Framework: none. Spring Boot opinions are NOT in this bundle — use a custom template for framework-specific workflows.
 - Build tool: agnostic. Gradle and Maven both fine; the template does not mandate either.
 
