@@ -129,7 +129,7 @@ async fn test_stop_rejects_non_vibepod_prefix() {
 // --- parse_docker_top_for_claude tests ---
 
 #[test]
-fn test_has_claude_process_parses_output() {
+fn test_parse_docker_top_for_claude() {
     use vibepod::runtime::parse_docker_top_for_claude;
 
     let output_with_claude = "UID  PID  PPID  CMD\nroot  1  0  tail -f /dev/null\nvibepod  42  1  /home/vibepod/.local/bin/claude --dangerously-skip-permissions -p test\n";
@@ -182,7 +182,7 @@ async fn test_has_claude_process_against_running_container_without_claude() {
     );
 
     let create = std::process::Command::new("docker")
-        .args(["run", "-d", "--name", &name, "alpine", "sleep", "3600"])
+        .args(["run", "-d", "--name", &name, "alpine:3", "sleep", "3600"])
         .output()
         .expect("docker run");
     assert!(
