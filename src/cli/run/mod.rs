@@ -414,8 +414,8 @@ pub async fn execute(opts: RunOptions) -> Result<()> {
         );
     }
 
-    // --prompt 開始時: interactive セッションが実行中かも確認
-    if !interactive {
+    // 停止中コンテナでは claude プロセスは存在し得ないのでスキップする
+    if !interactive && ctx.container_status == ContainerStatus::Running {
         let runtime = crate::runtime::DockerRuntime::new().await?;
         let has_running_session = runtime
             .has_claude_process(&ctx.container_name)
