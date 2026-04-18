@@ -5,6 +5,11 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-04-18
+
+### Fixed
+- `vibepod run --prompt` failed with exit 1 on the second invocation when reusing a running container. Root cause: `has_claude_process` used `docker top -o cmd`, which Docker Desktop's ps backend rejects as `bad -o argument 'cmd'`. Switched the probe to `docker top -o pid,args` (both columns portable) and added a guard so the probe is skipped for non-running containers (#51)
+
 ## [1.6.0] - 2026-04-11
 
 ### Added
