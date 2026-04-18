@@ -452,9 +452,12 @@ impl DockerRuntime {
     }
 
     /// コンテナ内で claude プロセスが実行中かどうかを確認する。
+    ///
+    /// `-o cmd` は Docker Desktop (macOS) の ps バックエンドが拒否するため
+    /// `-o pid,args` を使う（`-o args` 単独では PID 列欠落で失敗する）。
     pub async fn has_claude_process(&self, container_name: &str) -> Result<bool> {
         let output = Command::new("docker")
-            .args(["top", container_name, "-o", "cmd"])
+            .args(["top", container_name, "-o", "pid,args"])
             .output()
             .await
             .context("Failed to run docker top")?;

@@ -129,7 +129,7 @@ async fn test_stop_rejects_non_vibepod_prefix() {
 // --- parse_docker_top_for_claude tests ---
 
 #[test]
-fn test_has_claude_process_parses_output() {
+fn test_parse_docker_top_for_claude() {
     use vibepod::runtime::parse_docker_top_for_claude;
 
     let output_with_claude = "UID  PID  PPID  CMD\nroot  1  0  tail -f /dev/null\nvibepod  42  1  /home/vibepod/.local/bin/claude --dangerously-skip-permissions -p test\n";
@@ -146,4 +146,55 @@ fn test_has_claude_process_parses_output() {
     let output_claude_dir =
         "UID  PID  PPID  CMD\nvibepod  10  1  cat /home/vibepod/.claude/CLAUDE.md\n";
     assert!(!parse_docker_top_for_claude(output_claude_dir));
+
+    // `docker top -o pid,args` 出力（2 列）でも claude を検出できる
+    let output_pid_args_with_claude = "PID  COMMAND\n4388  tail -f /dev/null\n6164  claude --dangerously-skip-permissions -p test\n";
+    assert!(parse_docker_top_for_claude(output_pid_args_with_claude));
+
+    // 絶対パス実行の claude も `ends_with("/bin/claude")` で検出できる
+    let output_pid_args_abs_path = "PID  COMMAND\n6164  /home/vibepod/.local/bin/claude -p test\n";
+    assert!(parse_docker_top_for_claude(output_pid_args_abs_path));
+
+    let output_pid_args_without = "PID  COMMAND\n4388  tail -f /dev/null\n";
+    assert!(!parse_docker_top_for_claude(output_pid_args_without));
+}
+
+// --- has_claude_process integration tests (require Docker) ---
+
+/// Regression: `docker top -o cmd` fails on Docker Desktop (macOS).
+#[tokio::test]
+#[ignore]
+async fn test_has_claude_process_against_running_container_without_claude() {
+    struct ContainerGuard(String);
+    impl Drop for ContainerGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &self.0])
+                .output();
+        }
+    }
+
+    let runtime = DockerRuntime::new().await.expect("docker runtime");
+    // 並列実行・外部同名コンテナとの衝突を避けるため PID を suffix に付ける
+    let name = format!(
+        "vibepod-test-has-claude-running-idle-{}",
+        std::process::id()
+    );
+
+    let create = std::process::Command::new("docker")
+        .args(["run", "-d", "--name", &name, "alpine:3", "sleep", "3600"])
+        .output()
+        .expect("docker run");
+    assert!(
+        create.status.success(),
+        "docker run failed: {}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let _guard = ContainerGuard(name.clone());
+
+    let found = runtime
+        .has_claude_process(&name)
+        .await
+        .expect("has_claude_process errored on running container");
+    assert!(!found, "idle container must not report claude process");
 }
