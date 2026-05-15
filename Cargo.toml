@@ -34,3 +34,9 @@ include_dir = "0.7"
 strip = true
 lto = true
 codegen-units = 1
+
+[profile.dev]
+codegen-units = 16
+
+[profile.dev.package."*"]
+debug = false
