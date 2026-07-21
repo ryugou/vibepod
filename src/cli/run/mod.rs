@@ -572,44 +572,72 @@ fn remove_dst_if_symlink(dst: &std::path::Path) -> anyhow::Result<()> {
 
 /// ホストの `src` をステージ内 `dst` へコピーする。
 ///
-/// コンテナが `dst` を rename 実行までの間に symlink へ差し替えるレース
-/// (TOCTOU)に備え、いきなり `dst` へ書き込むのではなく、同じディレクトリ内の
-/// 一時ファイル(`<name>.tmp`)へ書き込んでから `std::fs::rename` でアトミックに
-/// 置換する(`update.rs::record_check` と同じ temp-file-plus-rename パターン)。
-/// `rename` は symlink を辿らずそのディレクトリエントリ自体を置き換えるため、
-/// 置換時点で `dst` が symlink であっても安全だが、改ざんの可能性を運用者が
-/// 把握できるよう rename 直前に `remove_dst_if_symlink` で検査・警告する。
+/// 旧実装は固定名の一時ファイル(`<name>.tmp`)へ書き込んでから rename する
+/// 方式だったが、これはコンテナが rw マウント経由でステージを操作できる
+/// 前提のもとで二重に危険だった(codex レビュー round 6):
 ///
-/// 一時ファイルへの権限設定(0600)は rename **前**に行う(rename は権限を
-/// 保持するため、rename 後に設定すると一瞬でも緩い権限のファイルが `dst` の
-/// 場所に見える可能性がある)。
+/// - **P1(セキュリティ)**: コンテナが `<name>.tmp` という固定名自体を
+///   ホスト任意パスへの symlink に差し替えておくと、次回 run の
+///   `std::fs::copy(src, &tmp)` がそのリンクを辿り、`dst` 側の symlink 防御
+///   (`remove_dst_if_symlink`)を迂回してホスト任意ファイルを上書きできた。
+/// - **P2(信頼性)**: 複数の `vibepod run` が同時にステージ準備を行うと
+///   同じ固定名を取り合い、一方が rename した直後に他方の chmod/rename が
+///   `NotFound` で失敗する不定期な競合が起きていた。
+///
+/// これを避けるため、同じディレクトリ内に `tempfile::NamedTempFile::new_in`
+/// で予測不能な一意名のファイルを排他生成する。名前を事前に知りようがない
+/// ため symlink 差し替えの標的になり得ず(P1 解消)、並行呼び出し間でも
+/// 生成される名前が衝突しない(P2 解消)。
+///
+/// 一時ファイルへの権限設定(0600)は `persist`(rename 相当)**前**に行う
+/// (persist は権限を保持するため、後に設定すると一瞬でも緩い権限の
+/// ファイルが `dst` の場所に見える可能性がある)。`persist` 自体は rename と
+/// 同じく symlink を辿らずディレクトリエントリを置き換えるため、置換時点で
+/// `dst` が symlink であっても安全だが、改ざんの可能性を運用者が把握できる
+/// よう persist 直前に `remove_dst_if_symlink` で検査・警告する(round 5 の
+/// 防御をそのまま維持)。
 fn copy_codex_asset_atomically(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
-    let file_name = dst
-        .file_name()
-        .with_context(|| format!("codex stage destination {} has no file name", dst.display()))?
-        .to_string_lossy()
-        .into_owned();
-    let tmp = dst.with_file_name(format!("{file_name}.tmp"));
+    let stage_dir = dst.parent().with_context(|| {
+        format!(
+            "codex stage destination {} has no parent directory",
+            dst.display()
+        )
+    })?;
 
-    std::fs::copy(src, &tmp)
-        .with_context(|| format!("Failed to copy {} to {}", src.display(), tmp.display()))?;
+    let tmp = tempfile::NamedTempFile::new_in(stage_dir).with_context(|| {
+        format!(
+            "Failed to create a unique temp file in {} for staging {}",
+            stage_dir.display(),
+            dst.display()
+        )
+    })?;
+
+    std::fs::copy(src, tmp.path()).with_context(|| {
+        format!(
+            "Failed to copy {} to {}",
+            src.display(),
+            tmp.path().display()
+        )
+    })?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("Failed to set permissions on {}", tmp.display()))?;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", tmp.path().display()))?;
     }
 
-    // rename 直前にも dst の symlink 検査を行う。rename 自体は symlink を
-    // 辿らず安全に置換できるが、改ざんが起きていたことを運用者に知らせる。
+    // persist 直前にも dst の symlink 検査を行う。persist(rename) 自体は
+    // symlink を辿らず安全に置換できるが、改ざんが起きていたことを運用者に
+    // 知らせる。
     remove_dst_if_symlink(dst)?;
 
-    std::fs::rename(&tmp, dst).with_context(|| {
-        format!(
-            "Failed to atomically replace {} with {}",
+    tmp.persist(dst).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to atomically replace {} with staged temp file {}: {}",
             dst.display(),
-            tmp.display()
+            e.file.path().display(),
+            e.error
         )
     })?;
 
@@ -962,6 +990,121 @@ mod tests {
         assert_eq!(
             build_mounts_label(base_order_1, false),
             build_mounts_label(base_order_2, false)
+        );
+    }
+
+    #[test]
+    fn copy_codex_asset_atomically_survives_concurrent_calls_to_same_destination() {
+        // codex レビュー round 6 P2: 固定名 `<name>.tmp` を使う旧実装では、
+        // 複数の `vibepod run` が同時にステージ準備を行うと同じ一時ファイル名を
+        // 取り合い、一方が rename した直後に他方の chmod/rename が NotFound で
+        // 不定期に失敗していた。NamedTempFile::new_in は呼び出しごとに OS レベルで
+        // 排他的に一意な名前を生成するため、同じ dst へ並行に呼び出しても
+        // 双方が(競合エラーなく)成功することを確認する。
+        let stage_dir = tempfile::tempdir().expect("failed to create stage tempdir");
+        let src_dir = tempfile::tempdir().expect("failed to create src tempdir");
+
+        let src_a = src_dir.path().join("a.json");
+        let src_b = src_dir.path().join("b.json");
+        std::fs::write(&src_a, "FROM_A").expect("failed to write src_a");
+        std::fs::write(&src_b, "FROM_B").expect("failed to write src_b");
+
+        let dst = stage_dir.path().join("auth.json");
+        let dst_a = dst.clone();
+        let dst_b = dst.clone();
+
+        let handle_a = std::thread::spawn(move || copy_codex_asset_atomically(&src_a, &dst_a));
+        let handle_b = std::thread::spawn(move || copy_codex_asset_atomically(&src_b, &dst_b));
+
+        let result_a = handle_a.join().expect("thread A must not panic");
+        let result_b = handle_b.join().expect("thread B must not panic");
+
+        assert!(
+            result_a.is_ok(),
+            "concurrent copy A must not fail on a fixed-name tmp file collision: {:?}",
+            result_a.err()
+        );
+        assert!(
+            result_b.is_ok(),
+            "concurrent copy B must not fail on a fixed-name tmp file collision: {:?}",
+            result_b.err()
+        );
+
+        // Which writer "won" the final rename is an intentional race (both are
+        // valid outcomes); what matters is that dst always ends up as exactly
+        // one complete writer's content, never a partial write or a leftover
+        // tmp file at a colliding fixed name.
+        let final_content = std::fs::read_to_string(&dst)
+            .expect("dst must exist and be readable after both copies");
+        assert!(
+            final_content == "FROM_A" || final_content == "FROM_B",
+            "dst must contain exactly one of the two concurrent writers' content, got: {final_content:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_codex_asset_atomically_ignores_hostile_fixed_name_tmp_symlink() {
+        // codex レビュー round 6 P1: 固定名 `<name>.tmp`(例: `auth.json.tmp`)を
+        // 使う旧実装は、`std::fs::copy(src, &tmp)` の時点で `tmp` を辿ってしまう。
+        // コンテナが rw マウント経由でその固定名を先回りしてホスト任意パスへの
+        // symlink にしておくと、次回の copy がリンク先(ホスト側ファイル)を
+        // 直接上書きしてしまい、dst 自体の symlink 防御(remove_dst_if_symlink)を
+        // 完全に迂回できた。
+        //
+        // `prepare_codex_mount` 経由の統合テストでは、この関数呼び出しより前に
+        // round 5 の完全リコンサイル(`reconcile_codex_stage_dir`)が allowlist 外
+        // エントリ(`auth.json.tmp` を含む)を掃除してしまうため、copy 機構自体が
+        // 固定名を使わなくなったこと(round 6 の本体修正)を判別できない。実際、
+        // reconcile を通すテストは copy 側を旧実装に戻しても reconcile の効果で
+        // 偽陽性に pass してしまう。そのためこのテストは reconcile を経由せず
+        // `copy_codex_asset_atomically` を直接呼び出し、copy 機構そのものが
+        // 固定名 tmp ファイルを一切使用しないことを検証する。
+        let stage_dir = tempfile::tempdir().expect("failed to create stage tempdir");
+        let victim_dir = tempfile::tempdir().expect("failed to create victim tempdir");
+        let src_dir = tempfile::tempdir().expect("failed to create src tempdir");
+
+        let src = src_dir.path().join("auth.json");
+        std::fs::write(&src, r#"{"token":"HOST_AUTH"}"#).expect("failed to write src");
+
+        let dst = stage_dir.path().join("auth.json");
+
+        // A "victim" file outside the stage, standing in for an arbitrary
+        // host path a container might target via the fixed-name tmp file
+        // (e.g. ~/.ssh/authorized_keys).
+        let victim = victim_dir.path().join("victim.txt");
+        std::fs::write(&victim, "VICTIM_UNCHANGED").expect("failed to write victim");
+
+        // Plant the hostile fixed-name tmp file that the pre-round-6
+        // implementation would have written through, pointing it at the
+        // victim, directly in the same directory `copy_codex_asset_atomically`
+        // writes to. No reconcile step runs in this test, so this is exactly
+        // what a container could leave behind between two `vibepod run`
+        // invocations.
+        let hostile_tmp = stage_dir.path().join("auth.json.tmp");
+        std::os::unix::fs::symlink(&victim, &hostile_tmp).expect("failed to plant hostile symlink");
+        assert!(
+            std::fs::symlink_metadata(&hostile_tmp)
+                .expect("hostile tmp must exist")
+                .file_type()
+                .is_symlink(),
+            "sanity check: the hostile auth.json.tmp must actually be a symlink before the copy"
+        );
+
+        copy_codex_asset_atomically(&src, &dst)
+            .expect("copy must succeed despite the hostile fixed-name tmp file");
+
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim must still be readable"),
+            "VICTIM_UNCHANGED",
+            "the hostile fixed-name tmp file's symlink target must never be written to by the \
+             copy machinery itself"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dst).expect("dst must be staged"),
+            r#"{"token":"HOST_AUTH"}"#,
+            "dst must be correctly staged from src despite the hostile fixed-name tmp file \
+             sharing its directory"
         );
     }
 }

@@ -206,6 +206,48 @@ allowlist 外のファイルを共有ステージに作成でき、別リポジ�
 - ステージに allowlist 外のファイル・ディレクトリ(例: history.jsonl, cache/)がある → 次回 run 準備で削除される
 - 完全リコンサイル後も allowlist 内の正当なファイルは維持される(round 1〜4 の回帰確認)
 
+## codex レビュー指摘対応(round 6、2026-07-22)
+
+round 5 対応の temp-file 機構自体への指摘2件。対応必須。
+
+### P1: 固定名の一時ファイル(`<name>.tmp`)自体が symlink 差し替え可能(`src/cli/run/mod.rs:592-595`)
+
+コンテナが `auth.json.tmp` をホスト任意パスへの symlink にしておくと、
+次回 run の `std::fs::copy(src, &tmp)` がリンク先を辿り、dst への symlink 防御を迂回して
+ホストファイルを上書きできる。
+
+### P2: 並行 run が固定名 tmp を取り合い、片方が不定期に失敗する(同箇所)
+
+複数 `vibepod run` の同時準備で、一方の rename 後に他方の chmod/rename が NotFound になる。
+
+### 対応(両指摘を一挙に解決)
+
+- 既存依存の `tempfile` クレートの `NamedTempFile::new_in(<ステージdir>)` を使う:
+  予測不能な一意名 + `O_EXCL` 相当の排他生成であり、symlink 差し替えの標的にできず
+  (P1 解消)、並行実行間で名前が衝突しない(P2 解消)
+- 書き込み→パーミッション 0600 設定→`persist()`(rename)の順で置換する。
+  `persist` の上書き先(dst)の symlink 検査は round 5 の防御をそのまま維持
+- 手書きの `<name>.tmp` 方式のコードとテストは撤去し、置き換えたことをテストで固定する:
+  - ステージ内に敵対的な `auth.json.tmp`(symlink)が残置されていても、コピーがそれを
+    使用せず、ホストファイルが書き換えられないこと
+  - (可能なら)並行呼び出しの簡易テスト、難しければ一意名生成の性質をもってテストに代える
+
+### テスト追加(round 6 対応分)
+
+- `copy_codex_asset_atomically_ignores_hostile_fixed_name_tmp_symlink`(P1): `reconcile_codex_stage_dir`
+  を経由せず `copy_codex_asset_atomically` を直接呼び出し、ステージ内に敵対的な固定名
+  `auth.json.tmp` symlink が残置されていても、コピー機構自体がそれを辿らず、
+  symlink の指すホスト側ファイルが書き換えられないことを検証する(reconcile 経由の
+  統合テストでは reconcile が copy より先に敵対的ファイルを掃除してしまい copy 機構自体の
+  リグレッションを検知できない偽陽性になるため、直接呼び出しで検証する)
+- `copy_codex_asset_atomically_survives_concurrent_calls_to_same_destination`(P2): 同一 `dst`
+  への2スレッド並行呼び出しがいずれも成功し、`dst` が両者いずれかの完全な内容になる
+  (競合エラー・部分書き込みが起きない)ことを検証する
+- `tests/host_codex_assets.rs` の既存テストは
+  `prepare_codex_mount_reconcile_sweeps_stale_fixed_name_tmp_symlink_before_copy` に改名し、
+  round 5 の完全リコンサイルが copy 実行前に stale な固定名 tmp symlink を掃除することの
+  回帰確認(round 6 の copy 機構自体の検証ではない)であることをコメントで明記した
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

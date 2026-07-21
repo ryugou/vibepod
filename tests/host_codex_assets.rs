@@ -595,3 +595,90 @@ fn prepare_codex_mount_removes_non_allowlisted_files_and_directories_from_stage(
         "model = \"gpt\"\n"
     );
 }
+
+// --- prepare_codex_mount: full reconciliation also sweeps stale fixed-name
+// tmp symlinks before any copy runs (codex review round 5 regression check;
+// round 6 P1's actual defense against copy_codex_asset_atomically itself
+// following such a symlink is covered directly by
+// copy_codex_asset_atomically_ignores_hostile_fixed_name_tmp_symlink in
+// src/cli/run/mod.rs, since this integration-level test's reconcile step
+// removes the planted symlink before the copy machinery ever runs and so
+// cannot, by itself, tell a fixed-name-tmp implementation apart from the
+// current unique-name one) ---
+
+#[cfg(unix)]
+#[test]
+fn prepare_codex_mount_reconcile_sweeps_stale_fixed_name_tmp_symlink_before_copy() {
+    // A container could leave a fixed-name `auth.json.tmp` symlink behind in
+    // the rw-mounted stage (e.g. as a leftover from tampering, or targeting
+    // an arbitrary host path such as `~/.ssh/authorized_keys`). This test
+    // confirms that by the time the *next* `vibepod run` reaches the copy
+    // step, round 5's full reconciliation (`reconcile_codex_stage_dir`,
+    // which runs before any copy) has already swept it away as a
+    // non-allowlisted entry, so it can never be reachable by the copy
+    // machinery in the first place.
+    //
+    // This is a defense-in-depth regression check on the reconcile step, not
+    // a test of copy_codex_asset_atomically's own symlink handling: because
+    // reconcile removes the symlink before copy ever sees it, this test
+    // would still pass even if copy_codex_asset_atomically itself still used
+    // a fixed-name tmp file. That specific defense is verified directly in
+    // src/cli/run/mod.rs by
+    // copy_codex_asset_atomically_ignores_hostile_fixed_name_tmp_symlink,
+    // which calls copy_codex_asset_atomically without going through
+    // reconcile.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    set_mtime(&staged_auth, t0);
+
+    // A "victim" file outside the stage, standing in for an arbitrary host
+    // path a container might target via the fixed-name tmp file (e.g.
+    // ~/.ssh/authorized_keys).
+    let victim = home_dir.path().join("victim.txt");
+    fs::write(&victim, "VICTIM_UNCHANGED").unwrap();
+
+    // Plant the hostile fixed-name tmp file that the pre-round-6
+    // implementation would have written through, pointing it at the victim.
+    let hostile_tmp = dir.join("auth.json.tmp");
+    symlink(&victim, &hostile_tmp).unwrap();
+    assert!(
+        fs::symlink_metadata(&hostile_tmp)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "sanity check: the hostile auth.json.tmp must actually be a symlink before the next run"
+    );
+
+    // User re-authenticates on the host: the host copy is rewritten with a
+    // strictly newer mtime, forcing the next `prepare_codex_mount` to
+    // actually perform the copy (rather than keep the container-refreshed
+    // staged copy per round 3), so the copy path under test really executes.
+    fs::write(&host_auth, r#"{"token":"HOST_RELOGIN"}"#).unwrap();
+    set_mtime(&host_auth, t0 + Duration::from_secs(3_600));
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir.clone()));
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "VICTIM_UNCHANGED",
+        "the hostile fixed-name tmp file's symlink target must never be written to, \
+         regardless of whether stage reconciliation or the copy machinery itself is what \
+         keeps it safe"
+    );
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"HOST_RELOGIN"}"#,
+        "auth.json must still be correctly staged from the host copy despite the hostile \
+         fixed-name tmp file sharing its directory"
+    );
+}
