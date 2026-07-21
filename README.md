@@ -198,15 +198,36 @@ else:
 This is an **allowlist**, same policy as `~/.claude/`: `history.jsonl`,
 `goals_*.sqlite`, and `cache/` are never copied in, both because they are
 unnecessary for running `codex` and because they may contain sensitive data.
-The files are copied (not bind-mounted read-only) into a **user-level stage
-shared by all containers** (`~/.config/vibepod/codex/`) and mounted
-**read-write** at `/home/vibepod/.codex`, because `codex` rewrites
-`auth.json` on token refresh — the same copy-then-mount pattern used for
-`~/.claude.json`. The host originals are never touched. The stage is shared
-(not per-container) so that disposable runs (`--new` / worktree), which
-delete their per-container runtime directory on exit, don't destroy a
-container-refreshed `auth.json` along with it; one side effect is that
-concurrently running containers share the same staged `auth.json`.
+
+The area the container can see and the area that persists on your host are
+structurally separate:
+
+- **What the container sees**: a **per-container stage**
+  (`~/.config/vibepod/runtime/<container>/codex/`), copied (not bind-mounted
+  read-only) and mounted **read-write** at `/home/vibepod/.codex` — the same
+  copy-then-mount pattern used for `~/.claude.json`. It's read-write because
+  `codex` rewrites `auth.json` on token refresh. Anything `codex` writes
+  under `/home/vibepod/.codex` at runtime (session history, sqlite goal
+  databases, cache) stays confined to this one container's stage and is
+  invisible to every other container. A disposable run (`--new` / worktree)
+  deletes its stage along with the rest of its per-container runtime
+  directory on exit — that's fine, because persistence lives elsewhere.
+- **What's ever written back to your host**: a **host-only auth store**
+  (`~/.config/vibepod/codex-auth/`) holding just the same two allowlisted
+  files. It is **never mounted into any container.** Before a run starts,
+  VibePod syncs host → store → stage: `auth.json` uses keep-newest (so a
+  container-refreshed token already sitting in the store isn't clobbered by
+  a stale host copy), while `config.toml` always follows the host. After a
+  container stops, and before its per-container runtime directory (and thus
+  its stage) is deleted, VibePod syncs any refreshed `auth.json` from the
+  stage back into the store so the next run can pick it up. Your original
+  `~/.codex/auth.json` / `config.toml` are never written to by any of this.
+
+**Accepted risk**: if a container is killed forcibly (`kill -9`, host crash,
+etc.) before the post-run sync runs, a token refresh that happened only in
+that run's stage is lost — the auth store still holds the last value it saw
+from a clean run. Recover by logging into codex again on the host
+(`codex login`); the next `vibepod run` picks up the fresh `auth.json`.
 
 If `~/.codex/auth.json` is missing, VibePod prints a note to stderr and
 continues without codex support in that container — this is not a fatal
@@ -228,7 +249,7 @@ VibePod provides 3-layer isolation:
    - `~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/`, `~/.claude/specs/` (read-only, when present): your personal Claude Code instructions, skills, agents, and specs. This is an **allowlist** — session and history data (`sessions/`, `projects/`, `history.jsonl`, `backups/`, `file-history/`, `shell-snapshots/`, `todos/`) is never mounted
    - `~/.claude/plugins/` (read-only, when present): your installed Claude Code plugins — mounted at both `/home/vibepod/.claude/plugins` and the host absolute path to resolve `installed_plugins.json` entries
    - `~/.claude/settings.json` via **sanitized copy** (read-only, when present): a per-container copy with `hooks` and `statusLine` stripped, written to `~/.config/vibepod/runtime/<container>/settings.json`
-   - `~/.codex/auth.json` and `~/.codex/config.toml` (if present) via **temporary copy** (read-write, when `auth.json` exists): written to `~/.config/vibepod/codex/` (shared across all containers, not per-container) and mounted at `/home/vibepod/.codex`; read-write because `codex` rewrites `auth.json` on token refresh
+   - `~/.codex/auth.json` and `~/.codex/config.toml` (if present, when `auth.json` exists): synced host → host-only auth store (`~/.config/vibepod/codex-auth/`, **never mounted into any container**) → per-container stage (`~/.config/vibepod/runtime/<container>/codex/`, mounted **read-write** at `/home/vibepod/.codex`); read-write because `codex` rewrites `auth.json` on token refresh, which is synced back into the auth store after the container stops and before its per-container runtime directory is deleted
    - `--mount`-specified paths (read-only): additional host paths you explicitly opt in
    - `GH_TOKEN` injected from `gh auth token` when available, for GitHub CLI access inside the container
 3. **Git safety net** — your project is git-managed, so any unwanted changes can be reverted with `git reset --hard`

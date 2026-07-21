@@ -4,7 +4,7 @@ use std::process::Command;
 use crate::runtime::{format_stream_event, ContainerStatus, DockerRuntime, StreamEvent};
 use libc;
 
-use super::{build_container_config, RunContext, RunOptions};
+use super::{build_container_config, sync_codex_stage_after_run, RunContext, RunOptions};
 
 /// コンテナを作成してセットアップを実行する（初回フロー）。
 /// セットアップ失敗時はコンテナを自動削除してエラーを返す。
@@ -468,6 +468,8 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             );
         }
     }
+
+    sync_codex_stage_after_run(ctx);
 
     // コンテナの後処理
     if ctx.is_disposable {

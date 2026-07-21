@@ -534,7 +534,9 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // auth.json の有無判定は prepare_codex_mount 内の has_auth 判定と完全に
     // 同じ基準にする(config.toml の有無は問わない)。基準がずれると、実際には
     // bind mount されない codex を「ある」と誤ってラベルに含めてしまい、
-    // 構成差分の警告が出なくなる。
+    // 構成差分の警告が出なくなる。この判定はホストの生 `~/.codex/` を見て
+    // いるだけなので、round 10 で auth store / per-container ステージの
+    // 2 段構成に変わった後もそのまま通用する。
     let host_codex_auth_exists = super::host_codex_stage_entries(&home.join(".codex"))
         .iter()
         .any(|(_, name)| *name == "auth.json");
@@ -628,13 +630,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         None
     };
 
-    // codex CLI 認証(~/.codex/auth.json + config.toml)を、全コンテナ共有の
-    // ユーザー単位ステージディレクトリ(`<config_dir>/codex/`)へコピーする。
-    // per-container の runtime ディレクトリではないため、disposable 実行の
-    // 終了時に runtime_dir が削除されてもこのステージは残る(round 4)。
+    // codex CLI 認証(~/.codex/auth.json + config.toml)を、host-only の
+    // auth store(`<config_dir>/codex-auth/`)経由で per-container ステージ
+    // (`<runtime_dir>/codex/`)へコピーする。ステージは disposable 実行の
+    // 終了時に runtime_dir ごと削除される想定の使い捨て領域であり、それで
+    // 問題ない — 認証情報の永続化は auth store 側が担う(round 10)。
     // auth.json が無ければ None(codex レビューはこのコンテナでは使えないが、
     // vibepod 自体は継続動作する)。
-    let codex_dir = super::prepare_codex_mount(&home, &config_dir)?;
+    let codex_dir = super::prepare_codex_mount(&home, &config_dir, &runtime_dir)?;
 
     // Parse --mount arguments
     let mut extra_mounts = Vec::new();

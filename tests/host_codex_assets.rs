@@ -6,12 +6,28 @@
 //! history (`history.jsonl`), goal databases (`goals_*.sqlite`), and any
 //! `cache/` contents must never travel in — they are sensitive and
 //! unnecessary for running `codex`.
+//!
+//! **round 10 architecture** ("見せる領域" と "永続化する領域" の分離):
+//! `prepare_codex_mount(home, config_dir, runtime_dir)` now syncs in two hops:
+//! host `~/.codex/` -> **auth store** (`<config_dir>/codex-auth/`, host-only,
+//! never mounted into a container) -> **per-container stage**
+//! (`<runtime_dir>/codex/`, the directory actually bind-mounted as
+//! `/home/vibepod/.codex`). The stage is disposable — it is deleted wholesale
+//! with `runtime_dir` on disposable-run cleanup — while the auth store is the
+//! only place a refreshed token survives across runs. `sync_codex_stage_to_store`
+//! is the run-after counterpart that writes a container-refreshed stage
+//! `auth.json` back into the store before that cleanup happens.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use vibepod::cli::run::{host_codex_stage_entries, prepare_codex_mount, should_keep_staged_auth};
+use vibepod::cli::run::{
+    host_codex_stage_entries, prepare_codex_mount, should_keep_staged_auth,
+    sync_codex_stage_to_store,
+};
+use vibepod::runtime::ContainerConfig;
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -86,8 +102,10 @@ fn prepare_codex_mount_returns_none_when_auth_json_missing() {
     // No ~/.codex/ at all.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
 
-    let result = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let result =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert!(
         result.is_none(),
@@ -101,11 +119,13 @@ fn prepare_codex_mount_returns_none_when_only_config_toml_present() {
     // mount should be prepared (auth.json is the load-bearing file).
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     let codex_dir = home_dir.path().join(".codex");
     fs::create_dir_all(&codex_dir).unwrap();
     fs::write(codex_dir.join("config.toml"), "model = \"gpt\"\n").unwrap();
 
-    let result = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let result =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert!(
         result.is_none(),
@@ -117,9 +137,11 @@ fn prepare_codex_mount_returns_none_when_only_config_toml_present() {
 fn prepare_codex_mount_copies_both_files_and_returns_dir() {
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let result = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let result =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     let dir = result.expect("should return Some(dir) when auth.json is present");
 
@@ -175,17 +197,29 @@ fn prepare_codex_mount_removes_staged_files_when_auth_json_disappears() {
     // First run stages both files into the runtime dir.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json + config.toml");
     assert!(dir.join("auth.json").is_file());
     assert!(dir.join("config.toml").is_file());
 
+    // round 10: the first hop (host -> store) must have populated the
+    // host-only auth store too, not just the per-container stage.
+    let store_dir = config_dir.path().join("codex-auth");
+    assert!(
+        store_dir.join("auth.json").is_file(),
+        "the first hop (host -> store) must populate the auth store as well as the stage"
+    );
+    assert!(store_dir.join("config.toml").is_file());
+
     // Host revokes auth (e.g. `codex logout`): auth.json is gone.
     fs::remove_file(home_dir.path().join(".codex/auth.json")).unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert!(
         second.is_none(),
@@ -203,6 +237,22 @@ fn prepare_codex_mount_removes_staged_files_when_auth_json_disappears() {
         dir.is_dir(),
         "the staging directory itself must survive so an existing bind mount's inode stays valid"
     );
+    // round 10: host revocation must wipe the auth store as well as the
+    // stage -- otherwise a stale store copy would silently repopulate the
+    // stage of the *next* container to run, even though the host has
+    // revoked auth.
+    assert!(
+        !store_dir.join("auth.json").exists(),
+        "the auth store's stale auth.json must be wiped alongside the stage on host revocation"
+    );
+    assert!(
+        !store_dir.join("config.toml").exists(),
+        "the auth store's stale config.toml must be wiped alongside the stage on host revocation"
+    );
+    assert!(
+        store_dir.is_dir(),
+        "the auth store directory itself must survive the wipe (only its contents are cleared)"
+    );
 }
 
 #[test]
@@ -210,9 +260,11 @@ fn prepare_codex_mount_reconciles_config_toml_removal_and_refreshes_auth() {
     // First run stages both files into the runtime dir.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json + config.toml");
     assert!(dir.join("config.toml").is_file());
 
@@ -224,7 +276,8 @@ fn prepare_codex_mount_reconciles_config_toml_removal_and_refreshes_auth() {
     )
     .unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     let second_dir = second.expect("auth.json is still present, so a mount should be prepared");
     assert_eq!(second_dir, dir);
@@ -281,13 +334,15 @@ fn should_keep_staged_auth_true_when_mtimes_are_equal() {
 fn prepare_codex_mount_keeps_staged_auth_when_newer_than_host() {
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_auth = home_dir.path().join(".codex/auth.json");
 
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
 
@@ -297,7 +352,8 @@ fn prepare_codex_mount_keeps_staged_auth_when_newer_than_host() {
     fs::write(&staged_auth, r#"{"token":"CONTAINER_REFRESHED"}"#).unwrap();
     set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -312,13 +368,15 @@ fn prepare_codex_mount_keeps_staged_auth_when_newer_than_host() {
 fn prepare_codex_mount_overwrites_staged_auth_when_host_is_newer() {
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_auth = home_dir.path().join(".codex/auth.json");
 
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
     set_mtime(&staged_auth, t0);
@@ -328,7 +386,8 @@ fn prepare_codex_mount_overwrites_staged_auth_when_host_is_newer() {
     fs::write(&host_auth, r#"{"token":"HOST_RELOGIN"}"#).unwrap();
     set_mtime(&host_auth, t0 + Duration::from_secs(3_600));
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -342,13 +401,15 @@ fn prepare_codex_mount_overwrites_staged_auth_when_host_is_newer() {
 fn prepare_codex_mount_always_overwrites_config_toml_even_if_staged_is_newer() {
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_config = home_dir.path().join(".codex/config.toml");
 
     let t0 = SystemTime::now();
     set_mtime(&host_config, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage config.toml");
     let staged_config = dir.join("config.toml");
 
@@ -362,7 +423,8 @@ fn prepare_codex_mount_always_overwrites_config_toml_even_if_staged_is_newer() {
     fs::write(&host_config, "model = \"host-updated\"\n").unwrap();
     set_mtime(&host_config, t0 + Duration::from_secs(60));
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -379,20 +441,23 @@ fn prepare_codex_mount_auth_removal_ignores_staged_mtime() {
     // an explicit revocation and must always win over any mtime comparison.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_auth = home_dir.path().join(".codex/auth.json");
 
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json + config.toml");
     let staged_auth = dir.join("auth.json");
     set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
 
     fs::remove_file(&host_auth).unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert!(
         second.is_none(),
@@ -408,61 +473,82 @@ fn prepare_codex_mount_auth_removal_ignores_staged_mtime() {
     );
 }
 
-// --- prepare_codex_mount: shared user-level stage survives disposable
-// container cleanup (codex review round 4, P1) ---
+// --- prepare_codex_mount / sync_codex_stage_to_store: disposable runtime_dir
+// cleanup destroys the per-container stage, but a run-after sync leaves the
+// refreshed auth.json recoverable in the host-only auth store (codex review
+// round 10 — this test's *meaning* is inverted from the pre-round-10 version:
+// back then the stage itself had to survive cleanup; now it is expected and
+// fine for the stage to be destroyed, because persistence has moved to a
+// structurally separate auth store) ---
 
 #[test]
-fn prepare_codex_mount_survives_disposable_runtime_dir_cleanup() {
-    // round 4 P1: disposable runs (`--new` / worktree) delete
+fn prepare_codex_mount_stage_is_disposed_but_auth_store_survives_runtime_dir_cleanup() {
+    // round 10: the stage (`<runtime_dir>/codex/`) is a per-container,
+    // disposable staging area — disposable runs (`--new` / worktree) delete
     // `<config_dir>/runtime/<container_name>/` wholesale on exit
     // (`std::fs::remove_dir_all(&ctx.runtime_dir)` in interactive.rs /
-    // prompt.rs). Before this fix, the codex stage lived *inside* that
-    // per-container runtime dir, so a container-refreshed auth.json (the
-    // only valid copy once the refresh token has rotated) was destroyed
-    // along with it. The fix moves the stage to `<config_dir>/codex/`,
-    // structurally outside anything a per-container cleanup ever touches.
+    // prompt.rs), taking the stage with it. That is fine *only* because
+    // `sync_codex_stage_to_store` is called first (both call sites do this
+    // before the removal) to write any container-refreshed auth.json back
+    // into the auth store (`<config_dir>/codex-auth/`), which lives outside
+    // `runtime_dir` and is never bind-mounted into any container.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
 
-    let staged = prepare_codex_mount(home_dir.path(), config_dir.path())
+    let staged = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
         .unwrap()
         .expect("auth.json is present on the host, so a stage dir must be returned");
 
     assert_eq!(
         staged,
-        config_dir.path().join("codex"),
-        "codex stage must live directly under <config_dir>/codex, not under \
-         <config_dir>/runtime/<container_name>/, so per-container cleanup never touches it"
+        runtime_dir.path().join("codex"),
+        "the stage must live under <runtime_dir>/codex (per-container), not under \
+         <config_dir>/codex — <config_dir> now holds only the host-only auth store"
     );
 
     // Simulate the in-container codex rotating the refresh token: the staged
-    // (rw-mounted) auth.json is rewritten to a value that exists nowhere else.
+    // (rw-mounted) auth.json is rewritten to a value that, before the
+    // run-after sync below, exists nowhere else.
     let staged_auth = staged.join("auth.json");
     fs::write(
         &staged_auth,
         r#"{"token":"CONTAINER_REFRESHED_BEFORE_CLEANUP"}"#,
     )
     .unwrap();
+    set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
 
-    // Simulate a disposable run's exact cleanup call: create a per-container
-    // runtime dir (as `prepare_context` would for temp claude.json / sanitized
-    // settings), then wholesale-remove it exactly like
-    // `interactive.rs:169` / `prompt.rs:482` do.
-    let runtime_dir = config_dir.path().join("runtime").join("vibepod-disposable");
-    fs::create_dir_all(&runtime_dir).unwrap();
-    fs::write(runtime_dir.join(".claude.json"), "{}").unwrap();
-    fs::remove_dir_all(&runtime_dir).ok();
+    // Simulate the run-after sync that both `interactive.rs` and `prompt.rs`
+    // call before their cleanup branch removes `runtime_dir`.
+    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
+        .expect("sync_codex_stage_to_store must succeed before disposable cleanup");
+
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+    assert_eq!(
+        fs::read_to_string(&store_auth).unwrap(),
+        r#"{"token":"CONTAINER_REFRESHED_BEFORE_CLEANUP"}"#,
+        "the run-after sync must have written the container-refreshed auth.json into the \
+         host-only auth store before cleanup destroys the stage"
+    );
+
+    // Simulate a disposable run's exact cleanup call:
+    // `std::fs::remove_dir_all(&ctx.runtime_dir)` in interactive.rs / prompt.rs.
+    fs::remove_dir_all(runtime_dir.path()).unwrap();
 
     assert!(
-        !runtime_dir.exists(),
-        "sanity check: the simulated per-container runtime dir must actually be gone"
+        !staged_auth.exists(),
+        "sanity check: the per-container stage must actually be gone after cleanup — losing \
+         it is expected and fine, since the refreshed value now lives in the auth store"
     );
     assert_eq!(
-        fs::read_to_string(&staged_auth).unwrap(),
+        fs::read_to_string(&store_auth).unwrap(),
         r#"{"token":"CONTAINER_REFRESHED_BEFORE_CLEANUP"}"#,
-        "the shared codex stage (and its container-refreshed auth.json) must survive \
-         disposable per-container runtime dir cleanup"
+        "the host-only auth store must survive disposable per-container runtime_dir cleanup, \
+         carrying the container-refreshed auth.json forward to the next `vibepod run`"
     );
 }
 
@@ -478,9 +564,11 @@ fn prepare_codex_mount_replaces_staged_symlink_without_following_it() {
     // removed, then replaced with a fresh copy from the host.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
 
@@ -499,7 +587,8 @@ fn prepare_codex_mount_replaces_staged_symlink_without_following_it() {
         "sanity check: staged auth.json must actually be a symlink before the next run"
     );
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir.clone()));
     assert!(
@@ -530,16 +619,19 @@ fn prepare_codex_mount_removes_staged_symlink_pointing_nowhere() {
     // the tampering-removal path.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage config.toml");
     let staged_config = dir.join("config.toml");
 
     fs::remove_file(&staged_config).unwrap();
     symlink(home_dir.path().join("does-not-exist"), &staged_config).unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert!(
@@ -568,9 +660,11 @@ fn prepare_codex_mount_removes_non_allowlisted_files_and_directories_from_stage(
     // call regardless of name.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json + config.toml");
 
     // Simulate a container writing allowlist-external junk directly into the
@@ -579,7 +673,8 @@ fn prepare_codex_mount_removes_non_allowlisted_files_and_directories_from_stage(
     fs::create_dir_all(dir.join("cache")).unwrap();
     fs::write(dir.join("cache/entry"), "SECRET_CACHE_FROM_CONTAINER").unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir.clone()));
     assert!(
@@ -637,13 +732,15 @@ fn prepare_codex_mount_reconcile_sweeps_stale_fixed_name_tmp_symlink_before_copy
     // reconcile.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_auth = home_dir.path().join(".codex/auth.json");
 
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
     set_mtime(&staged_auth, t0);
@@ -673,7 +770,8 @@ fn prepare_codex_mount_reconcile_sweeps_stale_fixed_name_tmp_symlink_before_copy
     fs::write(&host_auth, r#"{"token":"HOST_RELOGIN"}"#).unwrap();
     set_mtime(&host_auth, t0 + Duration::from_secs(3_600));
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir.clone()));
     assert_eq!(
@@ -706,16 +804,19 @@ fn prepare_codex_mount_completes_reconcile_and_copy_under_stage_lock() {
     // or fail rather than complete normally.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first call must stage auth.json + config.toml under the lock");
     assert!(dir.join("auth.json").is_file());
     assert!(dir.join("config.toml").is_file());
 
     // A second call must not hang (lock was released after the first call)
     // and must reconcile + copy again without error.
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     assert_eq!(second, Some(dir.clone()));
     assert_eq!(
         fs::read_to_string(dir.join("auth.json")).unwrap(),
@@ -737,58 +838,82 @@ fn prepare_codex_mount_completes_reconcile_and_copy_under_stage_lock() {
 }
 
 #[test]
-fn prepare_codex_mount_succeeds_under_concurrent_calls_to_same_stage() {
-    // round 7 P1: two `vibepod run` invocations preparing the same shared
-    // stage at the same time used to race -- one thread's full
-    // reconciliation could delete the other's in-flight NamedTempFile,
-    // making chmod/persist fail intermittently with NotFound.
+fn prepare_codex_mount_succeeds_under_concurrent_calls_from_different_containers() {
+    // round 7 P1 found this race when the stage was a single directory
+    // shared by every container: two concurrent `vibepod run` invocations
+    // preparing it at the same time could have one thread's full
+    // reconciliation delete the other's in-flight NamedTempFile, making
+    // chmod/persist fail intermittently with NotFound.
+    //
+    // round 10 moved the stage to be per-container (`<runtime_dir>/codex/`,
+    // isolated by container name), which removes that particular race: two
+    // containers no longer share a stage directory at all. But it introduced
+    // a *new* shared resource in its place -- the auth store
+    // (`<config_dir>/codex-auth/`) -- which every `prepare_codex_mount` call
+    // syncs through (host -> store -> stage) regardless of which container's
+    // stage it is ultimately populating. Two different containers' `vibepod
+    // run` starting at the same instant now race on that shared store
+    // instead, so this test simulates exactly that: two threads, each with
+    // its own `runtime_dir` (a distinct container), sharing one `config_dir`
+    // (and therefore one auth store). The flock that round 7 added -- moved
+    // in round 10 to guard the store instead of the stage -- must still
+    // serialize the two store-touching hops so neither thread's reconciliation
+    // corrupts the other's in-flight write.
     //
     // A single iteration of this race is weak as a regression guard: manual
-    // measurement (reviewer, round 7 follow-up) with the stage lock
-    // temporarily disabled showed the race only reproduces in ~2-3% of single
-    // runs (50-80 attempts needed one hit), so a lone iteration would pass CI
+    // measurement (reviewer, round 7 follow-up) with the lock temporarily
+    // disabled showed the race only reproduces in ~2-3% of single runs
+    // (50-80 attempts needed one hit), so a lone iteration would pass CI
     // almost every time even if the lock's scope were accidentally narrowed
     // back down in a future change. Looping the same two-thread call
     // `ITERATIONS` times inside one test process turns that ~2-3% per-attempt
-    // chance into a near-certain detection within a single `cargo test` run,
-    // while still finishing in well under a second.
+    // chance into a near-certain detection within a single `cargo test` run.
     //
     // Both threads in every iteration copy from the *same* host `~/.codex/`
     // (identical content), which keeps the expected final state deterministic
-    // regardless of which thread's copy physically lands last -- each
-    // iteration only needs the two calls to never error, not to race on
-    // distinguishable content, so it can't be flaky on outcome.
+    // regardless of which thread's copy physically lands last in the shared
+    // store -- each iteration only needs the two calls to never error, not to
+    // race on distinguishable content, so it can't be flaky on outcome.
     const ITERATIONS: usize = 300;
 
     for iteration in 0..ITERATIONS {
         // Fresh tempdirs per iteration: reusing the previous iteration's
-        // stage/config dir would let leftover state (e.g. an already-staged
-        // auth.json) mask a broken lock in a later iteration.
+        // config/runtime dirs would let leftover state (e.g. an
+        // already-populated auth store) mask a broken lock in a later
+        // iteration.
         let home_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
+        let runtime_dir_a = tempfile::tempdir().unwrap();
+        let runtime_dir_b = tempfile::tempdir().unwrap();
         make_host_codex(home_dir.path());
 
         let home_a = home_dir.path().to_path_buf();
         let config_a = config_dir.path().to_path_buf();
+        let runtime_a = runtime_dir_a.path().to_path_buf();
         let home_b = home_a.clone();
         let config_b = config_a.clone();
+        let runtime_b = runtime_dir_b.path().to_path_buf();
 
-        let handle_a = std::thread::spawn(move || prepare_codex_mount(&home_a, &config_a));
-        let handle_b = std::thread::spawn(move || prepare_codex_mount(&home_b, &config_b));
+        let handle_a =
+            std::thread::spawn(move || prepare_codex_mount(&home_a, &config_a, &runtime_a));
+        let handle_b =
+            std::thread::spawn(move || prepare_codex_mount(&home_b, &config_b, &runtime_b));
 
         let result_a = handle_a.join().expect("thread A must not panic");
         let result_b = handle_b.join().expect("thread B must not panic");
 
         assert!(
             result_a.is_ok(),
-            "iteration {iteration}: concurrent prepare_codex_mount A must not fail on the \
-             other thread's in-flight temp file being reconciled away: {:?}",
+            "iteration {iteration}: concurrent prepare_codex_mount A (container A) must not \
+             fail on the other container's in-flight auth-store write being reconciled away: \
+             {:?}",
             result_a.err()
         );
         assert!(
             result_b.is_ok(),
-            "iteration {iteration}: concurrent prepare_codex_mount B must not fail on the \
-             other thread's in-flight temp file being reconciled away: {:?}",
+            "iteration {iteration}: concurrent prepare_codex_mount B (container B) must not \
+             fail on the other container's in-flight auth-store write being reconciled away: \
+             {:?}",
             result_b.err()
         );
 
@@ -798,26 +923,50 @@ fn prepare_codex_mount_succeeds_under_concurrent_calls_to_same_stage() {
         let dir_b = result_b
             .unwrap()
             .expect("auth.json is present on the host, so Some(dir) is expected");
-        assert_eq!(dir_a, dir_b, "iteration {iteration}");
+
+        // Different containers must get independent, non-shared stage dirs
+        // -- this is precisely the round 10 change that eliminated the
+        // pre-round-10 stage-level race.
         assert_eq!(
             dir_a,
-            config_dir.path().join("codex"),
+            runtime_dir_a.path().join("codex"),
             "iteration {iteration}"
         );
-
         assert_eq!(
-            fs::read_to_string(dir_a.join("auth.json")).unwrap(),
-            r#"{"token":"HOST_AUTH"}"#,
-            "iteration {iteration}: both threads copy the same host auth.json, so the final \
-             staged content must match it regardless of which thread's copy physically lands \
-             last"
+            dir_b,
+            runtime_dir_b.path().join("codex"),
+            "iteration {iteration}"
         );
+        assert_ne!(
+            dir_a, dir_b,
+            "iteration {iteration}: two different containers must never be handed the same \
+             stage directory"
+        );
+
+        for (label, dir) in [("A", &dir_a), ("B", &dir_b)] {
+            assert_eq!(
+                fs::read_to_string(dir.join("auth.json")).unwrap(),
+                r#"{"token":"HOST_AUTH"}"#,
+                "iteration {iteration}: container {label}'s stage must reflect the shared \
+                 host auth.json regardless of which thread's auth-store write landed last"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.join("config.toml")).unwrap(),
+                "model = \"gpt\"\n",
+                "iteration {iteration}: container {label}'s stage must reflect the shared \
+                 host config.toml regardless of which thread's auth-store write landed last"
+            );
+        }
+
+        // The shared auth store behind both stages must itself have
+        // converged on the host's content without corruption from the
+        // concurrent access.
+        let store_auth = config_dir.path().join("codex-auth").join("auth.json");
         assert_eq!(
-            fs::read_to_string(dir_a.join("config.toml")).unwrap(),
-            "model = \"gpt\"\n",
-            "iteration {iteration}: both threads copy the same host config.toml, so the final \
-             staged content must match it regardless of which thread's copy physically lands \
-             last"
+            fs::read_to_string(&store_auth).unwrap(),
+            r#"{"token":"HOST_AUTH"}"#,
+            "iteration {iteration}: the auth store shared by both containers must end up with \
+             the host's content, not a corrupted interleaving of the two concurrent writes"
         );
     }
 }
@@ -842,9 +991,11 @@ fn prepare_codex_mount_replaces_staged_auth_directory_with_fresh_host_copy() {
     // doing the work here.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
     assert!(
@@ -860,7 +1011,8 @@ fn prepare_codex_mount_replaces_staged_auth_directory_with_fresh_host_copy() {
     fs::create_dir_all(&staged_auth).unwrap();
     fs::write(staged_auth.join("junk"), "not an auth.json").unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir.clone()));
     assert!(
@@ -887,15 +1039,30 @@ fn prepare_codex_mount_keeps_staged_auth_when_mtimes_are_equal() {
     // keep the staged copy instead.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_auth = home_dir.path().join(".codex/auth.json");
 
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    // round 10: pin the *store's* mtime (the intermediate hop between host
+    // and stage) to exactly t0 too. `copy_codex_asset_atomically`'s persist
+    // during the first call above stamps the store's auth.json with the
+    // real wall-clock time at that moment, which is a hair after `t0` was
+    // captured -- without this, hop 2 (store -> stage) would see the
+    // store's mtime as strictly newer than the `t0` this test pins the
+    // stage to below, taking the "host [store] wins" branch and silently
+    // overwriting the container's refreshed stage copy with the store's
+    // (host-derived) content. That would defeat the very equal-mtime
+    // semantics this test exists to guard (round 8 P2-1).
+    set_mtime(&store_auth, t0);
 
     // Simulate the in-container codex rotating its refresh token at exactly
     // the same fs-visible timestamp as the host's copy (coarse mtime
@@ -908,7 +1075,8 @@ fn prepare_codex_mount_keeps_staged_auth_when_mtimes_are_equal() {
     .unwrap();
     set_mtime(&staged_auth, t0);
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -940,13 +1108,15 @@ fn prepare_codex_mount_skips_copy_when_staged_auth_content_matches_host() {
     // was never taken.
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_auth = home_dir.path().join(".codex/auth.json");
 
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
 
@@ -960,7 +1130,8 @@ fn prepare_codex_mount_skips_copy_when_staged_auth_content_matches_host() {
     set_mtime(&staged_auth, staged_mtime);
     let mtime_before = fs::metadata(&staged_auth).unwrap().modified().unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -995,13 +1166,15 @@ fn prepare_codex_mount_restores_0600_on_kept_staged_auth_with_loosened_permissio
 
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_auth = home_dir.path().join(".codex/auth.json");
 
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
 
@@ -1016,7 +1189,8 @@ fn prepare_codex_mount_restores_0600_on_kept_staged_auth_with_loosened_permissio
     set_mtime(&staged_auth, t0 + Duration::from_secs(60));
     fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o644)).unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -1048,13 +1222,15 @@ fn prepare_codex_mount_restores_0600_when_copy_is_skipped_for_matching_content()
 
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
     let host_auth = home_dir.path().join(".codex/auth.json");
 
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
 
@@ -1068,7 +1244,8 @@ fn prepare_codex_mount_restores_0600_when_copy_is_skipped_for_matching_content()
     fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o644)).unwrap();
     let mtime_before = fs::metadata(&staged_auth).unwrap().modified().unwrap();
 
-    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -1086,6 +1263,393 @@ fn prepare_codex_mount_restores_0600_when_copy_is_skipped_for_matching_content()
     assert_eq!(
         mode, 0o600,
         "the content-equality skip path must still have its permission repaired to 0600, got {:o}",
+        mode
+    );
+}
+
+// --- prepare_codex_mount: the host -> store hop gets the same full
+// reconciliation defense as the store -> stage hop (codex review round 10;
+// round 5 P1-b originally covered only the single host -> stage hop) ---
+
+#[test]
+fn prepare_codex_mount_reconciles_non_allowlisted_entries_directly_in_the_auth_store() {
+    // round 10 introduced a second hop (host -> store -> stage), both driven
+    // by the same `sync_codex_entries_into` helper. This confirms the
+    // full-reconciliation sweep (round 5 P1-b: delete anything in the
+    // destination that isn't in this run's allowlisted entries) is really
+    // applied to the auth store directly, one hop upstream of the stage --
+    // not just observable indirectly through the stage that existing tests
+    // already cover.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let first =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json + config.toml");
+    let store_dir = config_dir.path().join("codex-auth");
+    assert!(store_dir.join("auth.json").is_file());
+
+    // Simulate junk landing directly in the store (e.g. leftover from a bug
+    // elsewhere, or a manual edit) rather than via the stage.
+    fs::write(store_dir.join("history.jsonl"), "SECRET_HISTORY_IN_STORE").unwrap();
+    fs::create_dir_all(store_dir.join("cache")).unwrap();
+    fs::write(store_dir.join("cache/entry"), "SECRET_CACHE_IN_STORE").unwrap();
+
+    let second =
+        prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path()).unwrap();
+    assert_eq!(second, Some(dir));
+
+    assert!(
+        !store_dir.join("history.jsonl").exists(),
+        "non-allowlisted file must be swept from the auth store, not just from the stage"
+    );
+    assert!(
+        !store_dir.join("cache").exists(),
+        "non-allowlisted directory must be swept from the auth store, not just from the stage"
+    );
+    assert!(
+        store_dir.join("auth.json").is_file(),
+        "allowlisted auth.json must survive the store's own reconciliation sweep"
+    );
+    assert!(
+        store_dir.join("config.toml").is_file(),
+        "allowlisted config.toml must survive the store's own reconciliation sweep"
+    );
+}
+
+// --- container mount args: the auth store must never be reachable through
+// any docker mount argument (codex review round 10, "分離の検証") ---
+
+#[test]
+fn container_mount_args_expose_stage_but_never_the_auth_store_path() {
+    // round 10's core invariant is that the auth store
+    // (`<config_dir>/codex-auth/`) is host-only and never bind-mounted into
+    // any container -- only the per-container stage (`<runtime_dir>/codex/`)
+    // is. `build_container_config` (src/cli/run/mod.rs) copies
+    // `ctx.codex_dir` (the stage) into `ContainerConfig.codex_dir`, and
+    // `ContainerConfig::to_create_args` (src/runtime/docker.rs) is the
+    // function that actually turns that into the `docker run -v ...`
+    // argument. Exercising it directly here (rather than re-deriving the
+    // invariant by inspecting fields) means a future change that
+    // accidentally wires the store into a mount argument would fail this
+    // test.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let stage_dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("auth.json is present on the host, so a stage dir must be returned");
+    let store_dir = config_dir.path().join("codex-auth");
+    assert!(
+        store_dir.join("auth.json").is_file(),
+        "sanity check: the auth store must actually have been populated by this run"
+    );
+
+    let config = ContainerConfig {
+        image: "vibepod:test".to_string(),
+        container_name: "vibepod-test-container".to_string(),
+        workspace_path: "/tmp/workspace".to_string(),
+        claude_json: None,
+        codex_dir: Some(stage_dir.to_string_lossy().to_string()),
+        gitconfig: None,
+        env_vars: Vec::new(),
+        network_disabled: false,
+        extra_mounts: Vec::new(),
+        labels: HashMap::new(),
+    };
+
+    let args = config.to_create_args();
+    let joined = args.join(" ");
+
+    assert!(
+        joined.contains(&stage_dir.to_string_lossy().to_string()),
+        "sanity check: the per-container stage path must appear in the generated mount args: {:?}",
+        args
+    );
+    assert!(
+        !joined.contains(&store_dir.to_string_lossy().to_string()),
+        "the auth store path must never appear in any container mount argument: {:?}",
+        args
+    );
+    assert!(
+        !joined.contains("codex-auth"),
+        "the literal auth store directory name must never leak into container mount arguments: {:?}",
+        args
+    );
+}
+
+// --- sync_codex_stage_to_store: run-after sync of a container-refreshed
+// stage auth.json into the host-only auth store (codex review round 10) ---
+
+#[test]
+fn sync_codex_stage_to_store_promotes_newer_stage_auth_to_store() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    // Simulate the in-container codex rotating the refresh token: the
+    // rw-mounted stage auth.json is rewritten with a strictly newer mtime
+    // than whatever the store currently holds.
+    fs::write(&staged_auth, r#"{"token":"CONTAINER_REFRESHED"}"#).unwrap();
+    set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
+
+    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
+        .expect("sync_codex_stage_to_store must succeed when promoting a newer stage auth.json");
+
+    assert_eq!(
+        fs::read_to_string(&store_auth).unwrap(),
+        r#"{"token":"CONTAINER_REFRESHED"}"#,
+        "a newer stage auth.json must be promoted into the auth store"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&store_auth).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the promoted auth.json in the store must be 0600, got {:o}",
+            mode
+        );
+    }
+}
+
+#[test]
+fn sync_codex_stage_to_store_skips_when_stage_auth_is_older_than_store() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    let t0 = SystemTime::now();
+    // The stage is pinned strictly older than the store, simulating a store
+    // that already holds a more recently synced value (e.g. written by a
+    // different container's run-after sync) than this container's stage.
+    set_mtime(&staged_auth, t0);
+    fs::write(&store_auth, r#"{"token":"STORE_ALREADY_NEWER"}"#).unwrap();
+    set_mtime(&store_auth, t0 + Duration::from_secs(3_600));
+
+    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
+        .expect("sync_codex_stage_to_store must succeed even when it skips the copy");
+
+    assert_eq!(
+        fs::read_to_string(&store_auth).unwrap(),
+        r#"{"token":"STORE_ALREADY_NEWER"}"#,
+        "an older-than-store stage auth.json must never overwrite a newer store copy"
+    );
+}
+
+#[test]
+fn sync_codex_stage_to_store_skips_when_stage_auth_mtime_equals_store() {
+    // `sync_codex_stage_to_store` reuses `should_keep_staged_auth`, called as
+    // `should_keep_staged_auth(stage_mtime, store_mtime)` — a tie
+    // (`store_mtime >= stage_mtime`) takes the "keep" branch, i.e. the store
+    // is left alone. This matches the spec's "古い(または同値)→取り込まれない".
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&staged_auth, t0);
+    fs::write(&store_auth, r#"{"token":"STORE_TIE"}"#).unwrap();
+    set_mtime(&store_auth, t0);
+
+    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
+        .expect("sync_codex_stage_to_store must succeed on an mtime tie");
+
+    assert_eq!(
+        fs::read_to_string(&store_auth).unwrap(),
+        r#"{"token":"STORE_TIE"}"#,
+        "an equal-mtime stage auth.json must not overwrite the store"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_codex_stage_to_store_rejects_symlink_staged_auth() {
+    // A container with the rw-mounted stage could swap the staged auth.json
+    // for a symlink pointing at an arbitrary host path just before the
+    // container stops, hoping the run-after sync follows it and either leaks
+    // an arbitrary host file into the store or corrupts the store via a
+    // dangling/malicious target. `remove_dst_if_not_regular_file` (the same
+    // defense `prepare_codex_mount` uses, round 5/8) must reject this: detect
+    // via `symlink_metadata` (never follows), delete without reading through
+    // it, and leave the store untouched.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+    let store_content_before = fs::read_to_string(&store_auth).unwrap();
+
+    let victim = home_dir.path().join("victim.txt");
+    fs::write(&victim, "VICTIM_UNCHANGED").unwrap();
+    fs::remove_file(&staged_auth).unwrap();
+    symlink(&victim, &staged_auth).unwrap();
+
+    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path()).expect(
+        "sync_codex_stage_to_store must not error on a tampered stage; it must reject and \
+         continue rather than fail the whole run's cleanup",
+    );
+
+    assert!(
+        !staged_auth.exists(),
+        "the tampered symlink must be deleted, not left in place or followed"
+    );
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "VICTIM_UNCHANGED",
+        "the symlink target must never be read or written to"
+    );
+    let store_content_after = fs::read_to_string(&store_auth).unwrap();
+    assert_eq!(
+        store_content_after, store_content_before,
+        "the auth store must be left completely untouched when the stage auth.json was a symlink"
+    );
+    // Belt-and-suspenders: assert directly (not just via equality with the
+    // pre-tamper snapshot) that the symlink target's content never reached
+    // the store. round 10 differs from earlier TOCTOU defenses in that the
+    // *source* of the sync (the stage) is the untrusted, container-writable
+    // side, not the destination -- an implementation that opened the
+    // symlink's target by path instead of rejecting it outright could
+    // ingest the victim file's content into the store.
+    assert_ne!(
+        store_content_after, "VICTIM_UNCHANGED",
+        "the symlink target's content must never be ingested into the auth store"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_codex_stage_to_store_rejects_directory_staged_auth() {
+    // Same defense as the symlink case, but for a directory masquerading as
+    // `auth.json` (round 8 P1's non-regular-file defense). A directory's
+    // mtime can easily look "newer" than the store's real auth.json, which
+    // (absent this defense) would otherwise pass the mtime check and corrupt
+    // the store on copy.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+    let store_content_before = fs::read_to_string(&store_auth).unwrap();
+
+    fs::remove_file(&staged_auth).unwrap();
+    fs::create_dir_all(&staged_auth).unwrap();
+    fs::write(staged_auth.join("junk"), "SECRET_JUNK_INSIDE_TAMPERED_DIR").unwrap();
+
+    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
+        .expect("sync_codex_stage_to_store must not error on a tampered stage");
+
+    assert!(
+        !staged_auth.exists(),
+        "the directory masquerading as auth.json must be deleted (remove_dir_all), not left \
+         in place"
+    );
+    let store_content_after = fs::read_to_string(&store_auth).unwrap();
+    assert_eq!(
+        store_content_after, store_content_before,
+        "the auth store must be left completely untouched when the stage auth.json was a \
+         directory"
+    );
+    assert!(
+        !store_content_after.contains("SECRET_JUNK_INSIDE_TAMPERED_DIR"),
+        "content from inside the tampered directory must never reach the auth store"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_codex_stage_to_store_ingests_and_normalizes_permissions_of_a_loosely_permissioned_stage_auth(
+) {
+    // NOTE ON SPEC WORDING: docs/specs/v1.8/2026-07-21-codex-in-container.md's
+    // round 10 test section groups a "0644-tampered" stage auth.json together
+    // with symlink/directory tampering under "取り込み拒否(削除+警告)して
+    // store 無傷". The actual `sync_codex_stage_to_store` implementation does
+    // not do this: `remove_dst_if_not_regular_file` only inspects *file type*
+    // (symlink vs. directory vs. regular file) via `symlink_metadata`, never
+    // permission bits — a 0644 file is still a *regular* file, so it is
+    // treated as ordinary content and ingested (or not) purely on the mtime
+    // comparison, exactly like a 0600 file would be. What the implementation
+    // does guarantee is that whatever ends up written into the store is
+    // 0600 — `copy_codex_asset_atomically` sets 0600 on its own temp file
+    // before persisting it, and `enforce_staged_permissions` re-asserts 0600
+    // afterward — so a loosened *source* permission never survives into the
+    // store. This test documents that actual, observed behavior rather than
+    // asserting the literal "rejected" wording, since src was out of scope
+    // for this task to modify; see this implementation's final report for
+    // the discrepancy write-up.
+    use std::os::unix::fs::PermissionsExt;
+
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&store_auth, t0);
+    fs::write(
+        &staged_auth,
+        r#"{"token":"CONTAINER_REFRESHED_LOOSE_PERMS"}"#,
+    )
+    .unwrap();
+    set_mtime(&staged_auth, t0 + Duration::from_secs(60));
+    fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o644)).unwrap();
+
+    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&store_auth).unwrap(),
+        r#"{"token":"CONTAINER_REFRESHED_LOOSE_PERMS"}"#,
+        "a newer stage auth.json is ingested regardless of its own permission bits"
+    );
+    let mode = fs::metadata(&store_auth).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "the store's copy must always end up 0600 regardless of the stage's permission bits, \
+         got {:o}",
         mode
     );
 }

@@ -350,6 +350,53 @@ stderr に警告してスキップし、それ以外の open/stat/chmod 失敗�
 で anyhow エラーとして伝播する(握りつぶし禁止に従う)。この修正で reviewer
 再レビューは PASS。
 
+## codex レビュー指摘対応(round 10、2026-07-22)— 構造修正(確定)
+
+round 9 対応は解消を確認。round 10 で「`.codex` 全体の rw 共有マウントにより、codex の
+実行データ(history / sessions / logs / cache)がホスト共有ステージへ永続化され、
+並走する別コンテナから参照可能。docs の『2ファイルのみ』保証と実態が不一致」という
+設計レベルの指摘を受けた。ユーザー判断により以下の構造修正を行う。
+
+### 新アーキテクチャ: 「見せる領域」と「永続化する領域」の完全分離
+
+1. **コンテナに見せる領域 = per-container ステージ**(`<runtime>/<container>/codex/`)
+   - `/home/vibepod/.codex` への rw マウントは per-container ステージに戻す
+   - codex の実行データはこのコンテナ専用領域に閉じ、他コンテナから不可視
+   - disposable cleanup(runtime_dir 削除)で実行データごと消滅する(それが望ましい挙動)
+2. **永続化する領域 = ホスト側 auth store**(`<config_dir>/codex-auth/`)
+   - **決してコンテナにマウントしない**。ホストプロセスだけが読み書きする
+   - 保持するのは allowlist の2ファイルのみ
+3. **同期はホストプロセスが run の前後で行う**(既存の防御ロジックを流用):
+   - **run 前(prepare)**: host `~/.codex` → auth store → per-container ステージの順に反映。
+     auth.json は keep-newest(mtime 同値はステージ/store 優先、内容同一ならコピー省略)、
+     config.toml はホスト優先、ホストで auth.json 削除なら store とステージ両方を wipe して None
+   - **run 後(コンテナ停止処理・cleanup 前)**: per-container ステージの auth.json が
+     store より新しければ store に取り込む(keep-newest)。取り込みは通常ファイルのみ・
+     0600 強制・アトミック置換など既存の tamper 防御を全て通す
+   - 強制終了(kill -9 等)で run 後同期が走らなかった場合、直近のリフレッシュは失われうる。
+     ホストで codex 再ログインすれば回復する旨を README に文書化(Accepted Risk)
+4. **既存防御の帰属変更**:
+   - flock(round 7)は auth store の読み書きを守る排他に付け替える(per-container ステージは
+     コンテナ名で分離されるため並行 run 間の競合が消える。ステージ側のロックは不要になる)
+   - symlink / 非通常ファイル / 0600 / 完全リコンサイル(round 5,8,9)の防御は
+     「per-container ステージから store への取り込み」と「ステージ準備」の両方で維持する
+   - mounts ラベルの codex marker(round 2)はマウント先パスが per-container に変わる点だけ追随
+5. **docs 更新**: README / SECURITY.md を新アーキテクチャに合わせて書き直す。
+   「コンテナにマウントされるのは per-container ステージのみ」「ホストへ永続化されるのは
+   auth store の2ファイルのみ」「実行データはコンテナ専用領域に閉じ、他コンテナから不可視」を明記
+
+### テスト(既存テストの追随 + 新規)
+
+- run 前同期: host / store / ステージの3者間の keep-newest・wipe・リコンサイルの組合せ
+- run 後同期: ステージの auth が store より新しい → store に取り込まれる。古い(または同値)→ 取り込まれない。
+  symlink・ディレクトリに改ざんされたステージ auth → 取り込み拒否(削除+警告)して store 無傷。
+  0644 等の緩い権限の**通常ファイル**は型改ざんではないため拒否されず、取り込んだうえで store 側は常に
+  0600 に正規化される(拒否は symlink・ディレクトリの型改ざんのみが対象。round 10 差し戻しレビューで訂正)
+- run 後同期の読み取りは `O_NOFOLLOW` 付き fd を経由し、型判定(symlink 検出)・mtime 取得・内容読み取りを
+  同一 fd で不可分に行う(コピー元がコンテナ制御下にあるための TOCTOU 対策。round 10 差し戻しレビューで追加)
+- disposable cleanup 後: ステージは消えるが store は残る
+- auth store がコンテナのマウント引数のどこにも現れないこと(分離の検証)
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

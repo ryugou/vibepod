@@ -140,11 +140,16 @@ pub(super) struct RunContext {
     pub(super) setup_cmd: Option<String>,
     pub(super) temp_claude_json: Option<std::path::PathBuf>,
     /// `~/.codex/` の allowlist(auth.json / config.toml)をコピーした、
-    /// 全コンテナ共有のユーザー単位ステージディレクトリ(`<config_dir>/codex/`)。
-    /// per-container ではないため、disposable 実行(`--new` / worktree)の
-    /// `runtime_dir` 削除では消えない(round 4 で per-container 配置から移行)。
-    /// 存在しない場合(auth.json 欠如)は `None` — コンテナには codex 認証を
-    /// 注入しない。
+    /// **per-container** ステージディレクトリ(`<runtime_dir>/codex/`)。
+    /// コンテナへ `/home/vibepod/.codex` として rw マウントされる実体はこれ
+    /// であり、コンテナが書き込む実行データ(history/sessions/cache 等)は
+    /// このコンテナ専用領域に閉じ、他コンテナから不可視になる(round 10)。
+    /// disposable 実行(`--new` / worktree)の `runtime_dir` 削除でこのステージ
+    /// ごと消える — それは意図した挙動であり問題ではない: 認証の永続化は
+    /// 別途 `<config_dir>/codex-auth/`(host-only、コンテナに一切マウントしない
+    /// auth store)が担い、run 後に `sync_codex_stage_to_store` がステージから
+    /// store へ書き戻す。存在しない場合(auth.json 欠如)は `None` —
+    /// コンテナには codex 認証を注入しない。
     pub(super) codex_dir: Option<std::path::PathBuf>,
     /// Per-container runtime directory under
     /// `<config_dir>/runtime/<container_name>/`. All vibepod-managed runtime
@@ -741,19 +746,20 @@ pub fn should_keep_staged_auth(
     staged_mtime >= host_mtime
 }
 
-/// 共有 codex ステージ(`<config_dir>/codex/`)への並行アクセスを直列化する
-/// アドバイザリロック(codex レビュー round 7 P1)。
+/// **auth store**(`<config_dir>/codex-auth/`)への並行アクセスを直列化する
+/// アドバイザリロック(codex レビュー round 7 P1、round 10 で対象を
+/// per-container ステージから auth store に付け替え)。
 ///
-/// 複数の `vibepod run` が同時に `prepare_codex_mount` を呼ぶと、一方の完全
-/// リコンサイル(`reconcile_codex_stage_dir`)が、他方が書き込み中の
-/// `NamedTempFile`(round 6 で一意名にした allowlist 外の一時ファイル)を
-/// 「allowlist に無いエントリ」として削除してしまうことがある。一意名
-/// (round 6)は symlink 差し替えと固定名の取り合いを防いだが、2 プロセスの
-/// 操作順序そのものは制御しないため、この削除競合(reconcile が他方の
-/// in-flight tmp ファイルを消す)までは防げない。`prepare_codex_mount` の
-/// 本体(リコンサイル開始〜全コピー完了)全体をこのロックで排他区間にする
-/// ことで、2 つの呼び出しが同じステージをインターリーブして操作しない
-/// ことを保証する。
+/// per-container ステージ(`<runtime_dir>/codex/`)はコンテナ名で分離される
+/// ため、並行 run 間でステージ自体が競合することはもう無い。しかし
+/// auth store は `prepare_codex_mount`(run 前: host→store→stage)と
+/// `sync_codex_stage_to_store`(run 後: stage→store)の両方から触られる
+/// 全プロセス共有の単一ディレクトリであり、複数の `vibepod run` が同時に
+/// これを操作すると、一方の完全リコンサイル(`reconcile_codex_stage_dir`)が
+/// 他方が書き込み中の `NamedTempFile`(round 6 で一意名にした allowlist 外の
+/// 一時ファイル)を「allowlist に無いエントリ」として削除してしまうことが
+/// ある。このロックを両関数の本体全体の排他区間にすることで、複数呼び出しが
+/// 同じ store をインターリーブして操作しないことを保証する。
 ///
 /// UX は `BuildLock`(`src/cli/init.rs`)と同じパターンに倣う:
 /// `flock(LOCK_EX | LOCK_NB)` を先に試し、競合(`EWOULDBLOCK`)のときだけ
@@ -763,8 +769,8 @@ pub fn should_keep_staged_auth(
 /// (ファイル名・文言)を持ち込むリスクの方が大きいため、独立実装とする
 /// (spec が許容する選択)。
 ///
-/// ロックファイルはステージディレクトリ(`<config_dir>/codex/`)の**外**、
-/// `<config_dir>/codex.lock` に置く。ステージ内に置くと
+/// ロックファイルは auth store(`<config_dir>/codex-auth/`)の**外**、
+/// `<config_dir>/codex.lock` に置く。store 内に置くと
 /// `reconcile_codex_stage_dir` の完全リコンサイル(allowlist 外を全削除)が
 /// 次回呼び出し時にロックファイル自体を削除対象にしてしまう。
 ///
@@ -840,102 +846,51 @@ fn acquire_codex_stage_lock(config_dir: &std::path::Path) -> anyhow::Result<Code
     }
 }
 
-/// ホストの `~/.codex/auth.json`(と存在すれば `config.toml`)を
-/// `<config_dir>/codex/` にコピーし、そのディレクトリのパスを返す。呼び出し元は
-/// このパスをコンテナへ `/home/vibepod/.codex` として **rw** マウントする(codex が
-/// トークンリフレッシュ時に auth.json を書き換えるため。コピーなのでホスト原本には
-/// 影響しない — `.claude.json` と同じパターン)。
+/// `entries`(コピー元の一覧、`host_codex_stage_entries` が返す形式)を `dst_dir`
+/// へ反映する共通コピーループ(codex レビュー round 10 で
+/// `prepare_codex_mount` から抽出。旧実装は host→stage の 1 ホップのみを
+/// このループでベタ書きしていたが、round 10 で host→store→stage の 2 ホップ
+/// 構成になったため、同じ「reconcile → per-entry keep-newest/上書きコピー →
+/// 権限強制」ロジックを 2 回呼べるようこの関数に切り出した)。
 ///
-/// **全コンテナ共有のユーザー単位ステージ**(`<config_dir>/codex/`)であり、
-/// per-container ではない(round 4 で per-container 配置から移行)。per-container
-/// 配置だと、disposable 実行(`--new` / worktree)の終了処理が
-/// `<config_dir>/runtime/<container_name>/` を丸ごと `remove_dir_all` する際に、
-/// コンテナ内 codex がリフレッシュした auth.json(トークンローテーション後の
-/// 唯一の有効コピー)ごと失われてしまう。ユーザー単位の共有パスに置くことで、
-/// per-container cleanup の削除対象から構造的に外れる。
+/// 処理内容(旧 `prepare_codex_mount` のループ本体と完全に同一のロジック):
+/// 1. `dst_dir` を作成し 0700 にする
+/// 2. `entries` に無い名前(あるいは allowlist 外の残置物)を全リコンサイル
+///    (`reconcile_codex_stage_dir`)
+/// 3. 各エントリについて、非通常ファイル(symlink・ディレクトリ)なら削除し
+///    (`remove_dst_if_not_regular_file`)、`auth.json` は keep-newest
+///    (`should_keep_staged_auth`)、`config.toml` は常にソース優先で
+///    コピー(`copy_codex_asset_atomically`)
+/// 4. 全エントリの権限を 0600 に強制(`enforce_staged_permissions`)
 ///
-/// **トレードオフ(意図的な受け入れ)**: 複数コンテナを併走させている場合、
-/// それらは同一の `auth.json` ステージを共有する。1 つのコンテナ内 codex が
-/// トークンをリフレッシュすると、他の実行中コンテナにもそのファイルが反映される。
-/// これは codex 側の書き込みが(追記ではなく)ファイル置換であるため実害は限定的で
-/// あり、また per-container コピー方式を採ったとしても provider 側のリフレッシュ
-/// トークンローテーション自体は同様に起こり得る問題であるため、共有ステージに
-/// 集約する方が総合的に安全と判断した。
-///
-/// `auth.json` が存在しない場合は `None` を返し、codex 注入をスキップする
-/// (vibepod 自体は動作継続するが、コンテナ内で codex レビューは使えない)。
-/// エラーの握りつぶし禁止のルールに従い、この場合は stderr に理由を明示する。
-///
-/// `config.toml` のみ無く `auth.json` はある場合は、警告なしで auth.json だけ
-/// コピーして続行する(`config.toml` 省略は codex のデフォルト設定を使う正常な
-/// 運用パターンのため)。
-///
-/// **`auth.json` は「新しい方を保持」する**(codex レビュー round 3 P1): ステージ済み
-/// `auth.json` の mtime がホスト側より新しければ、コンテナ内 codex がリフレッシュした
-/// ものとみなしコピーをスキップする(`should_keep_staged_auth` 参照)。`config.toml` は
-/// 認証情報ではなく設定ファイルのため、この特例の対象外であり常にホスト側で上書きする。
-///
-/// 関数本体全体(リコンサイル開始〜全コピー完了)は `CodexStageLock`
-/// (`<config_dir>/codex.lock`)による排他区間内で実行される(codex レビュー
-/// round 7 P1)。複数の `vibepod run` が同時にこの関数を呼んでも、一方の
-/// リコンサイルが他方の in-flight temp file を削除する競合が起きない。
-pub fn prepare_codex_mount(
-    home: &std::path::Path,
-    config_dir: &std::path::Path,
-) -> anyhow::Result<Option<std::path::PathBuf>> {
-    // round 7 P1: リコンサイル開始から全コピー完了まで(この関数の残り
-    // 全体、early return を含むすべての return パス)を排他区間にする。
-    // ロックガードは関数を抜けるとき(どの return パスでも)に drop され、
-    // 解放される。
-    let _stage_lock = acquire_codex_stage_lock(config_dir)?;
-
-    let host_codex_dir = home.join(".codex");
-    let entries = host_codex_stage_entries(&host_codex_dir);
-
-    let codex_stage_dir = config_dir.join("codex");
-
-    let has_auth = entries.iter().any(|(_, name)| *name == "auth.json");
-    if !has_auth {
-        // P1: ホストの auth.json が無い(未認証 or 取り消し済み)。過去の run で
-        // ステージ済みの認証情報が残っていると、既存コンテナの bind mount
-        // 経由で使われ続けてしまうため、ディレクトリ自体は残したまま中身だけ
-        // 全消去する(keep が空 = allowlist 全ファイルが削除対象)。
-        reconcile_codex_stage_dir(&codex_stage_dir, &[]).with_context(|| {
-            format!(
-                "Failed to clear stale codex assets in {}",
-                codex_stage_dir.display()
-            )
-        })?;
-        eprintln!(
-            "codex auth not found (~/.codex/auth.json); codex review is unavailable in this container"
-        );
-        return Ok(None);
-    }
-
-    std::fs::create_dir_all(&codex_stage_dir)
-        .with_context(|| format!("Failed to create {}", codex_stage_dir.display()))?;
+/// 呼び出し元(`prepare_codex_mount`)がロック(`CodexStageLock`)を保持した
+/// 状態でこの関数を呼ぶことを前提とする(この関数自身はロックを取らない)。
+fn sync_codex_entries_into(
+    entries: &[(std::path::PathBuf, &'static str)],
+    dst_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst_dir)
+        .with_context(|| format!("Failed to create {}", dst_dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&codex_stage_dir, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| {
-                format!("Failed to set permissions on {}", codex_stage_dir.display())
-            })?;
+        std::fs::set_permissions(dst_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to set permissions on {}", dst_dir.display()))?;
     }
 
     // P2: 今回の entries に無い allowlist ファイル(例: ホストで config.toml が
-    // 削除された)がステージに残っていると無期限に使われ続けるため、コピー前に
+    // 削除された)が dst に残っていると無期限に使われ続けるため、コピー前に
     // 差分を削除しておく。
     let keep_names: Vec<&str> = entries.iter().map(|(_, name)| *name).collect();
-    reconcile_codex_stage_dir(&codex_stage_dir, &keep_names).with_context(|| {
+    reconcile_codex_stage_dir(dst_dir, &keep_names).with_context(|| {
         format!(
             "Failed to reconcile stale codex assets in {}",
-            codex_stage_dir.display()
+            dst_dir.display()
         )
     })?;
 
-    for (src, name) in &entries {
-        let dst = codex_stage_dir.join(name);
+    for (src, name) in entries {
+        let dst = dst_dir.join(name);
 
         // P1-a/P1(round 8): dst はコンテナの rw マウント経由で symlink や
         // ディレクトリ等の非通常ファイルに差し替えられている可能性がある。
@@ -967,7 +922,7 @@ pub fn prepare_codex_mount(
 
                 if should_keep_staged_auth(host_mtime, staged_mtime) {
                     // コンテナ内 codex がトークンリフレッシュ済みの auth.json を、
-                    // 古いホストコピーで上書きしない(round 3 P1)。コンテナが
+                    // 古いソースコピーで上書きしない(round 3 P1)。コンテナが
                     // この経路でパーミッションだけ緩めていた場合の修復は、この
                     // ループを抜けた後の `enforce_staged_permissions` に集約する
                     // (round 9 P1)。
@@ -979,9 +934,357 @@ pub fn prepare_codex_mount(
         copy_codex_asset_atomically(src, &dst)?;
     }
 
-    enforce_staged_permissions(&codex_stage_dir, &entries)?;
+    enforce_staged_permissions(dst_dir, entries)?;
 
-    Ok(Some(codex_stage_dir))
+    Ok(())
+}
+
+/// ホストの `~/.codex/auth.json`(と存在すれば `config.toml`)を、
+/// **auth store**(`<config_dir>/codex-auth/`、host-only・コンテナには一切
+/// マウントしない)を経由して **per-container ステージ**
+/// (`<runtime_dir>/codex/`)へ反映し、そのステージのパスを返す。呼び出し元は
+/// このパスをコンテナへ `/home/vibepod/.codex` として **rw** マウントする(codex が
+/// トークンリフレッシュ時に auth.json を書き換えるため。コピーなのでホスト原本には
+/// 影響しない — `.claude.json` と同じパターン)。
+///
+/// **新アーキテクチャ(round 10、「見せる領域」と「永続化する領域」の分離)**:
+///
+/// - コンテナに見せる領域は per-container ステージのみ。codex がステージへ
+///   書き込む実行データ(history/sessions/cache 等)はこのコンテナ専用領域に
+///   閉じ、他コンテナからは不可視。disposable 実行(`--new` / worktree)の
+///   終了処理がステージごと `runtime_dir` を `remove_dir_all` しても、それは
+///   単なるスナップショットの破棄であり問題ない(round 4 で懸念していた
+///   「唯一の有効コピーが失われる」問題は、認証の永続化を auth store 側に
+///   分離したことで解消した)。
+/// - 永続化する領域は auth store のみで、**コンテナには一切マウントしない**。
+///   ホストプロセス(この関数と `sync_codex_stage_to_store`)だけが読み書きする。
+///
+/// 同期は host → store → stage の順に 2 ホップで行う(`sync_codex_entries_into`
+/// を host entries→store、store entries→stage の 2 回呼ぶ)。run 後にコンテナが
+/// ステージ内の `auth.json` をリフレッシュした場合の store への書き戻しは、
+/// コンテナ停止処理・cleanup 前に呼ばれる `sync_codex_stage_to_store` が担う
+/// (強制終了(kill -9 等)でこの書き戻しが走らなかった場合、直近のリフレッシュは
+/// 失われうるが、ホストで codex 再ログインすれば回復できる、accepted risk)。
+///
+/// `auth.json` が存在しない場合は `None` を返し、codex 注入をスキップする
+/// (vibepod 自体は動作継続するが、コンテナ内で codex レビューは使えない)。
+/// エラーの握りつぶし禁止のルールに従い、この場合は stderr に理由を明示する。
+/// このとき store・ステージ双方の残置物を全消去する(過去の run でどちらかに
+/// 残っていた認証情報が、既存コンテナの bind mount 経由で使われ続けたり、
+/// 次回 store→stage 同期で復活したりしないようにするため)。
+///
+/// `config.toml` のみ無く `auth.json` はある場合は、警告なしで auth.json だけ
+/// コピーして続行する(`config.toml` 省略は codex のデフォルト設定を使う正常な
+/// 運用パターンのため)。
+///
+/// **`auth.json` は「新しい方を保持」する**(codex レビュー round 3 P1、両ホップに
+/// 適用): ステージ(または store)済み `auth.json` の mtime がコピー元より新しければ、
+/// コンテナ内 codex がリフレッシュしたものとみなしコピーをスキップする
+/// (`should_keep_staged_auth` 参照)。`config.toml` は認証情報ではなく設定ファイルの
+/// ため、この特例の対象外であり常にホスト側で上書きする。
+///
+/// 関数本体全体(リコンサイル開始〜全コピー完了、両ホップとも)は
+/// `CodexStageLock`(`<config_dir>/codex.lock`)による排他区間内で実行される
+/// (codex レビュー round 7 P1、round 10 で対象を auth store に付け替え)。
+/// store は `prepare_codex_mount` と `sync_codex_stage_to_store` の双方から
+/// 触られるため、両方をこのロックで直列化する。
+pub fn prepare_codex_mount(
+    home: &std::path::Path,
+    config_dir: &std::path::Path,
+    runtime_dir: &std::path::Path,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    // round 7 P1 / round 10: リコンサイル開始から全コピー完了まで(この関数の
+    // 残り全体、early return を含むすべての return パス、host→store と
+    // store→stage の両ホップ)を排他区間にする。ロックガードは関数を抜ける
+    // とき(どの return パスでも)に drop され、解放される。
+    let _stage_lock = acquire_codex_stage_lock(config_dir)?;
+
+    let host_codex_dir = home.join(".codex");
+    let host_entries = host_codex_stage_entries(&host_codex_dir);
+
+    let store_dir = config_dir.join("codex-auth");
+    let stage_dir = runtime_dir.join("codex");
+
+    let has_auth = host_entries.iter().any(|(_, name)| *name == "auth.json");
+    if !has_auth {
+        // P1: ホストの auth.json が無い(未認証 or 取り消し済み)。過去の run で
+        // store・ステージいずれかに残っている認証情報が、既存コンテナの
+        // bind mount 経由で使われ続けたり、次回同期で復活したりしないよう、
+        // ディレクトリ自体は残したまま中身だけ両方とも全消去する(keep が空 =
+        // allowlist 全ファイルが削除対象)。
+        reconcile_codex_stage_dir(&store_dir, &[]).with_context(|| {
+            format!(
+                "Failed to clear stale codex assets in auth store {}",
+                store_dir.display()
+            )
+        })?;
+        reconcile_codex_stage_dir(&stage_dir, &[]).with_context(|| {
+            format!(
+                "Failed to clear stale codex assets in stage {}",
+                stage_dir.display()
+            )
+        })?;
+        eprintln!(
+            "codex auth not found (~/.codex/auth.json); codex review is unavailable in this container"
+        );
+        return Ok(None);
+    }
+
+    // Hop 1: host -> store.
+    sync_codex_entries_into(&host_entries, &store_dir)
+        .with_context(|| format!("Failed to sync codex auth store {}", store_dir.display()))?;
+
+    // Hop 2: store -> stage. 直前の hop で store には必ず auth.json が入って
+    // いるので、store 側の実体を再列挙してそのままステージへ反映する。
+    let store_entries = host_codex_stage_entries(&store_dir);
+    sync_codex_entries_into(&store_entries, &stage_dir)
+        .with_context(|| format!("Failed to sync codex stage {}", stage_dir.display()))?;
+
+    Ok(Some(stage_dir))
+}
+
+/// per-container ステージ(`<runtime_dir>/codex/`)の `auth.json` を、
+/// **auth store**(`<config_dir>/codex-auth/`)へ同期する(codex レビュー
+/// round 10、run 後同期)。
+///
+/// コンテナ内 codex はステージ(rw マウント経由)の `auth.json` をトークン
+/// リフレッシュ時に書き換えることがある。ステージは disposable cleanup
+/// (`runtime_dir` の `remove_dir_all`)で消える前提の使い捨て領域なので、
+/// リフレッシュされたトークンを永続化する唯一の経路が、コンテナ停止後・
+/// cleanup 前にこの関数を呼んでステージから store へ書き戻すことである。
+///
+/// 呼び出し順は `interactive.rs` / `prompt.rs` の両方で、コンテナ exec 完了後、
+/// disposable/non-disposable いずれの cleanup 分岐(disposable なら
+/// `remove_dir_all(&ctx.runtime_dir)` でステージごと削除、non-disposable なら
+/// `docker stop`)よりも**前**でなければならない。cleanup が先に走ると、
+/// 同期元のステージ自体が消えてしまう。
+///
+/// `config.toml` はコンテナが一切書き換えないファイルなので、ここでは
+/// `auth.json` のみを扱う。
+///
+/// **TOCTOU 対策(codex レビュー round 10 差し戻し、Critical)**: この関数の
+/// コピー元(`stage_auth`)は、呼び出し時点でまだ生きているコンテナが rw
+/// マウント経由でいつでも書き換えられる untrusted な入力である —
+/// `prepare_codex_mount` 側の各種防御はすべて「dst(ステージ/store)が
+/// untrusted、src(ホストの `~/.codex/` または host-only store)は信頼できる」
+/// 前提だったが、この関数は逆に **src がコンテナ制御下にある**。型チェック
+/// (symlink 判定)・mtime 取得・内容読み取りを別々の path 解決で行うと、
+/// チェックと読み取りの間の窓でコンテナが `stage_auth` をホスト任意パス
+/// (例 `~/.ssh/id_rsa`)への symlink に差し替え、その内容が store に
+/// 取り込まれてしまう(次回 run で当該コンテナへ再マウントされ漏洩する)。
+/// これを防ぐため、`sync_codex_stage_auth_via_fd`(unix 実装)が
+/// `stage_auth` を `O_NOFOLLOW | O_NONBLOCK` で一度だけ開き、以降の
+/// fstat(mtime・file_type)・内容読み取りをすべて同一 fd 経由で行う。open
+/// 自体が symlink なら `ELOOP` で失敗するため、「symlink でないことの確認」
+/// と「その後の読み取り」が同一 fd で不可分になり、開いた後にコンテナが
+/// symlink へ差し替えてもこの fd は元の inode(通常ファイル)を指し続ける —
+/// チェックと act が同一 fd で行われることで TOCTOU の窓が構造的に消える
+/// (`enforce_staged_permissions` が dst の chmod に対して行っている防御と
+/// 同型を、こちらは src の read に適用したもの)。
+///
+/// 失敗時は `.with_context` 付きで呼び出し元へ伝播する。呼び出し元
+/// (`interactive.rs` / `prompt.rs`)は、この同期の失敗で成功した run 自体を
+/// 失敗扱いにしたり cleanup をブロックしたりしない方針のため、エラーを
+/// stderr に warning として出力してから通常の cleanup を継続する(エラー
+/// パスの握りつぶし禁止ルールに従い、`.ok()` で無言に捨てはしない)。
+pub fn sync_codex_stage_to_store(
+    runtime_dir: &std::path::Path,
+    config_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    // store は prepare_codex_mount と同じロックで直列化する(auth store は
+    // 両関数から触られる全プロセス共有のディレクトリのため)。
+    let _stage_lock = acquire_codex_stage_lock(config_dir)?;
+
+    let stage_auth = runtime_dir.join("codex").join("auth.json");
+    let store_dir = config_dir.join("codex-auth");
+    let store_auth = store_dir.join("auth.json");
+
+    #[cfg(unix)]
+    {
+        sync_codex_stage_auth_via_fd(&stage_auth, &store_dir, &store_auth)
+    }
+    #[cfg(not(unix))]
+    {
+        // 非 unix 環境では symlink 検出込みのアトミックな open(O_NOFOLLOW)
+        // が使えないため、path ベースの二段階チェックに留める。本
+        // プロジェクトは事実上 unix(Docker Desktop / OrbStack on
+        // macOS・Linux)専用であり、他の TOCTOU 対策
+        // (`enforce_staged_permissions` の fd chmod、`CodexStageLock` の
+        // flock)も同様に unix 限定であるため、既存の方針に合わせる。
+        remove_dst_if_not_regular_file(&stage_auth)?;
+        let stage_meta = match std::fs::symlink_metadata(&stage_auth) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to stat {}", stage_auth.display()))
+            }
+        };
+        let stage_mtime = stage_meta
+            .modified()
+            .with_context(|| format!("Failed to read mtime of {}", stage_auth.display()))?;
+
+        let store_mtime = match std::fs::symlink_metadata(&store_auth) {
+            Ok(meta) if meta.file_type().is_file() => Some(
+                meta.modified()
+                    .with_context(|| format!("Failed to read mtime of {}", store_auth.display()))?,
+            ),
+            _ => None,
+        };
+        // store 側の既存コピーは、ステージ側が厳密に新しい場合だけ上書きする
+        // (run 後同期の意図。mtime 同値なら store を保持=コピーしない)。
+        let should_copy = store_mtime.is_none_or(|m| stage_mtime > m);
+        if !should_copy {
+            return Ok(());
+        }
+
+        std::fs::create_dir_all(&store_dir)
+            .with_context(|| format!("Failed to create auth store {}", store_dir.display()))?;
+        copy_codex_asset_atomically(&stage_auth, &store_auth)?;
+        Ok(())
+    }
+}
+
+/// `sync_codex_stage_to_store` の unix 実装本体。`stage_auth`(コンテナ制御下、
+/// untrusted)を `O_NOFOLLOW | O_NONBLOCK` で一度だけ開き、以降の型・mtime
+/// 判定とコピー元内容の読み取りをすべて同一 fd から行うことで、開いた後に
+/// コンテナが `stage_auth` を symlink へ差し替える TOCTOU を構造的に無効化
+/// する(詳細は `sync_codex_stage_to_store` のドキュメント参照)。
+#[cfg(unix)]
+fn sync_codex_stage_auth_via_fd(
+    stage_auth: &std::path::Path,
+    store_dir: &std::path::Path,
+    store_auth: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(stage_auth)
+    {
+        Ok(file) => file,
+        // ステージに auth.json が元々無かった(codex 未使用のコンテナ)。
+        // 同期対象が無いだけの正常系であり、store には一切触れない。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // コンテナが symlink に差し替えていた場合の open(2) の挙動。辿らず
+        // 検出できた時点でこの防御の目的は達成しているため、内容には一切
+        // 触れずに削除して警告する(store 無傷を保証)。実際の削除処理は
+        // `remove_dst_if_not_regular_file`(symlink_metadata による再判定を
+        // 含む)に委ねる — 削除は内容を読まない操作なので、この委譲で新たな
+        // TOCTOU は生じない。
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            eprintln!(
+                "staged codex auth.json was a symlink at sync time (possible container \
+                 tampering); removed without following it, auth store left untouched: {}",
+                stage_auth.display()
+            );
+            remove_dst_if_not_regular_file(stage_auth)?;
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to open {} for sync", stage_auth.display()))
+        }
+    };
+
+    let meta = file.metadata().with_context(|| {
+        format!(
+            "Failed to stat opened fd for {} before sync",
+            stage_auth.display()
+        )
+    })?;
+
+    if !meta.file_type().is_file() {
+        // O_NOFOLLOW は symlink を弾くが、ディレクトリ等の他の非通常ファイル
+        // はそのまま開けてしまう。symlink と同じ方針で、内容には触れず削除
+        // して警告する。
+        drop(file);
+        eprintln!(
+            "staged codex auth.json was not a regular file at sync time (possible container \
+             tampering); removed, auth store left untouched: {}",
+            stage_auth.display()
+        );
+        remove_dst_if_not_regular_file(stage_auth)?;
+        return Ok(());
+    }
+
+    // ここまでで stage_auth は「open した fd の時点で」通常ファイルである
+    // ことが保証されている。以降の mtime・内容取得は path の再解決を一切
+    // 行わず、この fd(またはこの fd から読み取ったバイト列)のみを使う。
+    let stage_mtime = meta
+        .modified()
+        .with_context(|| format!("Failed to read mtime of {}", stage_auth.display()))?;
+
+    let store_mtime = match std::fs::symlink_metadata(store_auth) {
+        Ok(meta) if meta.file_type().is_file() => Some(
+            meta.modified()
+                .with_context(|| format!("Failed to read mtime of {}", store_auth.display()))?,
+        ),
+        // store 側が存在しない、または(あり得ないはずだが)通常ファイルで
+        // ない場合は「store には有効な既存コピーが無い」として扱い、必ず
+        // コピーする。store は host-only なので、この分岐がコンテナ由来の
+        // 改ざんを表すことはない。
+        _ => None,
+    };
+
+    // store 側の既存コピーは、ステージ側が厳密に新しい場合だけ上書きする
+    // (run 後同期の意図。mtime 同値なら store を保持=コピーしない)。
+    let should_copy = store_mtime.is_none_or(|m| stage_mtime > m);
+
+    if !should_copy {
+        return Ok(());
+    }
+
+    // 内容もこの時点で同一 fd から読む(symlink 判定に使った fd をそのまま
+    // 使い回すため、path 経由の再オープンを一切行わない — これが本関数の
+    // TOCTOU 対策の核心: 「symlink でない」という判定と「その内容を読む」
+    // 行為が不可分になる)。
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .with_context(|| format!("Failed to read staged {} for sync", stage_auth.display()))?;
+
+    std::fs::create_dir_all(store_dir)
+        .with_context(|| format!("Failed to create auth store {}", store_dir.display()))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(store_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to set permissions on {}", store_dir.display()))?;
+    }
+
+    // 読み取った内容を、store ディレクトリ内に新規作成した一意名の一時
+    // ファイルへいったん書き出す。このファイルは今この関数が作ったばかりで
+    // 名前を事前に知りようがなく、かつ store_dir はどのコンテナにも
+    // マウントされないため、コンテナがこれを差し替える余地はない(=信頼
+    // できる src)。その上で `copy_codex_asset_atomically` の既存のアトミック
+    // 置換・0600 強制・dst(store)側 tamper 検査ロジックをそのまま再利用して
+    // store へ反映する — この関数の役割は「untrusted な src を安全に読む」
+    // ことに専念させ、「trusted な内容を安全に dst へ書く」ロジックは
+    // 重複実装せず既存の監査済みコードに委ねる。
+    let content_tmp = tempfile::NamedTempFile::new_in(store_dir).with_context(|| {
+        format!(
+            "Failed to create a unique temp file in {} for syncing {}",
+            store_dir.display(),
+            store_auth.display()
+        )
+    })?;
+    std::fs::write(content_tmp.path(), &contents).with_context(|| {
+        format!(
+            "Failed to write staged content into temp file {}",
+            content_tmp.path().display()
+        )
+    })?;
+
+    copy_codex_asset_atomically(content_tmp.path(), store_auth)?;
+    // copy_codex_asset_atomically は実際にコピーを行った経路では必ず 0600
+    // を設定するが、store の内容が既に byte-for-byte 一致する場合は早期
+    // リターンして chmod を行わない(round 8 P2-2)。store は host-only で
+    // 通常はこれ以前に権限が緩む理由が無いが、「経路によらず必ず 0600」と
+    // いう round 9 の原則を dst=store 側にも一貫して適用するため、ここでも
+    // 念のため強制する。
+    enforce_staged_permissions(store_dir, &[(store_auth.to_path_buf(), "auth.json")])?;
+
+    Ok(())
 }
 
 /// ステージ内の allowlist 対象ファイル(`entries` に列挙された名前、通常
@@ -1106,6 +1409,21 @@ fn enforce_staged_permissions(
         let _ = (codex_stage_dir, entries);
     }
     Ok(())
+}
+
+/// codex ステージ(rw マウント経由でコンテナがリフレッシュした可能性がある
+/// auth.json)を host-only の auth store へ書き戻す。disposable cleanup が
+/// ステージごと `runtime_dir` を削除する前に必ず実行する必要があるため、
+/// `interactive.rs` / `prompt.rs` の両方で、cleanup 分岐(disposable なら
+/// `remove_dir_all(&ctx.runtime_dir)`、non-disposable なら `docker stop`)
+/// より**前**でこの関数を呼ぶこと。同期の失敗は成功した run 自体を失敗に
+/// しないが、握りつぶさず stderr に警告する。
+pub(super) fn sync_codex_stage_after_run(ctx: &RunContext) {
+    if ctx.codex_dir.is_some() {
+        if let Err(e) = sync_codex_stage_to_store(&ctx.runtime_dir, &ctx.config_dir) {
+            eprintln!("warning: failed to sync codex auth back to host store: {e:#}");
+        }
+    }
 }
 
 pub(super) fn build_container_config(
