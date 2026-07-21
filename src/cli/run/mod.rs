@@ -568,7 +568,19 @@ pub fn host_codex_stage_entries(
 ///
 /// 削除失敗・列挙失敗は `unwrap`/`expect` で握りつぶさず、どのパスの操作に
 /// 失敗したかを context に含めて呼び出し元へ伝播する。
-fn reconcile_codex_stage_dir(dir: &std::path::Path, keep: &[&str]) -> anyhow::Result<()> {
+///
+/// `location` は削除ログに出す人間可読なラベル(例: `"codex auth store"` /
+/// `"codex stage"`)。この関数は auth store・ステージ双方の掃除に使われる
+/// 共通処理だが、以前は常に「codex stage」固定文言でログ出力しており、
+/// 実際には auth store を掃除している場合でも「stage」と表示され運用者が
+/// 誤解する余地があった(Copilot レビュー指摘)。呼び出し元がどちらを
+/// 掃除しているかを明示させることで、削除ログだけで対象を特定できるように
+/// する。
+fn reconcile_codex_stage_dir(
+    dir: &std::path::Path,
+    keep: &[&str],
+    location: &str,
+) -> anyhow::Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
@@ -598,7 +610,7 @@ fn reconcile_codex_stage_dir(dir: &std::path::Path, keep: &[&str]) -> anyhow::Re
             std::fs::remove_file(&path)
                 .with_context(|| format!("Failed to remove stale {}", path.display()))?;
         }
-        eprintln!("removed stale codex stage entry not in allowlist: {name_str}");
+        eprintln!("removed stale {location} entry not in allowlist: {name_str}");
     }
     Ok(())
 }
@@ -924,9 +936,15 @@ fn acquire_codex_stage_lock(config_dir: &std::path::Path) -> anyhow::Result<Code
 ///
 /// 呼び出し元(`prepare_codex_mount`)がロック(`CodexStageLock`)を保持した
 /// 状態でこの関数を呼ぶことを前提とする(この関数自身はロックを取らない)。
+///
+/// `location` は内部で呼ぶ `reconcile_codex_stage_dir` にそのまま渡す削除
+/// ログ用ラベル(`CODEX_AUTH_STORE_LOCATION_LABEL` / `CODEX_STAGE_LOCATION_LABEL`
+/// のいずれか)。同じ場所を指す呼び出しは常に同じ文言になるよう、呼び出し元は
+/// この2定数のみを使うこと。
 fn sync_codex_entries_into(
     entries: &[(std::path::PathBuf, &'static str)],
     dst_dir: &std::path::Path,
+    location: &str,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst_dir)
         .with_context(|| format!("Failed to create {}", dst_dir.display()))?;
@@ -941,7 +959,7 @@ fn sync_codex_entries_into(
     // 削除された)が dst に残っていると無期限に使われ続けるため、コピー前に
     // 差分を削除しておく。
     let keep_names: Vec<&str> = entries.iter().map(|(_, name)| *name).collect();
-    reconcile_codex_stage_dir(dst_dir, &keep_names).with_context(|| {
+    reconcile_codex_stage_dir(dst_dir, &keep_names, location).with_context(|| {
         format!(
             "Failed to reconcile stale codex assets in {}",
             dst_dir.display()
@@ -1047,6 +1065,16 @@ fn sync_codex_entries_into(
 /// (codex レビュー round 7 P1、round 10 で対象を auth store に付け替え)。
 /// store は `prepare_codex_mount` と `sync_codex_stage_to_store` の双方から
 /// 触られるため、両方をこのロックで直列化する。
+///
+/// 削除ログ(`reconcile_codex_stage_dir`)の対象ラベル。auth store
+/// (`<config_dir>/codex-auth/`)とステージ(`<runtime_dir>/codex/`)は削除の
+/// 意味が異なる(前者は永続化領域の掃除、後者は使い捨て領域の掃除)ため、
+/// この関数内のすべての呼び出しをこの2定数のどちらかに統一し、同じ場所を
+/// 指す呼び出しが常に同じ文言でログに出るようにする(Copilot レビュー指摘、
+/// PR #56)。
+const CODEX_AUTH_STORE_LOCATION_LABEL: &str = "codex auth store";
+const CODEX_STAGE_LOCATION_LABEL: &str = "codex stage";
+
 pub fn prepare_codex_mount(
     home: &std::path::Path,
     config_dir: &std::path::Path,
@@ -1071,18 +1099,22 @@ pub fn prepare_codex_mount(
         // bind mount 経由で使われ続けたり、次回同期で復活したりしないよう、
         // ディレクトリ自体は残したまま中身だけ両方とも全消去する(keep が空 =
         // allowlist 全ファイルが削除対象)。
-        reconcile_codex_stage_dir(&store_dir, &[]).with_context(|| {
-            format!(
-                "Failed to clear stale codex assets in auth store {}",
-                store_dir.display()
-            )
-        })?;
-        reconcile_codex_stage_dir(&stage_dir, &[]).with_context(|| {
-            format!(
-                "Failed to clear stale codex assets in stage {}",
-                stage_dir.display()
-            )
-        })?;
+        reconcile_codex_stage_dir(&store_dir, &[], CODEX_AUTH_STORE_LOCATION_LABEL).with_context(
+            || {
+                format!(
+                    "Failed to clear stale codex assets in auth store {}",
+                    store_dir.display()
+                )
+            },
+        )?;
+        reconcile_codex_stage_dir(&stage_dir, &[], CODEX_STAGE_LOCATION_LABEL).with_context(
+            || {
+                format!(
+                    "Failed to clear stale codex assets in stage {}",
+                    stage_dir.display()
+                )
+            },
+        )?;
         eprintln!(
             "codex auth not found (~/.codex/auth.json); codex review is unavailable in this container"
         );
@@ -1090,13 +1122,13 @@ pub fn prepare_codex_mount(
     }
 
     // Hop 1: host -> store.
-    sync_codex_entries_into(&host_entries, &store_dir)
+    sync_codex_entries_into(&host_entries, &store_dir, CODEX_AUTH_STORE_LOCATION_LABEL)
         .with_context(|| format!("Failed to sync codex auth store {}", store_dir.display()))?;
 
     // Hop 2: store -> stage. 直前の hop で store には必ず auth.json が入って
     // いるので、store 側の実体を再列挙してそのままステージへ反映する。
     let store_entries = host_codex_stage_entries(&store_dir);
-    sync_codex_entries_into(&store_entries, &stage_dir)
+    sync_codex_entries_into(&store_entries, &stage_dir, CODEX_STAGE_LOCATION_LABEL)
         .with_context(|| format!("Failed to sync codex stage {}", stage_dir.display()))?;
 
     Ok(Some(stage_dir))

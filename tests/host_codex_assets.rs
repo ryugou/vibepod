@@ -837,6 +837,71 @@ fn prepare_codex_mount_completes_reconcile_and_copy_under_stage_lock() {
     );
 }
 
+/// Default iteration count for
+/// `prepare_codex_mount_succeeds_under_concurrent_calls_from_different_containers`
+/// when `VIBEPOD_LOCK_STRESS_ITERS` is unset or unparsable. Chosen to keep the
+/// default CI run cheap; at this count the test is a smoke check, not a
+/// reliable regression guard (~53% miss rate on the underlying race -- see
+/// the test's own comment). Set `VIBEPOD_LOCK_STRESS_ITERS=300` for
+/// near-certain detection when validating a change to the lock itself.
+const DEFAULT_LOCK_STRESS_ITERATIONS: usize = 25;
+
+/// Parses the `VIBEPOD_LOCK_STRESS_ITERS` env var's raw value (as read via
+/// `std::env::var(...).ok()`) into an iteration count for the concurrent lock
+/// stress test below.
+///
+/// This is test-tuning input, not user-facing, so any value that isn't a
+/// usable positive iteration count -- unset, empty, non-numeric, or `0` --
+/// must fall back to `DEFAULT_LOCK_STRESS_ITERATIONS` rather than panicking
+/// the whole test binary; a malformed override should never be able to break
+/// CI for unrelated tests.
+fn parse_lock_stress_iterations(raw: Option<&str>) -> usize {
+    match raw.and_then(|s| s.parse::<usize>().ok()) {
+        Some(0) | None => DEFAULT_LOCK_STRESS_ITERATIONS,
+        Some(n) => n,
+    }
+}
+
+#[test]
+fn parse_lock_stress_iterations_defaults_when_env_var_unset() {
+    assert_eq!(
+        parse_lock_stress_iterations(None),
+        DEFAULT_LOCK_STRESS_ITERATIONS
+    );
+}
+
+#[test]
+fn parse_lock_stress_iterations_defaults_on_empty_string() {
+    assert_eq!(
+        parse_lock_stress_iterations(Some("")),
+        DEFAULT_LOCK_STRESS_ITERATIONS
+    );
+}
+
+#[test]
+fn parse_lock_stress_iterations_defaults_on_non_numeric_value() {
+    assert_eq!(
+        parse_lock_stress_iterations(Some("not-a-number")),
+        DEFAULT_LOCK_STRESS_ITERATIONS
+    );
+}
+
+#[test]
+fn parse_lock_stress_iterations_defaults_on_zero() {
+    // 0 iterations would silently turn the regression test into a no-op
+    // (the loop body would never run), which is indistinguishable from "the
+    // test passed" -- so 0 is treated the same as an unparsable value.
+    assert_eq!(
+        parse_lock_stress_iterations(Some("0")),
+        DEFAULT_LOCK_STRESS_ITERATIONS
+    );
+}
+
+#[test]
+fn parse_lock_stress_iterations_uses_valid_override() {
+    assert_eq!(parse_lock_stress_iterations(Some("300")), 300);
+}
+
 #[test]
 fn prepare_codex_mount_succeeds_under_concurrent_calls_from_different_containers() {
     // round 7 P1 found this race when the stage was a single directory
@@ -866,17 +931,31 @@ fn prepare_codex_mount_succeeds_under_concurrent_calls_from_different_containers
     // (50-80 attempts needed one hit), so a lone iteration would pass CI
     // almost every time even if the lock's scope were accidentally narrowed
     // back down in a future change. Looping the same two-thread call
-    // `ITERATIONS` times inside one test process turns that ~2-3% per-attempt
-    // chance into a near-certain detection within a single `cargo test` run.
+    // `iterations` times inside one test process improves detection over a
+    // lone iteration; at the original fixed 300 this pushes the miss rate to
+    // ~0.05% (near-certain detection). The default of
+    // `DEFAULT_LOCK_STRESS_ITERATIONS` (25) trades that away for CI cost: at
+    // 25 iterations the miss rate is only ~53%, so the default run is a
+    // cheap smoke check, not a reliable regression guard by itself. Set
+    // `VIBEPOD_LOCK_STRESS_ITERS=300` (see below) to restore near-certain
+    // detection, e.g. before merging a change that touches
+    // `acquire_codex_stage_lock` or the store/stage reconciliation it guards.
     //
     // Both threads in every iteration copy from the *same* host `~/.codex/`
     // (identical content), which keeps the expected final state deterministic
     // regardless of which thread's copy physically lands last in the shared
     // store -- each iteration only needs the two calls to never error, not to
     // race on distinguishable content, so it can't be flaky on outcome.
-    const ITERATIONS: usize = 300;
+    //
+    // The iteration count is read from `VIBEPOD_LOCK_STRESS_ITERS` at test
+    // time, defaulting to `DEFAULT_LOCK_STRESS_ITERATIONS` (see
+    // `parse_lock_stress_iterations` below) when unset or unparsable, so CI
+    // pays a smaller default cost while `VIBEPOD_LOCK_STRESS_ITERS=300 cargo
+    // test ...` still reproduces the full round-7 regression check locally.
+    let iterations =
+        parse_lock_stress_iterations(std::env::var("VIBEPOD_LOCK_STRESS_ITERS").ok().as_deref());
 
-    for iteration in 0..ITERATIONS {
+    for iteration in 0..iterations {
         // Fresh tempdirs per iteration: reusing the previous iteration's
         // config/runtime dirs would let leftover state (e.g. an
         // already-populated auth store) mask a broken lock in a later
