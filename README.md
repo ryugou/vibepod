@@ -179,6 +179,39 @@ VibePod resolves them via 1Password CLI before passing to the container:
 vibepod run --env-file .env.template
 ```
 
+#### Codex review inside the container
+
+The container image bundles the `codex` CLI (musl static binary, no node/npm
+required) so the implementation-delegation flow can run a `codex` review
+before code leaves the container.
+
+Prerequisites:
+
+- You are logged into codex on the host (`~/.codex/auth.json` exists).
+
+VibePod carries in exactly two files from your host `~/.codex/` — nothing
+else:
+
+- `~/.codex/auth.json`
+- `~/.codex/config.toml` (if present)
+
+This is an **allowlist**, same policy as `~/.claude/`: `history.jsonl`,
+`goals_*.sqlite`, and `cache/` are never copied in, both because they are
+unnecessary for running `codex` and because they may contain sensitive data.
+The files are copied (not bind-mounted read-only) into a per-container
+runtime directory and mounted **read-write** at `/home/vibepod/.codex`,
+because `codex` rewrites `auth.json` on token refresh — the same
+copy-then-mount pattern used for `~/.claude.json`. The host originals are
+never touched.
+
+If `~/.codex/auth.json` is missing, VibePod prints a note to stderr and
+continues without codex support in that container — this is not a fatal
+error.
+
+The `codex` binary itself is **not** auto-updated at runtime (unlike Claude
+Code). To pick up a newer `codex` release, rebuild the image with
+`vibepod init --rebuild`.
+
 ## Security Model
 
 VibePod provides 3-layer isolation:
@@ -191,6 +224,7 @@ VibePod provides 3-layer isolation:
    - `~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/`, `~/.claude/specs/` (read-only, when present): your personal Claude Code instructions, skills, agents, and specs. This is an **allowlist** — session and history data (`sessions/`, `projects/`, `history.jsonl`, `backups/`, `file-history/`, `shell-snapshots/`, `todos/`) is never mounted
    - `~/.claude/plugins/` (read-only, when present): your installed Claude Code plugins — mounted at both `/home/vibepod/.claude/plugins` and the host absolute path to resolve `installed_plugins.json` entries
    - `~/.claude/settings.json` via **sanitized copy** (read-only, when present): a per-container copy with `hooks` and `statusLine` stripped, written to `~/.config/vibepod/runtime/<container>/settings.json`
+   - `~/.codex/auth.json` and `~/.codex/config.toml` (if present) via **temporary copy** (read-write, when `auth.json` exists): written to `~/.config/vibepod/runtime/<container>/codex/` and mounted at `/home/vibepod/.codex`; read-write because `codex` rewrites `auth.json` on token refresh
    - `--mount`-specified paths (read-only): additional host paths you explicitly opt in
    - `GH_TOKEN` injected from `gh auth token` when available, for GitHub CLI access inside the container
 3. **Git safety net** — your project is git-managed, so any unwanted changes can be reverted with `git reset --hard`

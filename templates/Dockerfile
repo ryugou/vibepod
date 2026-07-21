@@ -23,6 +23,24 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 USER root
 RUN mkdir -p /workspace && chown vibepod:vibepod /workspace
 
+# codex CLI(musl 静的バイナリ、node/npm 不要)。実行時自動更新はしない。
+# 更新は `vibepod init --rebuild` で行う(README 参照)。
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      arm64) codex_arch=aarch64 ;; \
+      amd64) codex_arch=x86_64 ;; \
+      *) echo "codex: unsupported architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    asset="codex-${codex_arch}-unknown-linux-musl.tar.gz"; \
+    url="https://github.com/openai/codex/releases/latest/download/${asset}"; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "$url" -o "${tmp_dir}/${asset}"; \
+    tar -xzf "${tmp_dir}/${asset}" -C "${tmp_dir}"; \
+    install -m 0755 "${tmp_dir}/codex-${codex_arch}-unknown-linux-musl" /usr/local/bin/codex; \
+    rm -rf "${tmp_dir}"
+RUN codex --version
+
 USER vibepod
 WORKDIR /workspace
 

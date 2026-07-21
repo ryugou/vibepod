@@ -25,6 +25,7 @@ fn base_config() -> ContainerConfig {
         container_name: "vibepod-test-abc123".to_string(),
         workspace_path: "/tmp/workspace".to_string(),
         claude_json: None,
+        codex_dir: None,
         gitconfig: None,
         env_vars: vec![],
         network_disabled: false,

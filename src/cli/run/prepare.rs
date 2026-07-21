@@ -619,6 +619,11 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         None
     };
 
+    // codex CLI 認証(~/.codex/auth.json + config.toml)を per-container
+    // runtime ディレクトリへコピーする。auth.json が無ければ None(codex
+    // レビューはこのコンテナでは使えないが、vibepod 自体は継続動作する)。
+    let codex_dir = super::prepare_codex_mount(&home, &config_dir, &container_name)?;
+
     // Parse --mount arguments
     let mut extra_mounts = Vec::new();
     for arg in &opts.mount {
@@ -658,6 +663,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         exec_env_vars,
         setup_cmd,
         temp_claude_json,
+        codex_dir,
         runtime_dir,
         config_dir,
         global_config,

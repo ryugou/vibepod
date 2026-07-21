@@ -139,6 +139,10 @@ pub(super) struct RunContext {
     pub(super) exec_env_vars: Vec<String>,
     pub(super) setup_cmd: Option<String>,
     pub(super) temp_claude_json: Option<std::path::PathBuf>,
+    /// `~/.codex/` の allowlist(auth.json / config.toml)をコピーした
+    /// per-container ディレクトリ(`<runtime_dir>/codex/`)。存在しない場合
+    /// (auth.json 欠如)は `None` — コンテナには codex 認証を注入しない。
+    pub(super) codex_dir: Option<std::path::PathBuf>,
     /// Per-container runtime directory under
     /// `<config_dir>/runtime/<container_name>/`. All vibepod-managed runtime
     /// files for this container (temp claude.json copy, sanitized
@@ -441,6 +445,91 @@ pub fn prepare_sanitized_settings_mount(
     )))
 }
 
+/// ホストの `~/.codex/` 配下でコンテナに持ち込んでよい資産の **allowlist**。
+/// `auth.json` と `config.toml` の 2 つのみ。
+///
+/// **意図的に除外しているもの**: `history.jsonl` / `goals_*.sqlite` / `cache/` 等。
+/// 機微・不要データであり、codex レビューの実行に一切必要ないため。
+pub const HOST_CODEX_ALLOWLIST: &[&str] = &["auth.json", "config.toml"];
+
+/// `codex_dir`(= `<home>/.codex`)配下で、allowlist に載っていてかつ実際に
+/// 存在するファイルを `(絶対パス, ファイル名)` で返す。存在しないものは
+/// 黙ってスキップする(`config.toml` が無いホストは異常ではなく通常の運用)。
+pub fn host_codex_stage_entries(
+    codex_dir: &std::path::Path,
+) -> Vec<(std::path::PathBuf, &'static str)> {
+    let mut entries = Vec::new();
+    for name in HOST_CODEX_ALLOWLIST {
+        let path = codex_dir.join(name);
+        if path.is_file() {
+            entries.push((path, *name));
+        }
+    }
+    entries
+}
+
+/// ホストの `~/.codex/auth.json`(と存在すれば `config.toml`)を
+/// `<config_dir>/runtime/<container_name>/codex/` にコピーし、そのディレクトリの
+/// パスを返す。呼び出し元はこのパスをコンテナへ `/home/vibepod/.codex` として
+/// **rw** マウントする(codex がトークンリフレッシュ時に auth.json を書き換える
+/// ため。コピーなのでホスト原本には影響しない — `.claude.json` と同じパターン)。
+///
+/// `auth.json` が存在しない場合は `None` を返し、codex 注入をスキップする
+/// (vibepod 自体は動作継続するが、コンテナ内で codex レビューは使えない)。
+/// エラーの握りつぶし禁止のルールに従い、この場合は stderr に理由を明示する。
+///
+/// `config.toml` のみ無く `auth.json` はある場合は、警告なしで auth.json だけ
+/// コピーして続行する(`config.toml` 省略は codex のデフォルト設定を使う正常な
+/// 運用パターンのため)。
+pub fn prepare_codex_mount(
+    home: &std::path::Path,
+    config_dir: &std::path::Path,
+    container_name: &str,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let host_codex_dir = home.join(".codex");
+    let entries = host_codex_stage_entries(&host_codex_dir);
+
+    let has_auth = entries.iter().any(|(_, name)| *name == "auth.json");
+    if !has_auth {
+        eprintln!(
+            "codex auth not found (~/.codex/auth.json); codex review is unavailable in this container"
+        );
+        return Ok(None);
+    }
+
+    let runtime_codex_dir = config_dir
+        .join("runtime")
+        .join(container_name)
+        .join("codex");
+    std::fs::create_dir_all(&runtime_codex_dir)
+        .with_context(|| format!("Failed to create {}", runtime_codex_dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runtime_codex_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| {
+                format!(
+                    "Failed to set permissions on {}",
+                    runtime_codex_dir.display()
+                )
+            })?;
+    }
+
+    for (src, name) in &entries {
+        let dst = runtime_codex_dir.join(name);
+        std::fs::copy(src, &dst)
+            .with_context(|| format!("Failed to copy {} to {}", src.display(), dst.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("Failed to set permissions on {}", dst.display()))?;
+        }
+    }
+
+    Ok(Some(runtime_codex_dir))
+}
+
 pub(super) fn build_container_config(
     ctx: &RunContext,
     image: String,
@@ -453,6 +542,10 @@ pub(super) fn build_container_config(
         workspace_path: ctx.effective_workspace.clone(),
         claude_json: ctx
             .temp_claude_json
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        codex_dir: ctx
+            .codex_dir
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
         gitconfig: if gitconfig.exists() {
