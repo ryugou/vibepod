@@ -235,12 +235,28 @@ pub const HOST_CLAUDE_ALLOWLIST: &[(&str, bool)] = &[
 ///
 /// 存在しないものは黙ってスキップする（ホスト環境に `specs/` が無いのは
 /// 異常ではなく通常であり、エラーにする理由がない）。
+///
+/// **symlink の扱いは 2 段構え**（配下のコピーを行う `copy_host_dir_contents`
+/// と対になる方針）:
+///
+/// - **top-level エントリ自体**（`~/.claude/skills` そのものが symlink 等）は
+///   `is_dir()` / `is_file()` が symlink を追従するため、**意図的に追従を
+///   許容する**。dotfiles 管理でディレクトリごと symlink にする構成は一般的で、
+///   ユーザー自身の明示的な資産配置とみなせるため。
+/// - 一方、そのディレクトリ**配下**の symlink は `copy_host_dir_contents` が
+///   skip する。配下の symlink は「ユーザーが `~/.claude/` の外を指す個別
+///   ファイル」であり得て、無条件に追従すると外部の巨大ツリーや秘密を
+///   コンテナへ materialize してしまうため。
 pub fn host_claude_stage_entries(
     claude_dir: &std::path::Path,
 ) -> Vec<(std::path::PathBuf, &'static str)> {
     let mut entries = Vec::new();
     for (name, is_dir) in HOST_CLAUDE_ALLOWLIST {
         let path = claude_dir.join(name);
+        // is_dir()/is_file() follow symlinks: a top-level symlinked entry
+        // (a whole ~/.claude/skills symlinked elsewhere) is followed on
+        // purpose. Nested symlinks are handled separately (and skipped) in
+        // copy_host_dir_contents.
         let exists = if *is_dir {
             path.is_dir()
         } else {
@@ -251,6 +267,44 @@ pub fn host_claude_stage_entries(
         }
     }
     entries
+}
+
+/// template と host の `CLAUDE.md` を 1 ファイルに連結する。
+///
+/// 全公式バンドルが `CLAUDE.md` を同梱するため、ファイル単位の後勝ちコピー
+/// では host の `~/.claude/CLAUDE.md` が必ず失われる。要件「CLAUDE.md を
+/// 常にマウント」を満たすため、**template 本文を先頭、host 本文を後段**に
+/// 区切りヘッダを挟んで連結する。
+///
+/// - template を先頭に置くことで、他の staging 資産と同じ「衝突時は template
+///   優先」の順序を CLAUDE.md でも保つ（読み手はまず template の指示を読む）。
+/// - `settings.json` は権限境界なので連結すると review モードの安全性論拠
+///   (`permissions.deny`) が薄まるため決して連結しないが、`CLAUDE.md` は
+///   単なる指示テキストであり、host の個人指示を後段に足しても
+///   `permissions.deny` は無傷。よって連結してよい。
+///
+/// 区切りヘッダには由来（template 名 / host パス）を明記し、どちらの節が
+/// どこ由来かを人間が判別できるようにする。両方存在しない場合のみ `None`。
+pub fn merge_claude_md(
+    template: Option<&str>,
+    host: Option<&str>,
+    template_name: &str,
+) -> Option<String> {
+    match (template, host) {
+        (None, None) => None,
+        (Some(t), None) => Some(t.to_string()),
+        (None, Some(h)) => Some(h.to_string()),
+        (Some(t), Some(h)) => Some(format!(
+            "{template_body}\n\n\
+             <!-- ============================================================ -->\n\
+             <!-- Above: vibepod template '{template_name}' CLAUDE.md (takes precedence on conflict). -->\n\
+             <!-- Below: your host ~/.claude/CLAUDE.md (personal instructions). -->\n\
+             <!-- ============================================================ -->\n\n\
+             {host_body}",
+            template_body = t.trim_end(),
+            host_body = h.trim_start(),
+        )),
+    }
 }
 
 /// template mode で、ホストの `~/.claude/plugins` をマウント集合に合流させる。
@@ -278,6 +332,10 @@ pub fn merge_host_plugins_mounts(
         .iter()
         .any(|(_, container)| container == DEFAULT_PLUGINS_CONTAINER_PATH);
     if template_owns_plugins {
+        eprintln!(
+            "  Note: the template defines its own plugins/, so your host \
+             ~/.claude/plugins is not mounted (the template's plugin set takes precedence)."
+        );
         return;
     }
     template_mounts.extend(plugins_mount_entries(host_plugins, home));

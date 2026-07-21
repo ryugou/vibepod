@@ -135,7 +135,14 @@ fn stage(
     fs::create_dir_all(&template_dir).unwrap();
     build_template(&template_dir);
 
-    let staging = assemble_staging(&config_dir, &runtime_dir, &template_dir, home).unwrap();
+    let staging = assemble_staging(
+        &config_dir,
+        &runtime_dir,
+        &template_dir,
+        home,
+        "test-template",
+    )
+    .unwrap();
     (tmp, staging)
 }
 
@@ -168,17 +175,31 @@ fn template_mode_carries_host_assets_into_staging() {
 }
 
 #[test]
-fn template_file_wins_over_host_file_of_the_same_name() {
+fn template_claude_md_is_merged_above_host_claude_md() {
+    // CLAUDE.md is not a plain shadow like other files: template and host
+    // are concatenated so the host's personal instructions survive, with the
+    // template placed first (it takes precedence on conflict) and the host
+    // below a labeled separator.
     let (_home_tmp, home) = setup_home();
 
     let (_tmp, staging) = stage(&home, |t| {
         fs::write(t.join("CLAUDE.md"), "TEMPLATE_RULES").unwrap();
     });
 
-    assert_eq!(
-        fs::read_to_string(staging.join("CLAUDE.md")).unwrap(),
-        "TEMPLATE_RULES",
-        "template CLAUDE.md must shadow the host's"
+    let merged = fs::read_to_string(staging.join("CLAUDE.md")).unwrap();
+    assert!(
+        merged.contains("TEMPLATE_RULES"),
+        "template rules must be present, got: {merged}"
+    );
+    assert!(
+        merged.contains("HOST_RULES"),
+        "host rules must survive the merge, got: {merged}"
+    );
+    let t_pos = merged.find("TEMPLATE_RULES").unwrap();
+    let h_pos = merged.find("HOST_RULES").unwrap();
+    assert!(
+        t_pos < h_pos,
+        "template content must come before host content, got: {merged}"
     );
 }
 

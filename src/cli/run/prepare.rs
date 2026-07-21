@@ -765,12 +765,27 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             // host の settings.json は staging に入れない。template の
             // `permissions.deny`（review モードの安全性の根拠）が host 設定で
             // 上書きされてはならないため、v1.6 までの挙動を維持する。
-            let staging = assemble_staging(&config_dir, &runtime_dir, canonical, &home)?;
+            let staging = crate::ecc::staging_dir(&runtime_dir);
 
-            // Staging is complete; it's now safe to kick off the background
-            // refresh of the ecc-cache. Fire-and-forget; do not await.
-            let ecc_cfg = config::load_ecc_config(&config_dir)?;
-            crate::ecc::maybe_background_refresh(&config_dir, &ecc_cfg);
+            // Reassembling wipes and rebuilds the staging dir, which is the
+            // bind-mount SOURCE for a persistent container's ~/.claude/.
+            // Doing that while reusing a Running container would empty its
+            // live mount. Skip in that case and keep the existing staging;
+            // host ~/.claude/ changes then need `--new` to take effect.
+            let is_running_reuse = container_status == ContainerStatus::Running;
+            if should_reassemble_staging(is_running_reuse, staging.exists()) {
+                assemble_staging(&config_dir, &runtime_dir, canonical, &home, template_name)?;
+
+                // Staging is complete; it's now safe to kick off the background
+                // refresh of the ecc-cache. Fire-and-forget; do not await.
+                let ecc_cfg = config::load_ecc_config(&config_dir)?;
+                crate::ecc::maybe_background_refresh(&config_dir, &ecc_cfg);
+            } else {
+                eprintln!(
+                    "  Note: reusing the running container; kept its already-staged \
+                     ~/.claude/. To pick up host ~/.claude/ changes, recreate it with `--new`."
+                );
+            }
 
             let mut mounts =
                 super::template::build_template_mounts_from_dir(&staging, template_name)?;
@@ -1135,6 +1150,15 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 /// `~/.claude/`. Host assets are therefore additive only: they fill in
 /// names the template does not already define.
 ///
+/// **`CLAUDE.md` is the deliberate exception.** Every official bundle ships
+/// its own `CLAUDE.md`, so the plain per-file overwrite above would drop the
+/// host's 100% of the time — defeating requirement 1's "always mount the
+/// host CLAUDE.md". So after the copy passes, the two `CLAUDE.md` bodies are
+/// concatenated (template first, host second; see [`merge_claude_md`]).
+/// Unlike `settings.json`, `CLAUDE.md` is instruction text, not a permission
+/// boundary, so concatenating cannot weaken review mode's safety argument;
+/// putting the template first preserves the same "template wins" precedence.
+///
 /// Because a bind mount cannot merge two directories, this file-level
 /// merge into a staging dir is the only way to get "template wins per
 /// file" rather than "template wins per whole directory".
@@ -1149,6 +1173,7 @@ pub fn assemble_staging(
     runtime_dir: &std::path::Path,
     template_dir: &std::path::Path,
     home: &std::path::Path,
+    template_name: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
     let staging = crate::ecc::staging_dir(runtime_dir);
 
@@ -1164,6 +1189,23 @@ pub fn assemble_staging(
 
     copy_dir_contents(template_dir, &staging)?;
 
+    // CLAUDE.md gets special treatment: the copy passes above leave staging's
+    // CLAUDE.md equal to the template's (it overwrote the host's). Replace it
+    // with the template+host concatenation so both survive. Reads follow the
+    // original sources rather than the staged copies to keep the merge
+    // independent of copy order.
+    let template_claude = read_file_if_present(&template_dir.join("CLAUDE.md"))?;
+    let host_claude = read_file_if_present(&home.join(".claude").join("CLAUDE.md"))?;
+    if let Some(merged) = crate::cli::run::merge_claude_md(
+        template_claude.as_deref(),
+        host_claude.as_deref(),
+        template_name,
+    ) {
+        let dst = staging.join("CLAUDE.md");
+        std::fs::write(&dst, merged)
+            .map_err(|e| anyhow::anyhow!("failed to write merged {}: {e}", dst.display()))?;
+    }
+
     let meta_path = template_dir.join("vibepod-template.toml");
     if meta_path.is_file() {
         let meta = crate::cli::run::template::read_template_metadata(template_dir)?;
@@ -1173,6 +1215,40 @@ pub fn assemble_staging(
     }
 
     Ok(staging)
+}
+
+/// Read a file to a String, returning `None` when it does not exist.
+///
+/// `is_file()` follows symlinks, so a top-level symlinked `CLAUDE.md` is
+/// read through — matching the top-level-symlink-follow policy documented on
+/// [`crate::cli::run::host_claude_stage_entries`]. Other I/O errors (e.g. a
+/// permission problem on a file that exists) are surfaced, not swallowed.
+fn read_file_if_present(path: &std::path::Path) -> anyhow::Result<Option<String>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+    Ok(Some(body))
+}
+
+/// Whether the template staging directory should be (re)assembled.
+///
+/// Reassembly wipes and rebuilds the staging dir. That dir is the bind-mount
+/// *source* for a persistent container's `~/.claude/`, so rebuilding it under
+/// a container we are about to reuse would momentarily empty that live mount.
+///
+/// - When reusing a **Running** container, skip reassembly and keep the
+///   existing staging (host `~/.claude/` edits then need `--new`).
+/// - But if no staging exists yet, always assemble: there is nothing to
+///   reuse and downstream mount-building needs the directory to exist. This
+///   also covers the rare path where a Running container is later recreated
+///   because its setup marker is missing.
+pub fn should_reassemble_staging(is_running_reuse: bool, staging_exists: bool) -> bool {
+    if !staging_exists {
+        return true;
+    }
+    !is_running_reuse
 }
 
 /// Copy the allowlisted entries of the host's `~/.claude/` into `staging`.
@@ -1201,25 +1277,28 @@ fn stage_host_claude_assets(
     Ok(())
 }
 
-/// Recursively copy host `~/.claude/` contents, **skipping symlinks with a
-/// warning** instead of failing.
+/// Recursively copy host `~/.claude/` contents, **skipping nested symlinks
+/// with a warning** instead of failing.
 ///
-/// This deliberately differs from `copy_dir_contents` (used for templates,
-/// which hard-fails on symlinks). The two sources have different threat
-/// models and different failure costs:
+/// This is the "nested" half of the two-tier symlink policy (the
+/// "top-level" half lives on [`crate::cli::run::host_claude_stage_entries`]):
 ///
-/// - A template may be third-party content, so a symlink there is a
-///   possible escape attempt and must abort the run.
-/// - `~/.claude/` is the user's own directory, and symlinked skills are a
-///   perfectly normal way for people to manage their assets. Aborting
-///   `vibepod run` because the user symlinked one skill would make the
-///   whole tool unusable for them.
+/// - A **top-level** allowlisted entry that is itself a symlink (a whole
+///   `~/.claude/skills` symlinked elsewhere) is followed on purpose —
+///   `stage_host_claude_assets` reaches here via `is_dir()`, which resolves
+///   it. Dotfile setups that symlink whole directories are common and are a
+///   deliberate placement by the user.
+/// - A symlink **nested inside** such a directory is skipped. It can point
+///   anywhere — a huge tree, or a secret outside `~/.claude/` — and following
+///   it would silently materialize that target into a directory we mount into
+///   the container.
 ///
-/// Following the symlink is still not an option — it would silently
-/// materialize whatever it points at (a huge tree, or a secret outside
-/// `~/.claude/`) into a directory we mount into the container. So we skip
-/// and tell the operator exactly which path was dropped and how to fix
-/// it, rather than letting the asset go missing silently.
+/// This also differs from `copy_dir_contents` (templates), which *hard-fails*
+/// on any symlink: a template may be third-party, so a symlink there is a
+/// possible escape attempt, whereas `~/.claude/` is the user's own directory
+/// where aborting the whole run over one symlinked skill would make the tool
+/// unusable. Here we skip and name the dropped path so the asset does not go
+/// missing silently.
 fn copy_host_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(src)
         .map_err(|e| anyhow::anyhow!("failed to read_dir {}: {e}", src.display()))?

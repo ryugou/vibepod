@@ -40,6 +40,7 @@ agents = ["agents/rust-reviewer.md"]
         // Empty (non-existent) home: these cases assert template-only
         // staging behaviour. Host-merge behaviour has dedicated tests.
         &tmp.path().join("home"),
+        "test-template",
     )
     .unwrap();
 
@@ -79,6 +80,7 @@ fn assemble_staging_works_without_ecc_section() {
         // Empty (non-existent) home: these cases assert template-only
         // staging behaviour. Host-merge behaviour has dedicated tests.
         &tmp.path().join("home"),
+        "test-template",
     )
     .unwrap();
     assert!(staging.join("CLAUDE.md").is_file());
@@ -115,6 +117,7 @@ skills = ["skills/ghost/SKILL.md"]
         // Empty (non-existent) home: these cases assert template-only
         // staging behaviour. Host-merge behaviour has dedicated tests.
         &tmp.path().join("home"),
+        "test-template",
     )
     .unwrap_err();
     assert!(
@@ -145,6 +148,7 @@ fn assemble_staging_rejects_symlink_in_template_dir() {
         // Empty (non-existent) home: these cases assert template-only
         // staging behaviour. Host-merge behaviour has dedicated tests.
         &tmp.path().join("home"),
+        "test-template",
     )
     .unwrap_err();
     assert!(

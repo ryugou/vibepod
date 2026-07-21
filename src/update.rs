@@ -190,24 +190,52 @@ pub fn load_state(config_dir: &Path) -> UpdateState {
     }
 }
 
-/// Record a successful check for `container` at `now`, pruning stale
-/// entries, and persist.
-pub fn record_check(config_dir: &Path, container: &str, now: u64) -> Result<()> {
-    let mut state = load_state(config_dir);
+/// Record a successful check for `container` at `now` into the caller's
+/// already-loaded `state`, prune stale entries, and persist atomically.
+///
+/// Takes `state` by value rather than re-reading the file so the single
+/// `load_state` done at the top of `maybe_update_claude` (to compute the
+/// throttle) is reused here instead of being paid for twice.
+///
+/// The write is a temp-file-plus-rename so a crash mid-write cannot leave a
+/// truncated `update-check.json` behind. A truncated file is not fatal
+/// (`load_state` recovers by warning and starting empty), but avoiding it
+/// keeps the common case clean and skips a spurious "unreadable state"
+/// warning on the next run.
+pub fn record_check(
+    config_dir: &Path,
+    mut state: UpdateState,
+    container: &str,
+    now: u64,
+) -> Result<()> {
     state.containers.insert(container.to_string(), now);
     state
         .containers
         .retain(|_, ts| now.saturating_sub(*ts) < STATE_PRUNE_AFTER_SECS);
 
     let path = state_path(config_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
+    let parent = path
+        .parent()
+        .context("update-check state path has no parent directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create {}", parent.display()))?;
+
     let serialized =
         serde_json::to_string_pretty(&state).context("Failed to serialize update-check state")?;
-    std::fs::write(&path, serialized)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    // Write to a sibling temp file, then rename over the target. rename(2) is
+    // atomic within a filesystem, and the temp file shares the parent dir so
+    // it is always on the same filesystem as the destination.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serialized)
+        .with_context(|| format!("Failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| {
+        format!(
+            "Failed to atomically replace {} with {}",
+            path.display(),
+            tmp.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -234,14 +262,23 @@ async fn exec_claude_update(container: &str) -> Result<String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // On timeout we drop the `wait_with_output()` future, which drops the
+        // child handle. `kill_on_drop(true)` makes that drop send SIGKILL to
+        // the `docker exec` process. This is load-bearing: without it the
+        // exec would detach and keep running `claude update` inside the
+        // container, and it could swap the `claude` binary out from under the
+        // interactive/prompt session we launch immediately afterwards.
+        .kill_on_drop(true)
         .spawn()
         .context("Failed to spawn `docker exec` for the Claude Code update")?;
 
     let output = match tokio::time::timeout(UPDATE_TIMEOUT, child.wait_with_output()).await {
         Ok(result) => result.context("Failed to run `claude update` in the container")?,
         Err(_) => {
-            // The child owns a docker exec session; leaving it running
-            // would hold the container busy past our own lifetime.
+            // Timed out. Returning here drops the `wait_with_output()` future
+            // and with it the child handle; `kill_on_drop(true)` above turns
+            // that drop into a SIGKILL, so the update cannot linger and race
+            // the session that starts next.
             anyhow::bail!(
                 "`claude update` did not finish within {}s (likely a stalled network connection)",
                 UPDATE_TIMEOUT.as_secs()
@@ -285,7 +322,9 @@ pub async fn maybe_update_claude(
     container_created: bool,
 ) {
     let now = now_unix();
-    let last_checked = load_state(config_dir).containers.get(container).copied();
+    // Load once and reuse for the write below (see record_check).
+    let state = load_state(config_dir);
+    let last_checked = state.containers.get(container).copied();
 
     let decision = decide_update(
         policy,
@@ -326,7 +365,7 @@ pub async fn maybe_update_claude(
             if let Some(last_line) = stdout.lines().rfind(|l| !l.trim().is_empty()) {
                 println!("  │  {}", sanitize_single_line(last_line.trim(), 200));
             }
-            if let Err(e) = record_check(config_dir, container, now) {
+            if let Err(e) = record_check(config_dir, state, container, now) {
                 // Non-fatal: the update itself succeeded. Losing the
                 // timestamp only costs an extra check next run.
                 eprintln!(
@@ -463,7 +502,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         assert!(load_state(tmp.path()).containers.is_empty());
 
-        record_check(tmp.path(), "vibepod-demo-abc123", NOW).unwrap();
+        record_check(
+            tmp.path(),
+            UpdateState::default(),
+            "vibepod-demo-abc123",
+            NOW,
+        )
+        .unwrap();
 
         let state = load_state(tmp.path());
         assert_eq!(state.containers.get("vibepod-demo-abc123"), Some(&NOW));
@@ -473,9 +518,18 @@ mod tests {
     fn recording_a_check_prunes_long_unused_containers() {
         let tmp = tempfile::tempdir().unwrap();
         let ancient = NOW - STATE_PRUNE_AFTER_SECS - 1;
-        record_check(tmp.path(), "vibepod-stale-000000", ancient).unwrap();
+        record_check(
+            tmp.path(),
+            UpdateState::default(),
+            "vibepod-stale-000000",
+            ancient,
+        )
+        .unwrap();
 
-        record_check(tmp.path(), "vibepod-fresh-111111", NOW).unwrap();
+        // Feed the just-persisted state back in, the way maybe_update_claude
+        // reuses the state it loaded for the throttle decision.
+        let state = load_state(tmp.path());
+        record_check(tmp.path(), state, "vibepod-fresh-111111", NOW).unwrap();
 
         let state = load_state(tmp.path());
         assert!(
@@ -483,6 +537,19 @@ mod tests {
             "entry older than the prune window should be dropped"
         );
         assert!(state.containers.contains_key("vibepod-fresh-111111"));
+    }
+
+    #[test]
+    fn record_check_replaces_state_atomically_leaving_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        record_check(tmp.path(), UpdateState::default(), "vibepod-x-000000", NOW).unwrap();
+
+        // The temp file used for the atomic rename must not survive.
+        assert!(
+            !state_path(tmp.path()).with_extension("json.tmp").exists(),
+            "temp file should have been renamed away"
+        );
+        assert!(state_path(tmp.path()).exists());
     }
 
     #[test]
