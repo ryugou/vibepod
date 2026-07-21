@@ -218,11 +218,14 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
         // 停止中または新規作成したコンテナ: 停止して保持。stop の exit status を
         // 確認し、失敗時は失敗内容と手動対処を stderr に出す。runtime dir は
         // どちらにせよ削除しないため、成否に関わらず最後に検証付きで同期する。
+        let mut stop_succeeded = false;
         let stop = Command::new("docker")
             .args(["stop", "-t", "10", &ctx.container_name])
             .output();
         match &stop {
-            Ok(o) if o.status.success() => {}
+            Ok(o) if o.status.success() => {
+                stop_succeeded = true;
+            }
             other => {
                 let detail = match other {
                     Ok(o) => {
@@ -244,7 +247,13 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
             }
         }
         sync_codex_stage_after_run(ctx);
-        println!("  Container stopped (container preserved for next run).");
+        if stop_succeeded {
+            println!("  Container stopped (container preserved for next run).");
+        } else {
+            println!(
+                "  Container state unconfirmed (stop failed; see warning above). Container preserved."
+            );
+        }
     }
 
     Ok(())
