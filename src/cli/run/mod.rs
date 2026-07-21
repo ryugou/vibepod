@@ -9,27 +9,29 @@ pub mod lock;
 pub mod prepare;
 mod prompt;
 
-/// run 後同期(`sync_codex_stage_to_store`)を呼ぶ時点で、コンテナがまだ
-/// 稼働しているかどうかを表す(codex レビュー round 11 P1)。
+/// run 後の後片付け時点で、コンテナが停止/削除確定か、稼働継続の可能性が
+/// あるかを表す(codex レビュー round 11 P1 で導入、round 12 P1-b で意味を
+/// 「後片付けでステージを削除してよいか」の判断に一本化)。
 ///
 /// ステージの `auth.json` はコンテナが rw マウント経由で書き込む untrusted な
-/// 入力である。同期時点でコンテナが稼働中だと、コンテナ内 codex が同じ inode に
-/// 書き込んでいる最中の torn(途中)な内容を読み、それを auth store に永続化して
-/// しまう恐れがある。store は全コンテナへ配布されるため、壊れた認証が伝播する。
+/// 入力である。auth store への同期は liveness に関わらず常に「完全な JSON か」を
+/// 検証してから行う(round 12 P1-a: `docker stop` が SIGKILL に落ちると停止済み
+/// でもステージが truncated で残り得るため、検証を liveness に依存させない)。
+/// この enum が決めるのは検証の有無ではなく、**後片付けでステージを含む runtime
+/// dir を削除してよいか**である。
 ///
-/// - `Stopped`: 同期時点でコンテナは停止/削除済み(`docker stop` / `docker rm -f`
-///   の `.output()` 完了を待った後の経路)で、ステージへの並行書き込みは起こり得
-///   ない。従来どおり keep-newest でそのままコピーしてよい。
-/// - `Running`: コンテナが稼働を継続する経路(interactive の再利用コンテナ等)で、
-///   ステージが書き込み中の可能性があるため、store に反映する前にスナップショットが
-///   完全な JSON としてパースできることを検証し、パース不能なら store に触れず
-///   スキップする必要がある(次回 run で再試行される)。
+/// - `Stopped`: `docker stop` / `docker rm -f` の exit status で停止/削除が確定
+///   した経路。コンテナはもうステージに書き込まないため、同期後に runtime dir を
+///   丸ごと削除してよい。
+/// - `Running`: コンテナが稼働継続する経路(interactive の再利用コンテナ)、または
+///   `docker rm -f` / `stop` が失敗してコンテナが生存し得る経路。ステージへの並行
+///   書き込みが起こり得るため、同期(検証付き)は行うが runtime dir は削除せず保持
+///   し、次回 run に後片付けを委ねる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerLiveness {
-    /// コンテナは停止/削除済み。ステージへの並行書き込みは起こり得ない。
+    /// コンテナは停止/削除確定。同期後に runtime dir を削除してよい。
     Stopped,
-    /// コンテナは稼働継続中。ステージが書き込み途中の可能性があり、
-    /// 内容の完全性検証が必要。
+    /// コンテナが稼働継続の可能性あり。同期はするが runtime dir は保持する。
     Running,
 }
 
@@ -1114,7 +1116,6 @@ pub fn prepare_codex_mount(
 pub fn sync_codex_stage_to_store(
     runtime_dir: &std::path::Path,
     config_dir: &std::path::Path,
-    liveness: ContainerLiveness,
 ) -> anyhow::Result<()> {
     // store は prepare_codex_mount と同じロックで直列化する(auth store は
     // 両関数から触られる全プロセス共有のディレクトリのため)。
@@ -1126,7 +1127,7 @@ pub fn sync_codex_stage_to_store(
 
     #[cfg(unix)]
     {
-        sync_codex_stage_auth_via_fd(&stage_auth, &store_dir, &store_auth, liveness)
+        sync_codex_stage_auth_via_fd(&stage_auth, &store_dir, &store_auth)
     }
     #[cfg(not(unix))]
     {
@@ -1162,23 +1163,21 @@ pub fn sync_codex_stage_to_store(
             return Ok(());
         }
 
-        // round 11 P1: コンテナが稼働継続する経路(Running)では、ステージの
-        // auth.json をコンテナが書き込んでいる最中の可能性がある。torn(途中)な
-        // 内容を store に取り込むと壊れた認証が全コンテナへ配布されるため、
-        // Running のときだけ「完全な JSON としてパースできるか」を追加ゲートに
-        // する。パース不能なら store に一切触れずスキップし、次回 run で再試行
-        // させる。unix 実装(fd 経由)と挙動を揃える。停止確定後の Stopped は
-        // torn write が起こり得ないため検証しない。
-        if liveness == ContainerLiveness::Running {
-            let contents = std::fs::read(&stage_auth).with_context(|| {
-                format!("Failed to read staged {} for sync", stage_auth.display())
-            })?;
-            if serde_json::from_slice::<serde_json::Value>(&contents).is_err() {
-                eprintln!(
-                    "stage auth.json was not valid JSON; skipped store sync (possibly mid-write)"
-                );
-                return Ok(());
-            }
+        // round 11 P1 / round 12 P1-a: ステージの auth.json はコンテナが rw
+        // マウント経由で書き込む untrusted な入力である。コンテナ稼働中の torn
+        // (途中)書き込みだけでなく、`docker stop` が SIGKILL に落ちた場合の
+        // truncated な残骸も store に取り込むと壊れた認証が全コンテナへ配布
+        // される。そのため liveness に関わらず**常に**「完全な JSON として
+        // パースできるか」を反映前の追加ゲートにする。パース不能なら store に
+        // 一切触れずスキップし(既存コピーの内容・mtime を保ち、無ければ作らない)、
+        // 次回 run で再試行させる。unix 実装(fd 経由)と挙動を揃える。
+        let contents = std::fs::read(&stage_auth)
+            .with_context(|| format!("Failed to read staged {} for sync", stage_auth.display()))?;
+        if serde_json::from_slice::<serde_json::Value>(&contents).is_err() {
+            eprintln!(
+                "stage auth.json was not valid JSON; skipped store sync (possibly mid-write)"
+            );
+            return Ok(());
         }
 
         std::fs::create_dir_all(&store_dir)
@@ -1198,7 +1197,6 @@ fn sync_codex_stage_auth_via_fd(
     stage_auth: &std::path::Path,
     store_dir: &std::path::Path,
     store_auth: &std::path::Path,
-    liveness: ContainerLiveness,
 ) -> anyhow::Result<()> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -1289,17 +1287,15 @@ fn sync_codex_stage_auth_via_fd(
     file.read_to_end(&mut contents)
         .with_context(|| format!("Failed to read staged {} for sync", stage_auth.display()))?;
 
-    // round 11 P1: コンテナが稼働継続する経路(Running)では、ここで読んだ
-    // スナップショットがコンテナの書き込み途中(torn)である可能性がある。
-    // 不完全な内容を store に取り込むと壊れた認証が全コンテナへ配布される
-    // ため、store へ書き込む temp ファイルを作る前に「完全な JSON か」を
-    // 追加ゲートとして検証する。パース不能なら store には一切触れず(既存
-    // コピーの内容・mtime を保ち、無ければ作らない)、警告を出してスキップ
-    // する — 次回 run で再試行される。停止確定後の Stopped 経路では torn
-    // write が起こり得ないため検証せず、従来どおり keep-newest でコピーする。
-    if liveness == ContainerLiveness::Running
-        && serde_json::from_slice::<serde_json::Value>(&contents).is_err()
-    {
+    // round 11 P1 / round 12 P1-a: ここで読んだスナップショットは、コンテナが
+    // 稼働継続中なら書き込み途中(torn)である可能性があり、`docker stop` が
+    // SIGKILL に落ちた停止済みコンテナでも truncated な残骸である可能性がある。
+    // 不完全な内容を store に取り込むと壊れた認証が全コンテナへ配布されるため、
+    // store へ書き込む temp ファイルを作る前に liveness に関わらず**常に**
+    // 「完全な JSON か」を追加ゲートとして検証する。パース不能なら store には
+    // 一切触れず(既存コピーの内容・mtime を保ち、無ければ作らない)、警告を
+    // 出してスキップする — 次回 run で再試行される。
+    if serde_json::from_slice::<serde_json::Value>(&contents).is_err() {
         eprintln!("stage auth.json was not valid JSON; skipped store sync (possibly mid-write)");
         return Ok(());
     }
@@ -1473,27 +1469,52 @@ fn enforce_staged_permissions(
 
 /// codex ステージ(rw マウント経由でコンテナがリフレッシュした可能性がある
 /// auth.json)を host-only の auth store へ書き戻す。`interactive.rs` /
-/// `prompt.rs` の各 cleanup 分岐から、その分岐の liveness に応じて呼ぶ。
+/// `prompt.rs` の runtime dir を保持する cleanup 分岐(非 disposable で
+/// コンテナを停止する経路、および元から Running のまま切断する経路)から呼ぶ。
 ///
-/// **呼び出し順序(codex レビュー round 11 P1)**: コンテナを停止/削除する
-/// 経路(disposable の `docker rm -f`、非 disposable の `docker stop`)では、
-/// その `.output()` 完了(=停止/削除確定)を**待ってから** `Stopped` で呼ぶ。
-/// これでステージへの並行書き込みが起こり得ない状態で同期でき、torn write を
-/// store に取り込む余地が構造的に消える。disposable ではさらにこの同期の
-/// **後**で `remove_dir_all(&ctx.runtime_dir)` によりステージごと削除する
-/// (同期元のステージが先に消えないようにするため)。
+/// disposable(`docker rm -f` でコンテナごと runtime dir を捨てる)経路は、
+/// 後片付けの削除可否まで含めて判断する `finalize_disposable_runtime_dir` を
+/// 使う(この関数はステージを保持したまま同期のみを行う)。
 ///
-/// コンテナを停止しない経路(interactive の再利用コンテナ = 元から Running)
-/// では停止を待てないため `Running` で呼ぶ。この場合 `sync_codex_stage_to_store`
-/// が store 反映前に auth.json の JSON 完全性を検証し、書き込み途中で不完全な
-/// スナップショットは取り込まずスキップする。
+/// 同期は liveness に関わらず auth.json の JSON 完全性を検証してから行い
+/// (`sync_codex_stage_to_store`)、書き込み途中や truncated で不完全な
+/// スナップショットは取り込まずスキップする(round 11 P1 / round 12 P1-a)。
 ///
 /// 同期の失敗は成功した run 自体を失敗にしないが、握りつぶさず stderr に
 /// 警告する。
-pub(super) fn sync_codex_stage_after_run(ctx: &RunContext, liveness: ContainerLiveness) {
+pub(super) fn sync_codex_stage_after_run(ctx: &RunContext) {
     if ctx.codex_dir.is_some() {
-        if let Err(e) = sync_codex_stage_to_store(&ctx.runtime_dir, &ctx.config_dir, liveness) {
+        if let Err(e) = sync_codex_stage_to_store(&ctx.runtime_dir, &ctx.config_dir) {
             eprintln!("warning: failed to sync codex auth back to host store: {e:#}");
+        }
+    }
+}
+
+/// disposable コンテナの後片付けコア。`liveness` は docker rm -f の exit status
+/// から呼び出し側が導出する: 削除成功なら Stopped、失敗(コンテナが生存し得る)
+/// なら Running。codex ステージは liveness に関わらず常に(検証付きで)store へ
+/// 同期する。Stopped のときだけステージごと runtime dir を削除し、Running では
+/// コンテナがまだステージに書き込み得るため runtime dir を保持して次回 run に
+/// 委ねる(round 12 P1-b)。
+pub fn finalize_disposable_runtime_dir(
+    runtime_dir: &std::path::Path,
+    config_dir: &std::path::Path,
+    codex_present: bool,
+    liveness: ContainerLiveness,
+) {
+    if codex_present {
+        if let Err(e) = sync_codex_stage_to_store(runtime_dir, config_dir) {
+            eprintln!("warning: failed to sync codex auth back to host store: {e:#}");
+        }
+    }
+    match liveness {
+        ContainerLiveness::Stopped => {
+            std::fs::remove_dir_all(runtime_dir).ok();
+        }
+        ContainerLiveness::Running => {
+            // コンテナ削除に失敗して稼働継続の可能性があるため、ステージを含む
+            // runtime dir は削除せず保持する。失敗内容と手動対処は呼び出し側が
+            // 既に stderr に出している。
         }
     }
 }

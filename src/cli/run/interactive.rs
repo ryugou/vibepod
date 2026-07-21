@@ -156,44 +156,94 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
     // Claude の終了コードは無視（ユーザーが終了した場合など）
     let _ = status;
 
-    // codex ステージ→store の同期は、コンテナの停止/削除が確定した後に行う
-    // (round 11 P1)。停止/削除する経路では `.output()` 完了を待ってから
-    // `Stopped` で同期し、稼働継続する経路(再利用コンテナ)だけ `Running` で
-    // 同期して JSON 完全性検証に委ねる。同期呼び出しを分岐前に一度だけ行うと、
-    // 再利用コンテナがまだ生きている時点で torn な auth.json を store に取り込む
-    // 恐れがあるため、分岐ごとに順序を分けている。
+    // codex ステージ→store の同期は liveness に関わらず JSON 完全性検証付きで
+    // 行う(round 11 P1 / round 12 P1-a)。disposable 経路では docker rm -f の
+    // exit status を確認し、削除成功が確認できた場合のみ runtime dir(bind mount
+    // 中のステージを含む)を削除する。失敗時は稼働継続の可能性があるため、失敗内容と
+    // 手動対処を stderr に出して runtime dir を保持する(round 12 P1-b)。
     if ctx.is_disposable {
-        // 使い捨てコンテナ（--worktree）: 削除。rm -f の .output() 完了後は
-        // コンテナが削除済み＝ステージへの並行書き込みが起こり得ないため、
-        // 停止確定後に Stopped で同期する。
-        Command::new("docker")
+        // 使い捨てコンテナ（--worktree）: 削除。
+        let removal = Command::new("docker")
             .args(["rm", "-f", &ctx.container_name])
-            .output()
-            .ok();
-        sync_codex_stage_after_run(ctx, ContainerLiveness::Stopped);
-        // 同期でステージ→store の書き戻しが済んだ後に runtime ディレクトリを
-        // 丸ごと削除する（temp .claude.json と sanitized settings.json をまとめて
-        // 掃除。ステージも含まれるため、同期より前に消すと書き戻せなくなる）。
-        // ctx.runtime_dir は prepare.rs で必ず作成されるため、temp_claude_json
-        // や sanitized settings.json の存在に関係なく確実に cleanup できる。
-        // 永続コンテナは次回起動時に bind mount が必要なため削除しない。
-        std::fs::remove_dir_all(&ctx.runtime_dir).ok();
-        println!("  Container stopped and removed.");
+            .output();
+        let liveness = match &removal {
+            Ok(o) if o.status.success() => ContainerLiveness::Stopped,
+            other => {
+                let detail = match other {
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        let stderr = stderr.trim();
+                        if stderr.is_empty() {
+                            format!("docker rm -f exited with status {}", o.status)
+                        } else {
+                            stderr.to_string()
+                        }
+                    }
+                    Err(e) => e.to_string(),
+                };
+                eprintln!(
+                    "warning: failed to remove disposable container {name}: {detail}. \
+                     The container may still be running; run `vibepod rm {name}` to remove it \
+                     manually. Preserving the codex auth stage and runtime dir for the next run.",
+                    name = ctx.container_name
+                );
+                ContainerLiveness::Running
+            }
+        };
+        // finalize は codex ステージを検証付きで同期したうえで、Stopped のときだけ
+        // runtime ディレクトリ(temp .claude.json と sanitized settings.json、
+        // およびステージ)を丸ごと削除する。ステージを含むため、同期より前に消すと
+        // 書き戻せなくなる順序を finalize 側が担保する。ctx.runtime_dir は prepare.rs
+        // で必ず作成されるため、これらの temp ファイルの有無に関係なく cleanup できる。
+        super::finalize_disposable_runtime_dir(
+            &ctx.runtime_dir,
+            &ctx.config_dir,
+            ctx.codex_dir.is_some(),
+            liveness,
+        );
+        if liveness == ContainerLiveness::Stopped {
+            println!("  Container stopped and removed.");
+        } else {
+            println!(
+                "  Preserved runtime dir; remove the container manually and re-run to clean up."
+            );
+        }
     } else if ctx.container_status == ContainerStatus::Running {
         // 元から実行中だったコンテナ: 停止しない（並行 exec の他セッションが残る
-        // 可能性）。コンテナが稼働継続＝ステージが書き込み中の可能性があるため、
-        // Running で同期して store 反映前に JSON 完全性を検証させる(round 11 P1)。
-        sync_codex_stage_after_run(ctx, ContainerLiveness::Running);
+        // 可能性）。runtime dir は削除しないので、稼働中のステージを検証付きで
+        // 同期するだけでよい。
+        sync_codex_stage_after_run(ctx);
         println!("  Disconnected from container (still running).");
     } else {
-        // 停止中または新規作成したコンテナ: 停止して保持。stop -t 10 の
-        // .output() 完了後はコンテナが停止済み＝torn write が起こり得ないため、
-        // 停止確定後に Stopped で同期する。
-        Command::new("docker")
+        // 停止中または新規作成したコンテナ: 停止して保持。stop の exit status を
+        // 確認し、失敗時は失敗内容と手動対処を stderr に出す。runtime dir は
+        // どちらにせよ削除しないため、成否に関わらず最後に検証付きで同期する。
+        let stop = Command::new("docker")
             .args(["stop", "-t", "10", &ctx.container_name])
-            .output()
-            .ok();
-        sync_codex_stage_after_run(ctx, ContainerLiveness::Stopped);
+            .output();
+        match &stop {
+            Ok(o) if o.status.success() => {}
+            other => {
+                let detail = match other {
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        let stderr = stderr.trim();
+                        if stderr.is_empty() {
+                            format!("docker stop exited with status {}", o.status)
+                        } else {
+                            stderr.to_string()
+                        }
+                    }
+                    Err(e) => e.to_string(),
+                };
+                eprintln!(
+                    "warning: failed to stop container {name}: {detail}. \
+                     It may still be running; run `vibepod rm {name}` to remove it manually.",
+                    name = ctx.container_name
+                );
+            }
+        }
+        sync_codex_stage_after_run(ctx);
         println!("  Container stopped (container preserved for next run).");
     }
 

@@ -467,6 +467,65 @@ mtime が保たれる、(a2) 同じく `Running` で store が空 → store に 
 挙動が切り替わること、すなわち liveness 引数が停止後同期の順序保証を型で担保して
 いることをテストで固定する。
 
+## codex レビュー指摘対応(round 12、2026-07-22)
+
+round 11 対応は解消を確認。新規指摘2件(round 11 修正の縁)、対応必須。
+
+### P1-a: JSON 検証を Stopped 状態でも必須にする(`src/cli/run/mod.rs:1300-1302` 付近)
+
+`docker stop` がタイムアウトして SIGKILL に落ちた場合、停止済みコンテナでも auth.json が
+書きかけ(truncated)のまま残り得る。現在 Running のみ検証しているため、壊れた新しいファイルを
+store に取り込んでしまう。**liveness に関わらずスナップショットの `serde_json` 完全パース検証を
+必須**にする(Stopped でも検証失敗ならスキップ+警告)。
+
+### P1-b: docker cleanup の成否を確認せず Stopped 扱いしている(`src/cli/run/interactive.rs:169-173` 付近)
+
+`docker rm -f` の結果を `.ok()` で捨てており、失敗(デーモン断・権限等)してもコンテナ稼働中の
+まま Stopped 意味論で同期し、bind mount 中の runtime dir を削除してしまう。
+「エラーをログも吐かずに握りつぶす禁止」にも抵触。
+
+対応: docker stop / rm の **exit status を確認し、成功が確認できた場合のみ** Stopped として
+同期・runtime dir 削除を行う。失敗した場合は stderr に失敗内容と手動対処
+(`vibepod rm <name>` 等)を出し、Running 安全経路(検証付き同期・ステージ保持)に
+フォールバックする。prompt.rs 側の同種経路も同じ扱いに揃えること。
+
+### テスト追加(round 12 対応分)
+
+- Stopped 扱いでも不正 JSON は store に反映されず警告される
+- docker コマンド失敗をシミュレートできる形(成否を引数注入等)で、失敗時に
+  Running 安全経路へフォールバックし runtime dir が削除されないこと
+
+### 対応結果(round 12、実装記録)
+
+P1-a: JSON 完全性検証を liveness 非依存の**無条件**ゲートにした。`docker stop` が
+SIGKILL に落ちると停止済みコンテナでもステージの auth.json が truncated で残り得るため、
+`sync_codex_stage_auth_via_fd`(unix)・非 unix 分岐のいずれも、store へ反映する前に
+`liveness` を見ずに `serde_json::from_slice::<serde_json::Value>` で完全パースを検証し、
+失敗したら store に一切触れず警告してスキップする(既存の反映ロジックは不変)。検証が
+liveness を使わなくなったため、`sync_codex_stage_to_store` / `sync_codex_stage_auth_via_fd` /
+`sync_codex_stage_after_run` の3関数から `liveness` 引数を除去した。`ContainerLiveness`
+enum は削除せず、P1-b の後片付け結果型(ステージを削除してよいか否か)として意味を
+一本化して存続させた。
+
+P1-b: disposable 経路の `docker rm -f`(および非 disposable の `docker stop`)の
+**exit status を確認**するようにした。成功時は `Stopped`(検証付き同期の後、runtime dir を
+削除)、失敗時は失敗内容と手動対処(`vibepod rm <name>`)を stderr に出したうえで `Running`
+安全経路(検証付き同期は行うが runtime dir は保持し、次回 run に後片付けを委ねる)へ
+フォールバックする。この後片付けコア判断を `finalize_disposable_runtime_dir`(integration
+test から呼べるよう `pub`)へ切り出し、interactive.rs / prompt.rs の disposable 経路を
+これに揃えた。従来 `.output().ok()` で結果を捨てていた経路をすべて exit status 確認に
+置き換え、「エラーをログも吐かず握りつぶす禁止」に沿ってコンテナ操作失敗を運用者へ
+可視化した。
+
+テスト: 既存の run 後同期テスト(`sync_codex_stage_to_store` を呼ぶ全箇所)を liveness
+引数除去に追随させた。round 11 の3テストは名前・コメントの "when_running" を検証が
+無条件になった事実に合わせて更新(挙動アサーションは維持)。round 11 の
+`..._copies_invalid_json_stage_when_stopped` は
+`..._skips_invalid_json_stage_unconditionally` に**反転**し、同じ truncated バイト列を
+同期しても store の内容・mtime が変わらないことをアサートした。`finalize_disposable_
+runtime_dir` の直接テストを2本追加し、失敗(Running)時に runtime dir が保持され store には
+検証付き同期が反映されること、成功(Stopped)時に runtime dir が削除されることを固定した。
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合
