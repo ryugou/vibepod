@@ -468,6 +468,33 @@ pub fn host_codex_stage_entries(
     entries
 }
 
+/// `dir` 配下から、`HOST_CODEX_ALLOWLIST` のうち `keep` に含まれない名前の
+/// ファイルを削除する(存在すれば削除、無ければ何もしない)。
+///
+/// `prepare_codex_mount` の P1(auth 消失時に残置を全消去)・P2(config.toml
+/// のみ消失時に差分だけ消去)双方が使う共通のリコンサイル処理。`dir` 自体が
+/// まだ存在しない場合(初回 run で `create_dir_all` 前に呼ばれるケース)は
+/// 削除対象が無いので何もしない。
+///
+/// 削除失敗は `unwrap`/`expect` で握りつぶさず、どのパスの削除に失敗したかを
+/// context に含めて呼び出し元へ伝播する。
+fn reconcile_codex_stage_dir(dir: &std::path::Path, keep: &[&str]) -> anyhow::Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for name in HOST_CODEX_ALLOWLIST {
+        if keep.contains(name) {
+            continue;
+        }
+        let path = dir.join(name);
+        if path.is_file() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove stale {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// ホストの `~/.codex/auth.json`(と存在すれば `config.toml`)を
 /// `<config_dir>/runtime/<container_name>/codex/` にコピーし、そのディレクトリの
 /// パスを返す。呼び出し元はこのパスをコンテナへ `/home/vibepod/.codex` として
@@ -489,18 +516,29 @@ pub fn prepare_codex_mount(
     let host_codex_dir = home.join(".codex");
     let entries = host_codex_stage_entries(&host_codex_dir);
 
+    let runtime_codex_dir = config_dir
+        .join("runtime")
+        .join(container_name)
+        .join("codex");
+
     let has_auth = entries.iter().any(|(_, name)| *name == "auth.json");
     if !has_auth {
+        // P1: ホストの auth.json が無い(未認証 or 取り消し済み)。過去の run で
+        // ステージ済みの認証情報が残っていると、既存コンテナの bind mount
+        // 経由で使われ続けてしまうため、ディレクトリ自体は残したまま中身だけ
+        // 全消去する(keep が空 = allowlist 全ファイルが削除対象)。
+        reconcile_codex_stage_dir(&runtime_codex_dir, &[]).with_context(|| {
+            format!(
+                "Failed to clear stale codex assets in {}",
+                runtime_codex_dir.display()
+            )
+        })?;
         eprintln!(
             "codex auth not found (~/.codex/auth.json); codex review is unavailable in this container"
         );
         return Ok(None);
     }
 
-    let runtime_codex_dir = config_dir
-        .join("runtime")
-        .join(container_name)
-        .join("codex");
     std::fs::create_dir_all(&runtime_codex_dir)
         .with_context(|| format!("Failed to create {}", runtime_codex_dir.display()))?;
     #[cfg(unix)]
@@ -514,6 +552,17 @@ pub fn prepare_codex_mount(
                 )
             })?;
     }
+
+    // P2: 今回の entries に無い allowlist ファイル(例: ホストで config.toml が
+    // 削除された)がステージに残っていると無期限に使われ続けるため、コピー前に
+    // 差分を削除しておく。
+    let keep_names: Vec<&str> = entries.iter().map(|(_, name)| *name).collect();
+    reconcile_codex_stage_dir(&runtime_codex_dir, &keep_names).with_context(|| {
+        format!(
+            "Failed to reconcile stale codex assets in {}",
+            runtime_codex_dir.display()
+        )
+    })?;
 
     for (src, name) in &entries {
         let dst = runtime_codex_dir.join(name);

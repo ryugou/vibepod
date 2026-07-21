@@ -62,6 +62,35 @@ vibepod の実装委譲フロー(実装→セルフレビュー)に codex レビ
 3. `git log --oneline main..HEAD` と `git diff --stat`
 4. 注入ロジックのテスト名一覧
 
+## codex レビュー指摘対応(round 1、2026-07-21)
+
+初回実装に対する codex レビューで以下2件の指摘を受けた。いずれも実在を確認済みで、対応必須。
+
+### P1: ホストで auth.json を削除してもステージ済み認証が残る(`prepare_codex_mount` の early return)
+
+`~/.codex/auth.json` が無い場合に警告して `Ok(None)` を返すだけでは、
+**過去の run でステージ済みの** `<runtime>/codex/auth.json` が残置され、既存コンテナの
+bind mount 経由で使われ続ける。「codex review is unavailable」という警告と実態が矛盾する。
+
+対応: `!has_auth` の場合、return 前にステージディレクトリの**中身**(auth.json / config.toml)を
+削除すること。ディレクトリ自体は削除しない(実行中コンテナの bind mount の inode を壊さないため。
+中身が空なら codex は未認証となり、取り消しの意味論が正しく成立する)。削除失敗はエラーを
+握りつぶさず context 付きで伝播する。
+
+### P2: ホストで config.toml を削除してもステージ済みの旧設定が残る(コピーループ)
+
+auth.json は存在し config.toml だけ削除されたケースで、現在の entries のコピーのみ行い
+宛先の掃除をしないため、削除済み設定が無期限に使われ続ける。
+
+対応: コピー前に宛先を allowlist と突き合わせて**リコンサイル**する。
+`HOST_CODEX_ALLOWLIST` にあるが今回の entries に無いファイルは宛先から削除してからコピーする。
+
+### テスト追加(round 1 対応分)
+
+- 事前にステージ済み auth.json がある状態で host の auth.json を消して呼ぶ → ステージも消え `None`
+- 事前に両ファイルステージ済みで host の config.toml だけ消して呼ぶ → ステージの config.toml が消え auth.json は更新される
+- ステージディレクトリ自体は上記どちらのケースでも削除されないこと
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

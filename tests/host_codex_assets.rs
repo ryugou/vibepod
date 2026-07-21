@@ -158,3 +158,98 @@ fn prepare_codex_mount_copies_both_files_and_returns_dir() {
         );
     }
 }
+
+// --- prepare_codex_mount: reconciliation of stale staged files (codex review round 1) ---
+
+#[test]
+fn prepare_codex_mount_removes_staged_files_when_auth_json_disappears() {
+    // First run stages both files into the runtime dir.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let first = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-auth-disappears",
+    )
+    .unwrap();
+    let dir = first.expect("first run should stage auth.json + config.toml");
+    assert!(dir.join("auth.json").is_file());
+    assert!(dir.join("config.toml").is_file());
+
+    // Host revokes auth (e.g. `codex logout`): auth.json is gone.
+    fs::remove_file(home_dir.path().join(".codex/auth.json")).unwrap();
+
+    let second = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-auth-disappears",
+    )
+    .unwrap();
+
+    assert!(
+        second.is_none(),
+        "should return None once host auth.json is gone, even though it was staged before"
+    );
+    assert!(
+        !dir.join("auth.json").exists(),
+        "stale staged auth.json must be removed so a bind-mounted container can't keep using it"
+    );
+    assert!(
+        !dir.join("config.toml").exists(),
+        "stale staged config.toml must be removed alongside auth.json on revocation"
+    );
+    assert!(
+        dir.is_dir(),
+        "the staging directory itself must survive so an existing bind mount's inode stays valid"
+    );
+}
+
+#[test]
+fn prepare_codex_mount_reconciles_config_toml_removal_and_refreshes_auth() {
+    // First run stages both files into the runtime dir.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let first = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-config-removed",
+    )
+    .unwrap();
+    let dir = first.expect("first run should stage auth.json + config.toml");
+    assert!(dir.join("config.toml").is_file());
+
+    // Host drops config.toml (falls back to codex defaults) and rotates auth.json.
+    fs::remove_file(home_dir.path().join(".codex/config.toml")).unwrap();
+    fs::write(
+        home_dir.path().join(".codex/auth.json"),
+        r#"{"token":"ROTATED_AUTH"}"#,
+    )
+    .unwrap();
+
+    let second = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-config-removed",
+    )
+    .unwrap();
+
+    let second_dir = second.expect("auth.json is still present, so a mount should be prepared");
+    assert_eq!(second_dir, dir);
+    assert!(
+        !second_dir.join("config.toml").exists(),
+        "stale staged config.toml must be removed once the host copy disappears"
+    );
+    assert_eq!(
+        fs::read_to_string(second_dir.join("auth.json")).unwrap(),
+        r#"{"token":"ROTATED_AUTH"}"#,
+        "staged auth.json must be refreshed with the host's rotated content"
+    );
+    assert!(
+        second_dir.is_dir(),
+        "the staging directory itself must survive reconciliation"
+    );
+}
