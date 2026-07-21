@@ -1598,23 +1598,17 @@ fn sync_codex_stage_to_store_rejects_directory_staged_auth() {
 #[test]
 fn sync_codex_stage_to_store_ingests_and_normalizes_permissions_of_a_loosely_permissioned_stage_auth(
 ) {
-    // NOTE ON SPEC WORDING: docs/specs/v1.8/2026-07-21-codex-in-container.md's
-    // round 10 test section groups a "0644-tampered" stage auth.json together
-    // with symlink/directory tampering under "取り込み拒否(削除+警告)して
-    // store 無傷". The actual `sync_codex_stage_to_store` implementation does
-    // not do this: `remove_dst_if_not_regular_file` only inspects *file type*
-    // (symlink vs. directory vs. regular file) via `symlink_metadata`, never
-    // permission bits — a 0644 file is still a *regular* file, so it is
-    // treated as ordinary content and ingested (or not) purely on the mtime
-    // comparison, exactly like a 0600 file would be. What the implementation
-    // does guarantee is that whatever ends up written into the store is
-    // 0600 — `copy_codex_asset_atomically` sets 0600 on its own temp file
-    // before persisting it, and `enforce_staged_permissions` re-asserts 0600
-    // afterward — so a loosened *source* permission never survives into the
-    // store. This test documents that actual, observed behavior rather than
-    // asserting the literal "rejected" wording, since src was out of scope
-    // for this task to modify; see this implementation's final report for
-    // the discrepancy write-up.
+    // Per spec (docs/specs/v1.8/2026-07-21-codex-in-container.md round 10,
+    // lines 393-394): a loosely-permissioned *regular* file is NOT type
+    // tampering, so it is not rejected — only symlink/directory type swaps
+    // are. `remove_dst_if_not_regular_file` inspects file *type* only (via
+    // `symlink_metadata`), never permission bits, so a 0644 regular file is
+    // ingested on the normal mtime comparison just like a 0600 file. The
+    // store copy is then always normalized to 0600 — `copy_codex_asset_
+    // atomically` sets 0600 on its temp file before persisting, and
+    // `enforce_staged_permissions` re-asserts it — so a loosened source
+    // permission never survives into the store. This test asserts exactly
+    // that: ingested, and normalized to 0600.
     use std::os::unix::fs::PermissionsExt;
 
     let home_dir = tempfile::tempdir().unwrap();
