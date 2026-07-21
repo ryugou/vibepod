@@ -94,3 +94,48 @@ fn test_has_uncommitted_changes_dirty() {
     std::fs::write(dir.path().join("file.txt"), "hello").unwrap();
     assert!(vibepod::git::has_uncommitted_changes(dir.path()));
 }
+
+#[test]
+fn changed_files_reports_unavailable_outside_a_git_repo() {
+    // A non-git directory makes `git diff` fail; the result must be the
+    // explicit Unavailable, never an empty "no changes" list that would read
+    // as "nothing changed" in the run summary.
+    let non_git = TempDir::new().unwrap();
+    let result = vibepod::git::get_changed_files_since(non_git.path(), "HEAD");
+    assert_eq!(result, vibepod::git::ChangedFiles::Unavailable);
+}
+
+#[test]
+fn changed_files_lists_untracked_and_diff_in_a_repo() {
+    let dir = init_test_repo();
+    std::fs::write(dir.path().join("first.txt"), "a").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let base = vibepod::git::get_head_hash(dir.path()).unwrap();
+
+    // One tracked edit and one brand-new untracked file since `base`.
+    std::fs::write(dir.path().join("first.txt"), "a-changed").unwrap();
+    std::fs::write(dir.path().join("second.txt"), "new").unwrap();
+
+    match vibepod::git::get_changed_files_since(dir.path(), &base) {
+        vibepod::git::ChangedFiles::Computed(files) => {
+            assert!(files.contains(&"first.txt".to_string()), "got: {:?}", files);
+            assert!(
+                files.contains(&"second.txt".to_string()),
+                "got: {:?}",
+                files
+            );
+        }
+        vibepod::git::ChangedFiles::Unavailable => {
+            panic!("expected Computed inside a valid repo")
+        }
+    }
+}

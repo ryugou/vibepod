@@ -249,6 +249,11 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             let check_interval = std::time::Duration::from_secs(idle_timeout_secs.min(30));
             loop {
                 tokio::time::sleep(check_interval).await;
+                // unwrap 許容: この Mutex<Instant> は monitor タスクと本体の
+                // ストリームループの 2 者だけが、`Instant` の read/write という
+                // パニックし得ない極小クリティカルセクションで保持する。
+                // 保持中にパニックする経路が無いため poison しない（規約: unwrap
+                // にはパニック不可の理由を明記する）。
                 let elapsed = last_event.lock().unwrap().elapsed();
                 if elapsed > timeout {
                     timed_out_flag.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -295,6 +300,9 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             let mut log = log_file;
             let mut last_lock_update = std::time::Instant::now();
             while let Ok(Some(line)) = lines.next_line().await {
+                // unwrap 許容: 上の monitor タスクと同じ Mutex<Instant>。保持は
+                // `Instant` の代入のみでパニック経路が無く poison しないため
+                // （規約: unwrap にはパニック不可の理由を明記する）。
                 *last_event_at.lock().unwrap() = std::time::Instant::now();
 
                 // ロックファイルの last_event_at を約 30 秒ごとに更新（vibepod ps 用）
@@ -565,6 +573,16 @@ fn print_post_run_summary(
         let logs_str = log_path
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "N/A".to_string());
+        // git が失敗して変更ファイル一覧を算出できなかった場合は握りつぶさず、
+        // 次のアクション（フルログ参照）が分かる注記を stderr に出す（指摘 #2）。
+        // 要約側でも `(none)` とは別文言で表示される。
+        if matches!(changed, crate::git::ChangedFiles::Unavailable) {
+            eprintln!(
+                "  Warning: could not compute the changed-file list (git command failed). \
+                 Inspect the working tree manually or see the full logs: {}",
+                logs_str
+            );
+        }
         let block = super::render_run_summary(success, &reason, result_text, &changed, &logs_str);
         println!();
         println!("{}", block);

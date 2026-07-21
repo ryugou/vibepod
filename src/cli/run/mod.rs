@@ -93,7 +93,7 @@ pub fn render_run_summary(
     success: bool,
     reason: &str,
     result_text: Option<&str>,
-    changed_files: &[String],
+    changed_files: &crate::git::ChangedFiles,
     logs_path: &str,
 ) -> String {
     let mut out = String::from("Summary:\n");
@@ -112,14 +112,23 @@ pub fn render_run_summary(
         }
     }
 
-    if changed_files.is_empty() {
-        out.push_str("  Changed files: (none)\n");
-    } else {
-        out.push_str(&format!("  Changed files ({}):\n", changed_files.len()));
-        for f in changed_files {
-            out.push_str("    ");
-            out.push_str(f);
-            out.push('\n');
+    // 「本当に無変更 (none)」と「算出できなかった (unavailable)」を必ず
+    // 区別する。潰すと、算出失敗が「変更なし」に見えて呼び出し元が
+    // 誤判断する（指摘 #2）。
+    match changed_files {
+        crate::git::ChangedFiles::Unavailable => {
+            out.push_str("  Changed files: (could not be computed — see full logs)\n");
+        }
+        crate::git::ChangedFiles::Computed(files) if files.is_empty() => {
+            out.push_str("  Changed files: (none)\n");
+        }
+        crate::git::ChangedFiles::Computed(files) => {
+            out.push_str(&format!("  Changed files ({}):\n", files.len()));
+            for f in files {
+                out.push_str("    ");
+                out.push_str(f);
+                out.push('\n');
+            }
         }
     }
 
