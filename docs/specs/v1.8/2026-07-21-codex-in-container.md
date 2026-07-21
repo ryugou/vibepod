@@ -591,6 +591,77 @@ symlink 除外時の `eprintln!` 出力そのものの固定(stderr キャプチ
 `remove_dir_all` が `NotFound`(既に片付け済み)を返した場合を無警告スキップに分岐する案
 (spec の「削除失敗時に警告」の文言に忠実な現状実装を維持し、literal 準拠を優先した)。
 
+## Copilot レビュー指摘対応(round C2、2026-07-22)
+
+### P: Dockerfile の codex 取得が `releases/latest` で整合性検証なし(supply-chain / 再現性)
+
+対応(spec 要件1の意図的修正):
+- `CODEX_VERSION` build arg を追加。**既定は現行の具体バージョン(例: 0.144.6)に pin** し、
+  取得 URL を `releases/download/rust-v${CODEX_VERSION}/<asset>` にする
+- pin されたバージョンの musl 2アセット(aarch64 / x86_64)の **SHA256 をリポジトリ内に保持**し、
+  ダウンロード後に `sha256sum -c` 相当で検証。不一致ならビルドを落とす
+- エスケープハッチ: `--build-arg CODEX_VERSION=latest` 指定時は従来の latest 取得
+  (この場合チェックサム検証はスキップし、その旨をビルドログに警告として出す)
+- codex の更新手順: Dockerfile の `CODEX_VERSION` と SHA256 を bump して `init --rebuild`。
+  README の該当記述を更新すること
+- 実際の現行バージョンと SHA256 は実装時に `gh release view --repo openai/codex` と
+  実アセットのダウンロードで取得し、推測で書かないこと
+
+### テスト/検証(round C2 対応分)
+
+- docker build(既定 pin)で codex --version が pin どおりであること(実機)
+- 改ざんシミュレーション(誤った SHA256 を仕込む)でビルドが失敗すること(可能なら)
+
+### 対応結果(round C2、実装記録)
+
+`templates/Dockerfile` に `ARG CODEX_VERSION=0.145.0`(タグ `rust-v0.145.0`)を追加した。
+既定(非 `latest`)時の取得 URL を `releases/download/rust-v${CODEX_VERSION}/<asset>` に変更し、
+ダウンロード後 `sha256sum -c` でチェックサム検証してから `tar -xzf` で展開する(検証が
+展開より先に実行されることを確認済み。不一致時は `set -eu` 下で `RUN` レイヤーごと失敗する)。
+`CODEX_VERSION=latest` 指定時のみ従来の `releases/latest/download/<asset>` にフォールバック
+し、チェックサム検証をスキップして `codex: CODEX_VERSION=latest — downloading unpinned
+release, skipping checksum verification` を stderr に警告として出す。checksum テーブルに
+無い `CODEX_VERSION`/アーキ組み合わせ(`latest` 以外)は `no known SHA256 for
+CODEX_VERSION=...` を出して `exit 1` し、無言でのビルド続行を防ぐ(bump 漏れの検出)。
+
+実際のバージョン・SHA256 は `gh release view --repo openai/codex rust-v0.145.0` および
+`https://github.com/openai/codex/releases/download/rust-v0.145.0/<asset>` からの実ダウンロード
++ `sha256sum` で実測した(推測なし。reviewer が別途独立して再ダウンロード・再計算し一致を
+確認済み):
+- aarch64(`codex-aarch64-unknown-linux-musl.tar.gz`):
+  `d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227`
+- x86_64(`codex-x86_64-unknown-linux-musl.tar.gz`):
+  `bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a`
+
+README の「Codex review inside the container」節を、CODEX_VERSION pin + SHA256 検証の仕組みと、
+更新手順(`CODEX_VERSION` と SHA256 テーブルを bump してから `vibepod init --rebuild`)、
+エスケープハッチ(`vibepod init` には `CODEX_VERSION` を渡す経路が無いため、直接
+`docker build --build-arg CODEX_VERSION=latest -f templates/Dockerfile -t
+vibepod-<agent>:latest .` を叩く手動運用であること)を反映するよう更新した。
+
+このセッションの実行環境に `docker` バイナリが無いため、spec が求める実機 `docker build`
+検証(既定 pin での `codex --version` 一致、改ざんシミュレーションでのビルド失敗)は
+**実施できなかった**。代替として:
+- `templates/Dockerfile` の内容を静的に検証する `tests/dockerfile_codex_pin_test.rs` を追加
+  (7 テスト: pin されたデフォルトバージョンの存在、pin URL 構築、両アーキの実チェックサム
+  文字列の存在、`sha256sum -c` が `tar -xzf` より前に実行されること、`latest` エスケープ
+  ハッチと警告メッセージの存在、未知バージョンでの `exit 1`、既存の `RUN codex --version`
+  の維持)
+- `RUN` ブロックのシェルロジックを実際に `sh` 上で実行し、pin 成功・改ざん検知(誤った
+  SHA256 で `sha256sum -c` が `FAILED` を返し `exit 1` すること)・未知バージョン失敗・
+  `latest` 警告つき成功の4分岐すべてを実地確認した(Fable が実施し、reviewer が独立して
+  同様の検証を再実施し一致を確認)
+
+kaneko 実装 → reviewer 一次レビューは PASS(Critical / Major 指摘なし)。Suggestion 2件
+(README のエスケープハッチ例に `HOST_UID`/`HOST_GID` build-arg が無いこと、静的テストが
+既存の unsupported-architecture 分岐や SHA256 の桁数フォーマットまでは検証していないこと)
+は既存挙動への影響がない・spec 要件外の追加保険であるため、今回は見送り、将来の round で
+必要になれば対応する。
+
+`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test` は
+いずれも成功(新規テスト7本を含む全件 pass)。詳細はコミットに含まれる差分・reviewer の
+評価記録を参照。
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

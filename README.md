@@ -234,8 +234,19 @@ continues without codex support in that container — this is not a fatal
 error.
 
 The `codex` binary itself is **not** auto-updated at runtime (unlike Claude
-Code). To pick up a newer `codex` release, rebuild the image with
-`vibepod init --rebuild`.
+Code). Its version is **pinned** via the `CODEX_VERSION` build arg in
+`templates/Dockerfile` (default: a fixed release tag, not `latest`), and the
+downloaded release asset is verified against a SHA256 checksum recorded in
+that same file — the build fails if the checksum doesn't match. To pick up a
+newer `codex` release, bump both `CODEX_VERSION` and the corresponding
+SHA256 entries in `templates/Dockerfile`, then rebuild the image with
+`vibepod init --rebuild`. As an escape hatch, building the image directly
+with `docker build --build-arg CODEX_VERSION=latest -f templates/Dockerfile
+-t vibepod-<agent>:latest .` (matching the `vibepod-<agent>:latest` tag
+`vibepod init` itself uses) downloads the latest `codex` release from
+GitHub without checksum verification. `vibepod init` has no flag for this —
+it always builds from the pinned default — so this is a manual, one-off
+path (e.g. testing an unreleased pin bump), not part of routine updates.
 
 ## Security Model
 
