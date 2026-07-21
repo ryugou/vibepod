@@ -260,11 +260,19 @@ fn should_keep_staged_auth_false_when_host_is_newer() {
 }
 
 #[test]
-fn should_keep_staged_auth_false_when_mtimes_are_equal() {
-    // Equal mtimes must fall through to "host wins" (overwrite), matching the
-    // pre-round-3 behavior when no reliable ordering can be established.
+fn should_keep_staged_auth_true_when_mtimes_are_equal() {
+    // codex review round 8 P2-1: equal mtimes now fall through to "staged
+    // wins" (keep), reversing the pre-round-8 "host wins" behavior. Rationale:
+    // staging a copy and an in-container refresh token rotation can collapse
+    // to the same mtime within a coarse filesystem's timestamp resolution
+    // (e.g. whole-second granularity). The equal-mtime case where the host is
+    // *actually* newer (a re-login landing at the exact same instant) is
+    // astronomically rare and, if it does happen, is trivially recoverable by
+    // logging in again. Losing a rotated refresh token by overwriting it
+    // instead is a much heavier failure that requires user action to recover
+    // from, so the safe default is to keep the staged copy on a tie.
     let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-    assert!(!should_keep_staged_auth(t, t));
+    assert!(should_keep_staged_auth(t, t));
 }
 
 // --- prepare_codex_mount: keep-newer-auth (codex review round 3, P1) ---
@@ -812,4 +820,158 @@ fn prepare_codex_mount_succeeds_under_concurrent_calls_to_same_stage() {
              last"
         );
     }
+}
+
+// --- prepare_codex_mount: non-regular-file staged auth.json is removed and
+// re-created from host (codex review round 8, P1) ---
+
+#[test]
+fn prepare_codex_mount_replaces_staged_auth_directory_with_fresh_host_copy() {
+    // round 8 P1: `reconcile_codex_stage_dir`'s sweep only inspects entry
+    // *names* against the allowlist -- it `continue`s past any entry whose
+    // name matches an allowlisted name (see the `keep.contains(&name_str...)`
+    // early-continue in that function) without ever looking at its
+    // `file_type`. So if the container replaces the staged `auth.json` with a
+    // directory of the same name, reconcile's sweep never sees it as "stale";
+    // only the dedicated non-regular-file defense
+    // (`remove_dst_if_not_regular_file`, called per-entry right before the
+    // mtime/copy logic) can catch it. If this understanding were wrong --
+    // e.g. if reconcile alone already handled this -- this test would give a
+    // false positive by accidentally passing for the wrong reason, so this
+    // comment records the structural reason it must be the dedicated defense
+    // doing the work here.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    assert!(
+        staged_auth.is_file(),
+        "sanity check: first run stages a regular file"
+    );
+
+    // A container with the rw-mounted stage swaps the staged auth.json for a
+    // directory of the same name. A directory's mtime can easily be "newer"
+    // than the host's untouched auth.json, which (absent this defense) would
+    // let it survive should_keep_staged_auth's keep-newer check forever.
+    fs::remove_file(&staged_auth).unwrap();
+    fs::create_dir_all(&staged_auth).unwrap();
+    fs::write(staged_auth.join("junk"), "not an auth.json").unwrap();
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir.clone()));
+    assert!(
+        staged_auth.is_file(),
+        "the directory masquerading as auth.json must be removed and replaced with a regular \
+         file"
+    );
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"HOST_AUTH"}"#,
+        "staged auth.json must be re-copied from the host after the directory is removed"
+    );
+}
+
+// --- prepare_codex_mount: equal mtimes keep the staged copy (codex review
+// round 8, P2-1) ---
+
+#[test]
+fn prepare_codex_mount_keeps_staged_auth_when_mtimes_are_equal() {
+    // round 8 P2-1 integration guard: staging a copy and an in-container
+    // refresh landing within the same fs timestamp granularity can produce
+    // equal mtimes. Before round 8 this fell through to "host wins" and
+    // silently discarded the container's rotated refresh token; now it must
+    // keep the staged copy instead.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+
+    // Simulate the in-container codex rotating its refresh token at exactly
+    // the same fs-visible timestamp as the host's copy (coarse mtime
+    // resolution collapsing two genuinely different instants into one
+    // value).
+    fs::write(
+        &staged_auth,
+        r#"{"token":"CONTAINER_REFRESHED_SAME_INSTANT"}"#,
+    )
+    .unwrap();
+    set_mtime(&staged_auth, t0);
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir));
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"CONTAINER_REFRESHED_SAME_INSTANT"}"#,
+        "equal mtimes must keep the staged copy rather than fall back to overwriting it with \
+         the host copy"
+    );
+}
+
+// --- prepare_codex_mount: copy is skipped when staged content already
+// matches host (codex review round 8, P2-2) ---
+
+#[test]
+fn prepare_codex_mount_skips_copy_when_staged_auth_content_matches_host() {
+    // round 8 P2-2: even when should_keep_staged_auth takes the "host wins"
+    // branch (host mtime is strictly newer than staged), the copy itself must
+    // still be skipped if the staged content is already byte-identical to the
+    // host's -- no chmod, no rename, no mtime bump.
+    //
+    // This is verified indirectly via mtime: the staged auth.json's mtime is
+    // pinned to a value strictly older than the host's (forcing
+    // should_keep_staged_auth's "host wins" branch, so the copy machinery's
+    // own content check is what's actually under test, not P2-1's mtime
+    // short-circuit). If the copy ran, `copy_codex_asset_atomically`'s
+    // NamedTempFile::persist would replace the destination inode and the OS
+    // would stamp a fresh mtime at persist time -- not the exact value pinned
+    // beforehand. So an unchanged mtime after the call is proof the copy path
+    // was never taken.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+
+    // The staged content is already identical to the host's: make_host_codex
+    // writes the same auth.json content on the host, and the first
+    // prepare_codex_mount call above copied it verbatim -- neither side has
+    // been rewritten since. Pin the staged mtime strictly older than the
+    // host's so should_keep_staged_auth takes the "host wins" branch and the
+    // copy machinery's content-equality check is what's actually exercised.
+    let staged_mtime = t0 - Duration::from_secs(60);
+    set_mtime(&staged_auth, staged_mtime);
+    let mtime_before = fs::metadata(&staged_auth).unwrap().modified().unwrap();
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir));
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"HOST_AUTH"}"#,
+        "content must remain the (already-matching) host value"
+    );
+    let mtime_after = fs::metadata(&staged_auth).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_after, mtime_before,
+        "identical content must skip the copy entirely, leaving the staged file's mtime \
+         untouched rather than bumped by a fresh persist"
+    );
 }

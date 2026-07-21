@@ -539,35 +539,87 @@ fn reconcile_codex_stage_dir(dir: &std::path::Path, keep: &[&str]) -> anyhow::Re
     Ok(())
 }
 
-/// `dst` が symlink かどうかを `symlink_metadata`(リンクを辿らない)で判定し、
-/// symlink であれば**辿らずに `remove_file` で削除**して stderr に警告を出す。
+/// `dst` を `symlink_metadata`(リンクを辿らない)で判定し、**通常ファイル
+/// (regular file)以外はすべて削除**して stderr に警告を出す。
 ///
-/// コンテナは rw マウント経由でステージ内の `auth.json` / `config.toml` を
-/// ホスト任意パスへの symlink に差し替えられる。`dst.is_file()` や
-/// `std::fs::metadata` はリンクを辿って `true` / リンク先の情報を返すため、
-/// これらで判定・処理すると mtime 比較やコピー先の解決がホスト任意ファイルを
-/// 対象にしてしまう(コンテナ→ホストの書き込み境界の破れ、codex レビュー
-/// round 5 P1-a)。呼び出し元は、この関数が戻った後は「`dst` は
-/// symlink ではない(存在しないか、通常ファイル)」ものとして扱ってよい。
+/// コンテナは rw マウント経由でステージ内の `auth.json` / `config.toml` を、
+/// ホスト任意パスへの symlink だけでなく、ディレクトリ等の非通常ファイルにも
+/// 差し替えられる(codex レビュー round 8 P1)。`reconcile_codex_stage_dir` は
+/// allowlist に**含まれる名前**のエントリを file_type を一切見ずに素通りする
+/// ため、名前だけ `auth.json` のディレクトリへの差し替えはそちらでは捕まらず、
+/// この関数が唯一の防波堤になる。特にディレクトリへの差し替えを放置すると、
+/// mtime が新しい `auth.json` ディレクトリが `should_keep_staged_auth` の
+/// keep-newer 判定を通ってしまい、以後ホストからの再作成が恒久的にスキップ
+/// されて認証が壊れたままになる。
 ///
-/// `dst` が存在しない場合は何もしない(正常系)。symlink 以外の
-/// `symlink_metadata` 失敗(パーミッション等)は握りつぶさず伝播する。
-fn remove_dst_if_symlink(dst: &std::path::Path) -> anyhow::Result<()> {
+/// `dst.is_file()` や `std::fs::metadata` はリンクを辿って `true` / リンク先の
+/// 情報を返すため、これらで判定・処理すると mtime 比較やコピー先の解決が
+/// ホスト任意ファイルを対象にしてしまう(コンテナ→ホストの書き込み境界の破れ、
+/// codex レビュー round 5 P1-a)。呼び出し元は、この関数が戻った後は「`dst` は
+/// 存在しないか、通常ファイル」ものとして扱ってよい。
+///
+/// `dst` が存在しない場合は何もしない(正常系)。削除対象がディレクトリなら
+/// `remove_dir_all`、それ以外(symlink 等)なら `remove_file`(symlink はこれで
+/// 辿らず unlink できる)を使う。`symlink_metadata` 自体の失敗(パーミッション
+/// 等)および削除失敗は握りつぶさず伝播する。
+fn remove_dst_if_not_regular_file(dst: &std::path::Path) -> anyhow::Result<()> {
     let meta = match std::fs::symlink_metadata(dst) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e).with_context(|| format!("Failed to stat {}", dst.display())),
     };
 
-    if meta.file_type().is_symlink() {
-        std::fs::remove_file(dst)
-            .with_context(|| format!("Failed to remove symlink at {}", dst.display()))?;
-        eprintln!(
-            "staged codex file was a symlink; removed (possible container tampering): {}",
-            dst.display()
-        );
+    if meta.file_type().is_file() {
+        return Ok(());
     }
+
+    if meta.file_type().is_dir() {
+        std::fs::remove_dir_all(dst)
+            .with_context(|| format!("Failed to remove staged directory at {}", dst.display()))?;
+    } else {
+        std::fs::remove_file(dst).with_context(|| {
+            format!(
+                "Failed to remove non-regular staged entry at {}",
+                dst.display()
+            )
+        })?;
+    }
+    eprintln!(
+        "staged codex file was not a regular file (symlink or directory); removed (possible \
+         container tampering): {}",
+        dst.display()
+    );
     Ok(())
+}
+
+/// `dst` が改ざんされていない通常ファイルで、かつ `src` と完全に同一の
+/// バイト列を持つかを判定するヘルパー(codex レビュー round 8 P2-2)。
+/// `copy_codex_asset_atomically` が「コピー自体を省略してよいか」の事前
+/// チェックに使う。
+///
+/// - `dst` が存在しない、または `symlink_metadata` 上 regular file でない
+///   (symlink・ディレクトリ等)場合は `false`。`symlink_metadata` を使う
+///   ため symlink を辿ることはない
+/// - `dst` の読み取りに失敗した場合も `false` を返す。`dst` はステージ側で
+///   改ざんされている可能性がある対象なので、読めなければ安全側(=コピー
+///   実行)に倒すのが妥当
+/// - `src` の読み取りに失敗した場合も `false` を返すが、これは「同一でない
+///   と決め打ちしてコピーを握りつぶす」ものではない。呼び出し元は `false`
+///   の場合そのまま通常のコピー処理へ進み、そこで `std::fs::copy(src, ..)`
+///   が同じ理由で失敗して anyhow context 付きで自然に伝播される
+fn staged_asset_matches_host(src: &std::path::Path, dst: &std::path::Path) -> bool {
+    let is_regular_file = matches!(
+        std::fs::symlink_metadata(dst),
+        Ok(meta) if meta.file_type().is_file()
+    );
+    if !is_regular_file {
+        return false;
+    }
+
+    let (Ok(src_bytes), Ok(dst_bytes)) = (std::fs::read(src), std::fs::read(dst)) else {
+        return false;
+    };
+    src_bytes == dst_bytes
 }
 
 /// ホストの `src` をステージ内 `dst` へコピーする。
@@ -578,8 +630,9 @@ fn remove_dst_if_symlink(dst: &std::path::Path) -> anyhow::Result<()> {
 ///
 /// - **P1(セキュリティ)**: コンテナが `<name>.tmp` という固定名自体を
 ///   ホスト任意パスへの symlink に差し替えておくと、次回 run の
-///   `std::fs::copy(src, &tmp)` がそのリンクを辿り、`dst` 側の symlink 防御
-///   (`remove_dst_if_symlink`)を迂回してホスト任意ファイルを上書きできた。
+///   `std::fs::copy(src, &tmp)` がそのリンクを辿り、`dst` 側の非通常ファイル
+///   防御(`remove_dst_if_not_regular_file`)を迂回してホスト任意ファイルを
+///   上書きできた。
 /// - **P2(信頼性)**: 複数の `vibepod run` が同時にステージ準備を行うと
 ///   同じ固定名を取り合い、一方が rename した直後に他方の chmod/rename が
 ///   `NotFound` で失敗する不定期な競合が起きていた。
@@ -594,9 +647,19 @@ fn remove_dst_if_symlink(dst: &std::path::Path) -> anyhow::Result<()> {
 /// ファイルが `dst` の場所に見える可能性がある)。`persist` 自体は rename と
 /// 同じく symlink を辿らずディレクトリエントリを置き換えるため、置換時点で
 /// `dst` が symlink であっても安全だが、改ざんの可能性を運用者が把握できる
-/// よう persist 直前に `remove_dst_if_symlink` で検査・警告する(round 5 の
-/// 防御をそのまま維持)。
+/// よう persist 直前に `remove_dst_if_not_regular_file` で検査・警告する
+/// (round 5 の防御をそのまま維持)。
+///
+/// 冒頭で `dst` の内容が `src` と既に同一かを確認し(P2-2、codex レビュー
+/// round 8)、同一ならコピー・chmod・rename を一切行わずに早期リターンする。
+/// 無駄な mtime 更新を避けられるほか、`should_keep_staged_auth` の
+/// 「同値はステージ優先」判定(P2-1)は実際に値が変わった場合にのみ意味を
+/// 持つため、内容が同じなら mtime を動かさない方が判定全体の安定性も上がる。
 fn copy_codex_asset_atomically(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    if staged_asset_matches_host(src, dst) {
+        return Ok(());
+    }
+
     let stage_dir = dst.parent().with_context(|| {
         format!(
             "codex stage destination {} has no parent directory",
@@ -627,10 +690,10 @@ fn copy_codex_asset_atomically(src: &std::path::Path, dst: &std::path::Path) -> 
             .with_context(|| format!("Failed to set permissions on {}", tmp.path().display()))?;
     }
 
-    // persist 直前にも dst の symlink 検査を行う。persist(rename) 自体は
+    // persist 直前にも dst の非通常ファイル検査を行う。persist(rename) 自体は
     // symlink を辿らず安全に置換できるが、改ざんが起きていたことを運用者に
     // 知らせる。
-    remove_dst_if_symlink(dst)?;
+    remove_dst_if_not_regular_file(dst)?;
 
     tmp.persist(dst).map_err(|e| {
         anyhow::anyhow!(
@@ -653,15 +716,25 @@ fn copy_codex_asset_atomically(src: &std::path::Path, dst: &std::path::Path) -> 
 /// トークンが失われ、以後コンテナ内 codex が認証不能になる(codex レビュー round 3
 /// P1)。
 ///
-/// ステージ済みファイルの mtime がホスト側より **厳密に新しい** 場合のみ「コンテナが
-/// 更新した」とみなして保持する(= コピーしない)。mtime が同じ、またはホスト側の
-/// mtime が新しい(= ユーザーが再ログインした等)場合は、従来どおりホスト側優先で
-/// 上書きする。ホストへの書き戻しは行わない(「ホスト原本に触れない」原則のため)。
+/// ステージ済みファイルの mtime がホスト側**以上**の場合、「コンテナが更新した」
+/// とみなして保持する(= コピーしない)。ホスト側の mtime が厳密に新しい場合
+/// (= ユーザーが再ログインした等)のみ、従来どおりホスト側優先で上書きする。
+/// ホストへの書き戻しは行わない(「ホスト原本に触れない」原則のため)。
+///
+/// 同値をステージ優先に倒す理由(codex レビュー round 8 P2-1): 判定を厳密な
+/// `>` にしていると、ステージへのコピーとコンテナ内でのトークンリフレッシュが
+/// ファイルシステムのタイムスタンプ分解能内(粗い fs では同一秒)に起きた場合、
+/// mtime が同値になり、更新済みのステージが古いホスト認証で上書きされてしまう。
+/// 同値でかつ実際にはホストが真に新しい(同一瞬間の再ログイン)ケースは
+/// 天文学的に稀であり、仮に起きても再ログインし直せば回復できる。一方、
+/// リフレッシュトークン喪失(ステージ優先にしなかった場合に起き得る)は回復に
+/// ユーザー操作が必須の重い障害になる。前者の取りこぼしより後者を避ける方が
+/// 安全側であるため、同値はステージ優先とする。
 pub fn should_keep_staged_auth(
     host_mtime: std::time::SystemTime,
     staged_mtime: std::time::SystemTime,
 ) -> bool {
-    staged_mtime > host_mtime
+    staged_mtime >= host_mtime
 }
 
 /// 共有 codex ステージ(`<config_dir>/codex/`)への並行アクセスを直列化する
@@ -860,11 +933,13 @@ pub fn prepare_codex_mount(
     for (src, name) in &entries {
         let dst = codex_stage_dir.join(name);
 
-        // P1-a: dst はコンテナの rw マウント経由でホスト任意パスへの symlink に
-        // 差し替えられている可能性がある。以降の mtime 判定・コピーがリンクを
-        // 辿ってホスト任意ファイルに触れないよう、まず symlink なら辿らず削除
-        // する。以後 dst は「存在しないか、通常ファイル」として扱ってよい。
-        remove_dst_if_symlink(&dst)?;
+        // P1-a/P1(round 8): dst はコンテナの rw マウント経由で symlink や
+        // ディレクトリ等の非通常ファイルに差し替えられている可能性がある。
+        // 以降の mtime 判定・コピーが symlink 経由でホスト任意ファイルに
+        // 触れたり、ディレクトリを「新しい auth.json」として誤採用したり
+        // しないよう、まず非通常ファイルなら辿らず削除する。以後 dst は
+        // 「存在しないか、通常ファイル」として扱ってよい。
+        remove_dst_if_not_regular_file(&dst)?;
 
         if *name == "auth.json" {
             let staged_meta = match std::fs::symlink_metadata(&dst) {
@@ -1159,8 +1234,8 @@ mod tests {
         // 使う旧実装は、`std::fs::copy(src, &tmp)` の時点で `tmp` を辿ってしまう。
         // コンテナが rw マウント経由でその固定名を先回りしてホスト任意パスへの
         // symlink にしておくと、次回の copy がリンク先(ホスト側ファイル)を
-        // 直接上書きしてしまい、dst 自体の symlink 防御(remove_dst_if_symlink)を
-        // 完全に迂回できた。
+        // 直接上書きしてしまい、dst 自体の非通常ファイル防御
+        // (remove_dst_if_not_regular_file)を完全に迂回できた。
         //
         // `prepare_codex_mount` 経由の統合テストでは、この関数呼び出しより前に
         // round 5 の完全リコンサイル(`reconcile_codex_stage_dir`)が allowlist 外
