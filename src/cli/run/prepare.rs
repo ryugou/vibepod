@@ -531,6 +531,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // below, so they are computed once here and reused.
     let claude_config_mounts = super::build_claude_config_mounts(&home);
     let host_settings_exists = home.join(".claude").join("settings.json").is_file();
+    // auth.json の有無判定は prepare_codex_mount 内の has_auth 判定と完全に
+    // 同じ基準にする(config.toml の有無は問わない)。基準がずれると、実際には
+    // bind mount されない codex を「ある」と誤ってラベルに含めてしまい、
+    // 構成差分の警告が出なくなる。
+    let host_codex_auth_exists = super::host_codex_stage_entries(&home.join(".codex"))
+        .iter()
+        .any(|(_, name)| *name == "auth.json");
 
     if let Some(stored_labels) = stored_labels_opt {
         let mut mounts_parts: Vec<String> = Vec::new();
@@ -550,7 +557,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         if host_settings_exists {
             mounts_parts.push(super::SANITIZED_SETTINGS_LABEL_MARKER.to_string());
         }
-        mounts_parts.sort();
 
         // Encode the FULL sorted lang_names set so reuse re-provisions
         // whenever any language is added or removed.
@@ -566,7 +572,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
         let mut current_labels = std::collections::HashMap::new();
 
-        current_labels.insert("vibepod.mounts".to_string(), mounts_parts.join("|"));
+        current_labels.insert(
+            "vibepod.mounts".to_string(),
+            super::build_mounts_label(mounts_parts, host_codex_auth_exists),
+        );
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);

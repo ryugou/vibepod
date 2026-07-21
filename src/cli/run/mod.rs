@@ -258,6 +258,15 @@ const DEFAULT_PLUGINS_CONTAINER_PATH: &str = "/home/vibepod/.claude/plugins";
 pub(super) const SANITIZED_SETTINGS_LABEL_MARKER: &str =
     "sanitized_settings=/home/vibepod/.claude/settings.json";
 
+/// ラベル中で「`/home/vibepod/.codex` が bind mount されている」ことを示す
+/// マーカー。bind mount はコンテナ作成時に固定されるため、codex の有無を
+/// mounts ラベルの構成要素に含めないと、後から `~/.codex/auth.json` が
+/// 追加/削除されても既存コンテナとの構成差分として検出されない
+/// (round 2 で見つかった不具合)。形式が `host:container` の通常マウント
+/// 表現と衝突しないように専用 prefix を付けている
+/// （`SANITIZED_SETTINGS_LABEL_MARKER` と同じパターン）。
+pub(super) const CODEX_MOUNT_LABEL_MARKER: &str = "codex=/home/vibepod/.codex";
+
 /// `~/.claude/` 配下のグローバル設定ファイル・ディレクトリのマウント定義を構築する。
 /// 存在するもののみ含まれる。read-only でマウントされる。
 ///
@@ -609,18 +618,36 @@ pub(super) fn build_container_config(
     }
 }
 
+/// mounts ラベル文字列を構築する。`base_parts` には通常マウント
+/// （host:container 形式）や sanitized_settings マーカー等を呼び出し側で
+/// 積んだ状態で渡す。ここでは codex マウントの有無を追加してから
+/// ソート・結合するところまでを一箇所に集約し、build_config_labels
+/// （コンテナ作成時にラベルへ書き込む値）と prepare_context の事前差分
+/// チェック（9b、既存コンテナと比較する現在値）の両方が全く同じロジックで
+/// mounts ラベルを組み立てるようにする。二箇所が独立に実装され食い違う
+/// ことが round 2 で見つかった不具合の根本原因だったため。
+pub(super) fn build_mounts_label(mut base_parts: Vec<String>, codex_present: bool) -> String {
+    if codex_present {
+        base_parts.push(CODEX_MOUNT_LABEL_MARKER.to_string());
+    }
+    base_parts.sort();
+    base_parts.join("|")
+}
+
 /// コンテナのラベルを生成する（設定変更の検知に使用）。
 pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap<String, String> {
     let mut labels = std::collections::HashMap::new();
 
     // マウントパスをソートして結合
-    let mut mount_parts: Vec<String> = ctx
+    let mount_parts: Vec<String> = ctx
         .extra_mounts
         .iter()
         .map(|(h, c)| format!("{}:{}", h, c))
         .collect();
-    mount_parts.sort();
-    labels.insert("vibepod.mounts".to_string(), mount_parts.join("|"));
+    labels.insert(
+        "vibepod.mounts".to_string(),
+        build_mounts_label(mount_parts, ctx.codex_dir.is_some()),
+    );
 
     labels.insert("vibepod.network".to_string(), ctx.no_network.to_string());
 
@@ -695,5 +722,71 @@ pub async fn execute(opts: RunOptions) -> Result<()> {
         interactive::run_interactive(&opts, &ctx).await
     } else {
         prompt::run_fire_and_forget(&opts, &ctx).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_mounts_label_is_deterministic() {
+        // codex マウントあり/なしそれぞれで、同じ入力なら常に同じ文字列に
+        // なること(既存コンテナとの比較が安定する前提条件)。
+        let base = vec![
+            "/host/a:/container/a".to_string(),
+            "/host/b:/container/b".to_string(),
+        ];
+        let with_codex_1 = build_mounts_label(base.clone(), true);
+        let with_codex_2 = build_mounts_label(base.clone(), true);
+        assert_eq!(with_codex_1, with_codex_2);
+
+        let without_codex_1 = build_mounts_label(base.clone(), false);
+        let without_codex_2 = build_mounts_label(base, false);
+        assert_eq!(without_codex_1, without_codex_2);
+    }
+
+    #[test]
+    fn test_build_mounts_label_detects_codex_presence_change() {
+        // codex の有無が変わると mounts ラベルが変わり、
+        // prepare.rs 側の warn_config_changes で構成差分として検出される。
+        let base = vec!["/host/a:/container/a".to_string()];
+        let with_codex = build_mounts_label(base.clone(), true);
+        let without_codex = build_mounts_label(base, false);
+
+        assert_ne!(with_codex, without_codex);
+        assert!(
+            with_codex.contains(CODEX_MOUNT_LABEL_MARKER),
+            "expected codex marker in: {}",
+            with_codex
+        );
+        assert!(
+            !without_codex.contains(CODEX_MOUNT_LABEL_MARKER),
+            "codex marker should be absent in: {}",
+            without_codex
+        );
+    }
+
+    #[test]
+    fn test_build_mounts_label_stable_regardless_of_input_order() {
+        // codex の有無が同じなら、base_parts の入力順が違っても(sort される
+        // ため)同じ結果になる = 順序違いだけで誤った差分検知をしない。
+        let base_order_1 = vec![
+            "/host/a:/container/a".to_string(),
+            "/host/b:/container/b".to_string(),
+        ];
+        let base_order_2 = vec![
+            "/host/b:/container/b".to_string(),
+            "/host/a:/container/a".to_string(),
+        ];
+
+        assert_eq!(
+            build_mounts_label(base_order_1.clone(), true),
+            build_mounts_label(base_order_2.clone(), true)
+        );
+        assert_eq!(
+            build_mounts_label(base_order_1, false),
+            build_mounts_label(base_order_2, false)
+        );
     }
 }

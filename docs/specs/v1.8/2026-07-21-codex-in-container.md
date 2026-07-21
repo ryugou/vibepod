@@ -91,6 +91,31 @@ auth.json は存在し config.toml だけ削除されたケースで、現在の
 - 事前に両ファイルステージ済みで host の config.toml だけ消して呼ぶ → ステージの config.toml が消え auth.json は更新される
 - ステージディレクトリ自体は上記どちらのケースでも削除されないこと
 
+## codex レビュー指摘対応(round 2、2026-07-21)
+
+round 1 対応(P1/P2)は解消を確認。新規指摘1件、対応必須。
+
+### P1: codex マウントの有無が構成差分として検出されず、既存コンテナで codex が黙って使えない(`src/cli/run/mod.rs:596-599` 付近)
+
+bind mount はコンテナ作成時に固定されるため、(a) 本機能より前に作られたコンテナ、
+(b) 作成時に `~/.codex/auth.json` が無く後からログインしたケースでは、
+`codex_dir` を用意しても `/home/vibepod/.codex` はマウントされない。
+現在のマウント比較ラベル(`build_config_labels` の mounts)に codex の有無が含まれないため
+警告も出ず、ユーザーは `--new` するまでコンテナ内 codex レビューが使えない理由に気づけない。
+
+対応: 既存の sanitized_settings と同様の方式で、codex マウントの有無を mounts ラベルの
+構成要素に含めること(例: `codex=/home/vibepod/.codex` のような専用 prefix エントリ)。
+これにより既存の「mount set 変更検知 → 警告と `--new` 案内」のゲートが codex の
+追加・削除を自然に検出する。後方互換(既存コンテナのラベルとの比較で不当に
+常時警告にならないこと)に注意し、v1.4.3 の legacy 正規化(`normalize_mounts_label_legacy`)の
+前例に倣うこと。
+
+### テスト追加(round 2 対応分)
+
+- codex マウントあり/なしそれぞれでラベルが安定して生成されること
+- codex の有無が変わった場合に構成差分として検出されること(警告経路)
+- codex の有無が同じ場合は差分として検出されないこと
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合
