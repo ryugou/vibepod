@@ -19,15 +19,14 @@ use super::{
 ///
 /// - `interactive = true`（`--prompt` なし・`--resume` なし）のときは
 ///   パーミッションバイパスを付けない（ユーザーが対話的に承認する想定）。
-/// - 非対話モードでは `mode == Impl` のときのみ
-///   `--dangerously-skip-permissions` を付与する。Review モードは
-///   `settings.json` の `permissions.deny` を尊重するため、ここでは
-///   付与しない。
+/// - 非対話モード（`--prompt` / `--resume`）では常に
+///   `--dangerously-skip-permissions` を付与する。コンテナに閉じ込めた
+///   確認なし実行が vibepod の主目的であり、承認者不在で自律実行するため。
 /// - `--resume` や `-p <prompt>`（`--output-format stream-json --verbose`
 ///   付き）は従来通り後段で積み上げる。
 pub fn build_claude_args(opts: &RunOptions, interactive: bool) -> Vec<String> {
     let mut claude_args: Vec<String> = Vec::new();
-    if !interactive && opts.mode == crate::cli::RunMode::Impl {
+    if !interactive {
         claude_args.push("--dangerously-skip-permissions".to_string());
     }
     // `--model` は対話・非対話の両パスで有効。vibepod は値を検証せず、
@@ -601,8 +600,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
-    // `runtime_dir` はこの関数の前半（template staging 組み立て前）で
-    // 既に作成済み。ここでは再作成しない。
+    // `runtime_dir` はこの関数の前半（9b）で既に作成済み。ここでは再作成しない。
 
     // Copy .claude.json to a per-container runtime file so the host file is
     // protected from container writes. Lives alongside any sanitized

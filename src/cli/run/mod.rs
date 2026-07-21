@@ -23,9 +23,6 @@ pub struct RunOptions {
     pub mount: Vec<String>,
     /// `--new` フラグ: 既存コンテナを破棄して新規作成する
     pub new_container: bool,
-    /// `--mode` フラグ: `impl`（デフォルト、コード編集）または `review`（読み取り専用レビュー）。
-    /// 非対話モードでの `--dangerously-skip-permissions` 付与の分岐に使用する。
-    pub mode: crate::cli::RunMode,
     /// コンテナ内 Claude Code の更新チェック方針（`--update` / `--no-update`）。
     pub update_policy: crate::update::UpdatePolicy,
     /// `--model <name>`: そのまま `claude --model <name>` に渡すモデル名。

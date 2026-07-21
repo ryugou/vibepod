@@ -5,7 +5,6 @@
 
 use vibepod::cli::run::prepare::build_claude_args;
 use vibepod::cli::run::RunOptions;
-use vibepod::cli::RunMode;
 
 fn base_opts() -> RunOptions {
     RunOptions {
@@ -18,7 +17,6 @@ fn base_opts() -> RunOptions {
         worktree: false,
         mount: vec![],
         new_container: false,
-        mode: RunMode::Impl,
         update_policy: vibepod::update::UpdatePolicy::default(),
         model: None,
         no_auto_build: false,

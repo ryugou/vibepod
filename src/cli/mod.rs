@@ -10,24 +10,6 @@ pub mod stop;
 
 use clap::{Parser, Subcommand};
 
-/// Usage mode for `vibepod run`: code-writing (`impl`, default) or
-/// read-only review (`review`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum RunMode {
-    #[default]
-    Impl,
-    Review,
-}
-
-impl RunMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            RunMode::Impl => "impl",
-            RunMode::Review => "review",
-        }
-    }
-}
-
 #[derive(Parser)]
 #[command(
     name = "vibepod",
@@ -83,9 +65,6 @@ pub enum Commands {
         /// Force create a new container (error if running, replace if stopped)
         #[arg(long)]
         new: bool,
-        /// Usage mode: `impl` (default, write code) or `review` (read-only review).
-        #[arg(long, value_enum, default_value_t = RunMode::Impl)]
-        mode: RunMode,
         /// Check for a Claude Code update in the container now, ignoring the
         /// usual once-a-day throttle.
         #[arg(long, conflicts_with = "no_update")]
