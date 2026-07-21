@@ -246,8 +246,9 @@ This follows [Anthropic's official recommendation](https://docs.anthropic.com/en
 |------|----------------------------------|-----------------|
 | `vibepod run` (interactive) | **Off** — permission prompts work normally | User approves each action |
 | `vibepod run --prompt` | **On** — autonomous execution | Container isolation is the safety boundary |
+| `vibepod run --mode review` (± `--prompt`) | **Off** — never bypassed, even under `--prompt` | Bundle `permissions.deny` blocks the main write paths, plus container isolation |
 
-In interactive mode, Claude Code asks for confirmation before each potentially destructive action. In `--prompt` mode these prompts are bypassed — the container's isolation is what prevents damage to your host.
+In interactive mode, Claude Code asks for confirmation before each potentially destructive action. In `--prompt` mode these prompts are bypassed — the container's isolation is what prevents damage to your host. **`--mode review` is the exception:** it does **not** bypass permissions even when combined with `--prompt`; instead the reviewer bundle's `permissions.deny` blocks the main write paths (see "Review mode" above). Do not read the `--prompt` row as "always bypasses" — review runs autonomously without the bypass flag.
 
 See [SECURITY.md](SECURITY.md) for the full security details.
 

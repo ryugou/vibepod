@@ -83,14 +83,17 @@ fn interactive_review_mode_never_bypasses_permissions() {
 
 /// Every review bundle must pin `"enabledPlugins": {}` (present AND empty).
 ///
-/// In review mode the container runs `--dangerously-skip-permissions`, so its
-/// safety rests entirely on the bundle's `settings.json`. The host's
-/// `~/.claude/plugins` is bind-mounted into the container, and a plugin can
-/// contribute commands/hooks that sidestep the `permissions.deny` list. An
-/// explicit empty `enabledPlugins` is what keeps those mounted-but-inert:
-/// nothing is activated. If a bundle dropped the key (Claude Code would then
-/// fall back to its own default) or set it non-empty, that guarantee would
-/// silently break — so this fails on either.
+/// Review mode does **not** bypass permissions — `build_claude_args` never
+/// adds `--dangerously-skip-permissions` for `RunMode::Review` (see the
+/// `review_mode_*` tests above). So the guard rail is the bundle's
+/// `permissions.deny` list. The catch: the host's `~/.claude/plugins` is
+/// bind-mounted into the container, and an enabled plugin can inject its own
+/// allow rules or hooks that *widen* what is permitted — even under a
+/// non-interactive `-p` run. Pinning `enabledPlugins` to `{}` keeps those
+/// plugins mounted but inert, so none of them can loosen the deny list. If a
+/// bundle dropped the key (Claude Code would fall back to its own default) or
+/// set it non-empty, that guarantee would silently break — so this fails on
+/// either.
 #[test]
 fn all_review_bundles_pin_enabled_plugins_to_empty() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
