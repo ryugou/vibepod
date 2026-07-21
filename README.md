@@ -135,6 +135,12 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--template <name>` | Mount a **custom** template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/`, layered on top of your host `~/.claude/` assets. For official language bundles, use `--lang` instead. Template names may be a single segment or nested slash-separated segments (e.g., `foo` or `foo/bar`); each segment must match `[a-zA-Z0-9_-]+`. Absolute paths and `..` are rejected. Cannot be combined with `--mode review`. See "Templates" below |
 | `--update` | Check for a Claude Code update inside the container now, ignoring the once-a-day throttle |
 | `--no-update` | Skip the container's Claude Code update check entirely |
+| `--model <name>` | Pass `--model <name>` straight through to Claude Code inside the container. Not validated by VibePod — Claude Code decides if it is valid. Works in both interactive and `--prompt` mode. Omit to use Claude Code's own default |
+| `--no-auto-build` | Do not build the Docker image on demand when it is missing. By default `vibepod run` auto-builds it; pass this to fail fast and be told to run `vibepod init` instead |
+| `--timeout <dur>` | Wall-clock limit for a `--prompt` session. Accepts bare seconds (`1800`) or a duration (`30m`, `1h30m`); `0` disables it. Defaults to **30 minutes**. On timeout the container-side agent is stopped, the workspace is restored, and the run exits non-zero |
+| `--verbose` | Stream Claude Code's per-event activity to stdout during `--prompt` (pre-1.7 behavior). By default only a concise end-of-run summary is printed |
+
+**Image auto-build.** The first `vibepod run` in an environment where the image is missing builds it automatically (a few minutes) instead of erroring, so you can call `vibepod run` from another session without running `vibepod init` first. Concurrent runs are serialized by a build lock so the image is built once. Use `--no-auto-build` to opt out.
 
 **Container reuse is the default.** VibePod creates one container per project (named `vibepod-{project}-{hash}`) and reuses it across runs. Setup only runs once; subsequent `vibepod run` calls skip setup and connect instantly via `docker exec`. Use `--new` to force a fresh container.
 
@@ -268,9 +274,23 @@ curl -fsSL https://raw.githubusercontent.com/ryugou/vibepod/main/install.sh | sh
 cargo install vibepod
 ```
 
-#### Stream output (`--prompt` mode)
+#### Output in `--prompt` mode
 
-When running with `--prompt`, VibePod streams Claude Code's activity in real-time via `--output-format stream-json`:
+By default, `--prompt` runs print a **concise end-of-run summary** rather than the full `stream-json` activity — the raw stream is verbose and, when `vibepod run` is invoked from another Claude Code session, floods that session's context. The complete stream is always saved to the session `logs.txt` regardless.
+
+```
+Summary:
+  Status: success
+  Result: Implementation complete. All checks pass.
+  Changed files (2):
+    src/main.rs
+    README.md
+  Full logs: /path/to/repo/.vibepod/sessions/<id>/logs.txt
+
+Container stopped (container preserved for next run).
+```
+
+Pass `--verbose` to stream Claude Code's per-event activity live instead (the pre-1.7 behavior):
 
 ```
 ────────────────────────────────────────────────────────
@@ -279,12 +299,9 @@ When running with `--prompt`, VibePod streams Claude Code's activity in real-tim
   │  [tool_use] Edit { file_path: "src/main.rs", old_string: "fn main()...", new_string: "fn main()..." }
   │  [tool_use] Bash { command: "cargo check" }
 ────────────────────────────────────────────────────────
-
-Result:
-Implementation complete. All checks pass.
-
-Container stopped (kept for reuse).
 ```
+
+If a `--prompt` run exceeds its `--timeout` (default 30 minutes), VibePod stops the container-side agent, restores the workspace to the session's starting commit, prints the `logs.txt` path, and exits non-zero — a timeout is never reported as success.
 
 #### Language toolchain auto-detection
 
