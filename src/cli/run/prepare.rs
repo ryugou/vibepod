@@ -30,6 +30,12 @@ pub fn build_claude_args(opts: &RunOptions, interactive: bool) -> Vec<String> {
     if !interactive && opts.mode == crate::cli::RunMode::Impl {
         claude_args.push("--dangerously-skip-permissions".to_string());
     }
+    // `--model` は対話・非対話の両パスで有効。vibepod は値を検証せず、
+    // そのまま `claude --model <name>` に渡す（正当性判断は claude 側）。
+    if let Some(ref model) = opts.model {
+        claude_args.push("--model".to_string());
+        claude_args.push(model.clone());
+    }
     if opts.resume {
         claude_args.push("--resume".to_string());
     }
@@ -152,6 +158,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
              define their own behavior (use one or the other)."
         );
     }
+
+    // 実時間上限を先に解釈して fail-fast する（コンテナ作成やイメージ
+    // ビルドの前に不正な --timeout を弾く）。未指定時は既定値。
+    let overall_timeout = match &opts.timeout {
+        Some(raw) => super::parse_timeout_secs(raw)?,
+        None => super::DEFAULT_OVERALL_TIMEOUT_SECS,
+    };
 
     // v1.6: Resolve official (lang, mode) template when the user didn't
     // pass `--template` explicitly. `opts.template` is the explicit path
@@ -548,12 +561,16 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         .await
         .context("Docker is not running. Please start Docker Desktop or OrbStack.")?;
 
-    if !runtime.image_exists(&global_config.image).await? {
-        bail!(
-            "Docker image '{}' not found. Run `vibepod init` first.",
-            global_config.image
-        );
-    }
+    // イメージが無ければ（既定で）自動ビルドして処理を継続する。これが
+    // 「他セッションで前準備なしにすぐ使える」を実現する要。並行実行の
+    // 二重ビルドはビルドロックで直列化する（ensure_image_available 内）。
+    crate::cli::init::ensure_image_available(
+        &runtime,
+        &global_config.image,
+        &config_dir,
+        opts.no_auto_build,
+    )
+    .await?;
 
     // 4. Compute container name
     // --worktree: ランダムハッシュ（使い捨て）
@@ -1117,6 +1134,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         is_disposable,
         no_network: opts.no_network,
         prompt_idle_timeout: vibepod_config.prompt_idle_timeout(),
+        overall_timeout,
+        verbose: opts.verbose,
     }))
 }
 

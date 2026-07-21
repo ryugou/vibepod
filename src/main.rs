@@ -32,6 +32,10 @@ async fn main() -> Result<()> {
             mode,
             update,
             no_update,
+            model,
+            no_auto_build,
+            timeout,
+            verbose,
         } => {
             // clap enforces that --update and --no-update are mutually
             // exclusive, so at most one of these can be set.
@@ -55,6 +59,10 @@ async fn main() -> Result<()> {
                 template,
                 mode,
                 update_policy,
+                model,
+                no_auto_build,
+                timeout,
+                verbose,
             })
             .await?;
         }

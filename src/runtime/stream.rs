@@ -6,6 +6,50 @@ pub enum StreamEvent {
     PassThrough(String),
 }
 
+/// Claude Code の stream-json `result` イベントから、呼び出し元向け要約に
+/// 必要なフィールドだけを抽出した結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultSummary {
+    /// `is_error` フィールド（欠落時は false 扱い）。
+    pub is_error: bool,
+    /// `subtype`（例: `"success"` / `"error_max_turns"` /
+    /// `"error_during_execution"`）。欠落時は `None`。
+    pub subtype: Option<String>,
+    /// エージェントの最終メッセージ（`result` フィールド）。欠落時は `None`。
+    pub result_text: Option<String>,
+}
+
+/// stream-json の 1 行を `result` イベントとして解釈し、要約に必要な
+/// フィールドを取り出す純関数。
+///
+/// - `line` が `None`、JSON でない、または `type != "result"` の場合は
+///   `None` を返す（＝要約すべき結果イベントが無かった）。
+/// - I/O や時刻に依存しないためユニットテストで網羅できる。
+pub fn summarize_result_line(line: Option<&str>) -> Option<ResultSummary> {
+    let line = line?;
+    let json: serde_json::Value = serde_json::from_str(line).ok()?;
+    if json.get("type").and_then(|v| v.as_str()) != Some("result") {
+        return None;
+    }
+    let is_error = json
+        .get("is_error")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let subtype = json
+        .get("subtype")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let result_text = json
+        .get("result")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some(ResultSummary {
+        is_error,
+        subtype,
+        result_text,
+    })
+}
+
 pub fn format_stream_event(line: &str) -> StreamEvent {
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(json) => {

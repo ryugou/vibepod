@@ -1,4 +1,4 @@
-use vibepod::runtime::{format_stream_event, StreamEvent};
+use vibepod::runtime::{format_stream_event, summarize_result_line, StreamEvent};
 
 #[test]
 fn test_format_assistant_text() {
@@ -117,6 +117,49 @@ fn test_format_tool_use_truncation_multibyte() {
         }
         other => panic!("Expected Display, got {:?}", other),
     }
+}
+
+// --- summarize_result_line ---
+
+#[test]
+fn test_summarize_result_success() {
+    let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#;
+    let s = summarize_result_line(Some(line)).expect("should summarize result event");
+    assert!(!s.is_error);
+    assert_eq!(s.subtype.as_deref(), Some("success"));
+    assert_eq!(s.result_text.as_deref(), Some("done"));
+}
+
+#[test]
+fn test_summarize_result_error() {
+    let line = r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#;
+    let s = summarize_result_line(Some(line)).expect("should summarize error result");
+    assert!(s.is_error);
+    assert_eq!(s.subtype.as_deref(), Some("error_max_turns"));
+    assert_eq!(s.result_text, None);
+}
+
+#[test]
+fn test_summarize_result_missing_is_error_defaults_false() {
+    let line = r#"{"type":"result","subtype":"success","result":"ok"}"#;
+    let s = summarize_result_line(Some(line)).unwrap();
+    assert!(!s.is_error, "missing is_error should default to false");
+}
+
+#[test]
+fn test_summarize_non_result_event_is_none() {
+    let line = r#"{"type":"assistant","message":{"content":[]}}"#;
+    assert!(summarize_result_line(Some(line)).is_none());
+}
+
+#[test]
+fn test_summarize_invalid_json_is_none() {
+    assert!(summarize_result_line(Some("not json")).is_none());
+}
+
+#[test]
+fn test_summarize_none_input_is_none() {
+    assert!(summarize_result_line(None).is_none());
 }
 
 #[test]

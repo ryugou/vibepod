@@ -23,6 +23,10 @@ fn base_opts() -> RunOptions {
         template: None,
         mode: RunMode::Impl,
         update_policy: vibepod::update::UpdatePolicy::default(),
+        model: None,
+        no_auto_build: false,
+        timeout: None,
+        verbose: false,
     }
 }
 

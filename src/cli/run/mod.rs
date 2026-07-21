@@ -33,6 +33,99 @@ pub struct RunOptions {
     pub mode: crate::cli::RunMode,
     /// コンテナ内 Claude Code の更新チェック方針（`--update` / `--no-update`）。
     pub update_policy: crate::update::UpdatePolicy,
+    /// `--model <name>`: そのまま `claude --model <name>` に渡すモデル名。
+    /// vibepod は値を検証しない（正当性は claude 側が判定する）。`None` の
+    /// ときは何も渡さず claude のデフォルト解決に任せる。
+    pub model: Option<String>,
+    /// `--no-auto-build`: イメージが無いときの自動ビルドを抑止する。
+    pub no_auto_build: bool,
+    /// `--timeout <duration>`: `--prompt` 実行の実時間上限（生文字列）。
+    /// `None` のときは `DEFAULT_OVERALL_TIMEOUT_SECS` を使う。パースは
+    /// `parse_timeout_secs` が担う（`0` で無効化）。
+    pub timeout: Option<String>,
+    /// `--verbose`: `--prompt` 実行で per-event の整形ログを stdout に流す
+    /// （1.7 未満の挙動）。既定は要約のみ。`logs.txt` への保存は常に継続する。
+    pub verbose: bool,
+}
+
+/// `--prompt` セッションの実時間上限のデフォルト（秒）。
+///
+/// 30 分。大きめのタスク・数回のリトライ・一時的な利用上限バックオフを
+/// 吸収できる程度に長く、かつ暴走（無限リトライや長時間バックオフ）で
+/// コンテナが何時間も居座るのを防げる程度に短い、という妥協点。
+/// `--timeout` で上書きでき、`--timeout 0` で無効化できる。
+pub const DEFAULT_OVERALL_TIMEOUT_SECS: u64 = 30 * 60;
+
+/// `--timeout` の値を秒数に解釈する純関数。
+///
+/// 受理する形式:
+/// - 裸の整数（秒）: `"1800"` → 1800。`"0"` は「無効化」を意味する 0。
+/// - サフィックス付き duration: `"30m"` / `"1h30m"` / `"90s"` など
+///   （`config::parse_duration_to_seconds` に委譲）。
+///
+/// 外部状態に依存しないためユニットテストで網羅できる。不正入力は
+/// 運用者が直せるよう、受理形式を添えた明確なエラーを返す。
+pub fn parse_timeout_secs(raw: &str) -> anyhow::Result<u64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        anyhow::bail!("--timeout must not be empty (use seconds like 1800, a duration like 30m, or 0 to disable)");
+    }
+    // 裸の整数は秒として解釈する（"0" を含む）。duration パーサは末尾に
+    // 単位を要求するため、ここで先に整数を処理する。
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    crate::config::parse_duration_to_seconds(s).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid --timeout '{}': use bare seconds (e.g. 1800), a duration like 30m / 1h30m, or 0 to disable",
+            raw
+        )
+    })
+}
+
+/// `--prompt` 実行後に呼び出し元が読む簡潔な要約を組み立てる純関数。
+///
+/// 生の stream-json を垂れ流す代わりに、終了ステータス・結果本文・変更
+/// ファイル一覧・`logs.txt` のフルパスだけを 1 ブロックにまとめる。表示
+/// 層のロジックを I/O から切り離してユニットテスト可能にするため、必要な
+/// 値はすべて引数で受け取る。
+pub fn render_run_summary(
+    success: bool,
+    reason: &str,
+    result_text: Option<&str>,
+    changed_files: &[String],
+    logs_path: &str,
+) -> String {
+    let mut out = String::from("Summary:\n");
+    if success {
+        out.push_str("  Status: success\n");
+    } else {
+        out.push_str(&format!("  Status: failed ({})\n", reason));
+    }
+
+    if let Some(text) = result_text {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            out.push_str("  Result: ");
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+
+    if changed_files.is_empty() {
+        out.push_str("  Changed files: (none)\n");
+    } else {
+        out.push_str(&format!("  Changed files ({}):\n", changed_files.len()));
+        for f in changed_files {
+            out.push_str("    ");
+            out.push_str(f);
+            out.push('\n');
+        }
+    }
+
+    out.push_str("  Full logs: ");
+    out.push_str(logs_path);
+    out
 }
 
 pub(super) struct RunContext {
@@ -86,6 +179,11 @@ pub(super) struct RunContext {
     pub(super) no_network: bool,
     /// ストリーム途絶タイムアウト（秒）。0 = 無効
     pub(super) prompt_idle_timeout: u64,
+    /// `--prompt` 実行の実時間上限（秒）。0 = 無効。`--timeout` 未指定時は
+    /// `DEFAULT_OVERALL_TIMEOUT_SECS`。prepare_context でパース済みの値。
+    pub(super) overall_timeout: u64,
+    /// `--verbose`: per-event の整形ログを stdout に流すか。既定 false（要約のみ）。
+    pub(super) verbose: bool,
 }
 
 /// 環境変数のリストを正規化してハッシュ化する（値の変更も検知するため）。

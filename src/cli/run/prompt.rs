@@ -184,16 +184,20 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         println!("{}", separator);
     }
 
-    let log_file = if opts.prompt.is_some() {
+    // logs.txt は要約・タイムアウトメッセージでもパスを提示するため、
+    // File と一緒にパスも保持する。生 stream-json の保存は verbose 有無に
+    // かかわらず常に継続する（要約は表示層の変更で、記録は減らさない）。
+    let (log_file, log_path) = if opts.prompt.is_some() {
         let session_dir = std::path::Path::new(&ctx.effective_workspace)
             .join(".vibepod")
             .join("sessions")
             .join(&ctx.deferred_session.id);
         std::fs::create_dir_all(&session_dir)?;
         let log_path = session_dir.join("logs.txt");
-        Some(std::fs::File::create(&log_path).context("Failed to create log file")?)
+        let file = std::fs::File::create(&log_path).context("Failed to create log file")?;
+        (Some(file), Some(log_path))
     } else {
-        None
+        (None, None)
     };
 
     let mut exec_args = vec!["exec".to_string()];
@@ -269,9 +273,25 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         None
     };
 
-    let (result_text, ctrl_c_pressed): (Option<String>, bool) = tokio::select! {
-        r = async {
+    // `--verbose` のとき per-event の整形ログを stdout に流す。既定 false
+    // では per-event を出さず、末尾で要約のみを出す（生ログは logs.txt に
+    // 常に保存される）。--resume は stream-json ではないため従来通り生行を
+    // そのまま流す。
+    let verbose = ctx.verbose;
+    let overall_timeout_secs = ctx.overall_timeout;
+
+    // select! の結果を明示的に区別するためのローカル列挙。
+    enum Outcome {
+        // (result 本文, 生の result イベント行)
+        Completed(Option<String>, Option<String>),
+        CtrlC,
+        OverallTimeout,
+    }
+
+    let outcome = tokio::select! {
+        res = async {
             let mut rt: Option<String> = None;
+            let mut result_line: Option<String> = None;
             let mut log = log_file;
             let mut last_lock_update = std::time::Instant::now();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -291,32 +311,80 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
                 }
                 if is_prompt {
                     match format_stream_event(&line) {
-                        StreamEvent::Display(s) => println!("{}", s),
-                        StreamEvent::Result(s) => rt = Some(s),
+                        StreamEvent::Display(s) => {
+                            if verbose {
+                                println!("{}", s);
+                            }
+                        }
+                        StreamEvent::Result(s) => {
+                            rt = Some(s);
+                            // 生の result イベント行を保持して末尾の要約で
+                            // 成否・subtype を判定する。
+                            result_line = Some(line.clone());
+                        }
                         StreamEvent::Skip => {}
-                        StreamEvent::PassThrough(s) => println!("{}", s),
+                        StreamEvent::PassThrough(s) => {
+                            if verbose {
+                                println!("{}", s);
+                            }
+                        }
                     }
                 } else {
                     println!("{}", line);
                 }
             }
-            (rt, false)
-        } => r,
+            (rt, result_line)
+        } => {
+            let (rt, rl) = res;
+            Outcome::Completed(rt, rl)
+        }
         _ = tokio::signal::ctrl_c() => {
             println!("\nStopping container...");
-            (None, true)
+            Outcome::CtrlC
         }
+        // 実時間上限（--prompt かつ overall_timeout > 0 のときのみ）。無効時は
+        // 決して解決しない future にして select! の他分岐に委ねる。
+        _ = async {
+            if is_prompt_mode && overall_timeout_secs > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(overall_timeout_secs)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => Outcome::OverallTimeout,
     };
 
     if let Some(handle) = monitor_handle {
         handle.abort();
     }
 
-    let was_timed_out = timed_out.load(std::sync::atomic::Ordering::SeqCst);
+    let idle_timed_out = timed_out.load(std::sync::atomic::Ordering::SeqCst);
+    let (result_text, result_line, ctrl_c_pressed, overall_timed_out): (
+        Option<String>,
+        Option<String>,
+        bool,
+        bool,
+    ) = match outcome {
+        Outcome::Completed(rt, rl) => (rt, rl, false, false),
+        Outcome::CtrlC => (None, None, true, false),
+        Outcome::OverallTimeout => (None, None, false, true),
+    };
+    let was_timed_out = idle_timed_out || overall_timed_out;
 
     if ctrl_c_pressed || was_timed_out {
         let _ = exec_child.kill().await;
         let _ = exec_child.wait().await;
+        if was_timed_out {
+            // ローカルの docker exec クライアントを kill してもコンテナ内の
+            // claude プロセスには届かない。ワークスペースへの書き込みを確実に
+            // 止めるためコンテナ内 claude も停止する。idle 監視タスクが発火した
+            // 場合は既に実行済みだが、overall timeout 分岐を含めて冪等に実施する。
+            // -x: 完全一致（/.claude/ パス等を誤 kill しない）
+            tokio::process::Command::new("docker")
+                .args(["exec", &ctx.container_name, "pkill", "-x", "claude"])
+                .output()
+                .await
+                .ok();
+        }
     } else {
         if let Ok(status) = exec_child.wait().await {
             if let Some(code) = status.code() {
@@ -364,16 +432,25 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         // → ユーザーの変更とエージェントの変更が混在。リセットしない（警告���み）
         ctx.store.mark_restored(&ctx.deferred_session.id)?;
 
-        let timeout_display = if idle_timeout_secs >= 60 {
-            format!("{} 分", idle_timeout_secs / 60)
+        // idle（ストリーム無出力）と overall（実時間上限）で理由と秒数を出し分ける。
+        let (limit_secs, kind_label) = if overall_timed_out {
+            (overall_timeout_secs, "実時間が")
         } else {
-            format!("{} 秒", idle_timeout_secs)
+            (idle_timeout_secs, "ストリーム無出力が")
+        };
+        let timeout_display = if limit_secs >= 60 {
+            format!("{} 分", limit_secs / 60)
+        } else {
+            format!("{} 秒", limit_secs)
         };
         eprintln!();
         eprintln!(
-            "⚠ ストリーム無出力が {} を超えたため、セッションを中断しました。",
-            timeout_display
+            "⚠ {}{} を超えたため、セッションを中断しました。",
+            kind_label, timeout_display
         );
+        if let Some(ref p) = log_path {
+            eprintln!("  ログ: {}", p.display());
+        }
         if head_advanced || !was_dirty_before {
             eprintln!(
                 "  作業ディレクトリを {} にリセットしました。",
@@ -412,9 +489,35 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     // 次の起動がコンテナ停止中に走る競合を防ぐ）
     drop(lock);
 
-    if !was_timed_out {
-        print_post_run_summary(opts, ctx, result_text.as_deref(), ctx.is_disposable);
+    // タイムアウトは「中途半端な成功」にしない: 後始末を終えたうえで非ゼロ終了
+    // させ、呼び出し元（別 Claude セッション等）が失敗として扱えるようにする。
+    // 詳細なリセット情報は上で stderr に出力済み。ここでは簡潔な理由と logs.txt
+    // のパスを添えて返す。
+    if was_timed_out {
+        let logs_hint = log_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let reason = if overall_timed_out {
+            "実時間上限"
+        } else {
+            "ストリーム無出力"
+        };
+        anyhow::bail!(
+            "セッションをタイムアウトで打ち切りました（{}）。ログ: {}",
+            reason,
+            logs_hint
+        );
     }
+
+    print_post_run_summary(
+        opts,
+        ctx,
+        result_text.as_deref(),
+        result_line.as_deref(),
+        log_path.as_deref(),
+        ctx.is_disposable,
+    );
 
     Ok(())
 }
@@ -423,6 +526,8 @@ fn print_post_run_summary(
     opts: &RunOptions,
     ctx: &RunContext,
     result_text: Option<&str>,
+    result_line: Option<&str>,
+    log_path: Option<&std::path::Path>,
     disposable: bool,
 ) {
     let stopped_msg = if disposable {
@@ -434,28 +539,35 @@ fn print_post_run_summary(
     };
 
     if opts.prompt.is_some() {
-        if let Some(text) = result_text {
-            println!();
-            println!("Result:");
-            println!("{}", text);
-        }
-
-        // diff summary and worktree info
-        let diff_dir = std::path::Path::new(&ctx.effective_workspace);
-        if let Ok(output) = Command::new("git")
-            .args(["diff", "--stat"])
-            .current_dir(diff_dir)
-            .output()
-        {
-            let stat = String::from_utf8_lossy(&output.stdout);
-            if !stat.trim().is_empty() {
-                println!();
-                println!("Changes:");
-                for line in stat.lines() {
-                    println!("{}", line);
-                }
+        // 既定では生の stream-json を出さず、ここで簡潔な要約を組み立てて出す。
+        let summary = crate::runtime::summarize_result_line(result_line);
+        let (success, reason) = match &summary {
+            Some(s) => {
+                let reason = s.subtype.clone().unwrap_or_else(|| {
+                    if s.is_error {
+                        "error".to_string()
+                    } else {
+                        "success".to_string()
+                    }
+                });
+                (!s.is_error, reason)
             }
-        }
+            // result イベントが無い＝セッションが中断/クラッシュした可能性。
+            None => (
+                false,
+                "no result reported (session interrupted or crashed)".to_string(),
+            ),
+        };
+        let changed = crate::git::get_changed_files_since(
+            std::path::Path::new(&ctx.effective_workspace),
+            &ctx.deferred_session.head_before,
+        );
+        let logs_str = log_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let block = super::render_run_summary(success, &reason, result_text, &changed, &logs_str);
+        println!();
+        println!("{}", block);
 
         if let (Some(ref branch), Some(ref dir)) =
             (&ctx.worktree_branch_name, &ctx.worktree_dir_name)
@@ -470,17 +582,17 @@ fn print_post_run_summary(
 
         println!();
         println!("{}", stopped_msg);
-    } else {
-        if let (Some(ref branch), Some(ref dir)) =
-            (&ctx.worktree_branch_name, &ctx.worktree_dir_name)
-        {
-            println!("  ◇  Worktree: .worktrees/{}", dir);
-            println!("  │  Branch: {}", branch);
-            println!("  │  To review: cd .worktrees/{} && git diff main", dir);
-            println!("  │  To merge:  git merge {}", branch);
-            println!("  │  To remove: git worktree remove .worktrees/{}", dir);
-        }
-
-        println!("  {}", stopped_msg);
+        return;
     }
+
+    // 以降は --resume（非 --prompt）パス。従来の ◇ スタイル表示を維持する。
+    if let (Some(ref branch), Some(ref dir)) = (&ctx.worktree_branch_name, &ctx.worktree_dir_name) {
+        println!("  ◇  Worktree: .worktrees/{}", dir);
+        println!("  │  Branch: {}", branch);
+        println!("  │  To review: cd .worktrees/{} && git diff main", dir);
+        println!("  │  To merge:  git merge {}", branch);
+        println!("  │  To remove: git worktree remove .worktrees/{}", dir);
+    }
+
+    println!("  {}", stopped_msg);
 }

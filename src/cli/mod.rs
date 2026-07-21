@@ -99,6 +99,29 @@ pub enum Commands {
         /// Skip the container's Claude Code update check entirely.
         #[arg(long)]
         no_update: bool,
+        /// Model name passed straight through to `claude --model <name>`
+        /// inside the container (e.g. a specific Claude model id). The value
+        /// is not validated by vibepod — Claude Code decides if it is valid.
+        /// Omit to let Claude Code resolve its own default.
+        #[arg(long)]
+        model: Option<String>,
+        /// Do not automatically build the Docker image when it is missing.
+        /// By default `vibepod run` builds the image on demand; pass this to
+        /// fail fast with an instruction to run `vibepod init` instead.
+        #[arg(long)]
+        no_auto_build: bool,
+        /// Wall-clock limit for a `--prompt` session. Accepts bare seconds
+        /// (e.g. `1800`) or a duration (`30m`, `1h30m`). `0` disables the
+        /// limit. Defaults to 30 minutes when omitted. On timeout the
+        /// container is cleaned up and the run exits non-zero.
+        #[arg(long)]
+        timeout: Option<String>,
+        /// Stream Claude Code's per-event activity to stdout during a
+        /// `--prompt` run (the pre-1.7 behavior). By default only a concise
+        /// end-of-run summary is printed; the full stream is always saved to
+        /// the session `logs.txt` regardless of this flag.
+        #[arg(long)]
+        verbose: bool,
     },
     /// List running VibePod containers
     Ps {},

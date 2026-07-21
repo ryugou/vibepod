@@ -450,6 +450,10 @@ fn make_run_options(template: Option<&str>, prompt: Option<&str>) -> RunOptions 
         template: template.map(|s| s.to_string()),
         mode: vibepod::cli::RunMode::default(),
         update_policy: vibepod::update::UpdatePolicy::default(),
+        model: None,
+        no_auto_build: false,
+        timeout: None,
+        verbose: false,
     }
 }
 

@@ -151,6 +151,40 @@ pub fn get_untracked_files(path: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// セッション開始時のコミット `since` から見て、エージェントが触った
+/// ファイルの一覧を集める（表示用のベストエフォート）。
+///
+/// 2 つのソースを和集合にする:
+/// 1. `git diff --name-only <since>` — `since` と現在の作業ツリーの差分。
+///    コミット済みの変更も未コミットの変更も 1 度で拾える（tracked のみ）。
+/// 2. `git ls-files --others --exclude-standard` — 新規の未追跡ファイル。
+///
+/// これは要約表示専用のため、git が失敗しても致命扱いにはせず、拾えた
+/// 範囲だけを返す（実行本体は既に完了している）。`BTreeSet` で重複除去と
+/// 安定ソートを行う。
+pub fn get_changed_files_since(path: &Path, since: &str) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut files: BTreeSet<String> = BTreeSet::new();
+
+    let collect = |args: &[&str], out: &mut BTreeSet<String>| {
+        if let Ok(o) = Command::new("git").args(args).current_dir(path).output() {
+            if o.status.success() {
+                for line in String::from_utf8_lossy(&o.stdout).lines() {
+                    let t = line.trim();
+                    if !t.is_empty() {
+                        out.insert(t.to_string());
+                    }
+                }
+            }
+        }
+    };
+
+    collect(&["diff", "--name-only", since], &mut files);
+    collect(&["ls-files", "--others", "--exclude-standard"], &mut files);
+
+    files.into_iter().collect()
+}
+
 pub fn reset_hard(path: &Path, commit: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["reset", "--hard", commit])
