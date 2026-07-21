@@ -144,6 +144,28 @@ round 2 対応は解消を確認。新規指摘1件、対応必須。
 - ステージの config.toml がホストより新しくても → 常にホスト側で上書きされる
 - ホストの auth.json 削除 → ステージの新旧に関わらず中身削除+None(round 1 の回帰確認)
 
+## codex レビュー指摘対応(round 4、2026-07-21)
+
+round 3 対応は解消を確認。新規指摘1件、対応必須。
+
+### P1: disposable 実行の終了処理が、更新済み codex 認証ごと runtime dir を削除する(`src/cli/run/mod.rs:553-557` 付近)
+
+`--new` / worktree 等の disposable 実行では終了時に `ctx.runtime_dir` が削除されるため、
+コンテナ内 codex がリフレッシュした auth.json(ローテーション時は唯一の有効コピー)が失われる。
+
+対応方針(確定): ステージ位置を per-container からユーザー単位の共有ステージへ移す。
+- ステージ先を `<runtime>/<container>/codex/` から **`<config_dir>/codex/`**(全コンテナ共有、
+  dir 0700 / file 0600)に変更する。per-container cleanup の削除対象外になるため、
+  退避・サルベージ機構は不要になる(構造的解決)
+- round 1〜3 の意味論は共有ステージにそのまま適用:
+  ホスト削除→wipe+None / allowlist リコンサイル / auth.json は keep-newer / config.toml はホスト優先
+- round 2 のマウントラベル(codex marker)はマウント先が固定パスのため presence 判定のみで維持
+- 併走コンテナが同一 auth.json を共有することになる点は、コード内コメントと SECURITY.md に
+  明記する(codex の書き込みはファイル置換であり実害は限定的。per-container コピー方式でも
+  provider 側ローテーション問題は同様に存在するため、集約の方が総合的に安全)
+- 既存テストのパスをこの構成に追随させ、「disposable cleanup 後も共有ステージが残る」ことを
+  検証するテストを追加すること
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

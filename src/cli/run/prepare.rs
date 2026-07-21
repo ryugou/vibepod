@@ -628,10 +628,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         None
     };
 
-    // codex CLI 認証(~/.codex/auth.json + config.toml)を per-container
-    // runtime ディレクトリへコピーする。auth.json が無ければ None(codex
-    // レビューはこのコンテナでは使えないが、vibepod 自体は継続動作する)。
-    let codex_dir = super::prepare_codex_mount(&home, &config_dir, &container_name)?;
+    // codex CLI 認証(~/.codex/auth.json + config.toml)を、全コンテナ共有の
+    // ユーザー単位ステージディレクトリ(`<config_dir>/codex/`)へコピーする。
+    // per-container の runtime ディレクトリではないため、disposable 実行の
+    // 終了時に runtime_dir が削除されてもこのステージは残る(round 4)。
+    // auth.json が無ければ None(codex レビューはこのコンテナでは使えないが、
+    // vibepod 自体は継続動作する)。
+    let codex_dir = super::prepare_codex_mount(&home, &config_dir)?;
 
     // Parse --mount arguments
     let mut extra_mounts = Vec::new();

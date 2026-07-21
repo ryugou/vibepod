@@ -139,9 +139,12 @@ pub(super) struct RunContext {
     pub(super) exec_env_vars: Vec<String>,
     pub(super) setup_cmd: Option<String>,
     pub(super) temp_claude_json: Option<std::path::PathBuf>,
-    /// `~/.codex/` の allowlist(auth.json / config.toml)をコピーした
-    /// per-container ディレクトリ(`<runtime_dir>/codex/`)。存在しない場合
-    /// (auth.json 欠如)は `None` — コンテナには codex 認証を注入しない。
+    /// `~/.codex/` の allowlist(auth.json / config.toml)をコピーした、
+    /// 全コンテナ共有のユーザー単位ステージディレクトリ(`<config_dir>/codex/`)。
+    /// per-container ではないため、disposable 実行(`--new` / worktree)の
+    /// `runtime_dir` 削除では消えない(round 4 で per-container 配置から移行)。
+    /// 存在しない場合(auth.json 欠如)は `None` — コンテナには codex 認証を
+    /// 注入しない。
     pub(super) codex_dir: Option<std::path::PathBuf>,
     /// Per-container runtime directory under
     /// `<config_dir>/runtime/<container_name>/`. All vibepod-managed runtime
@@ -525,10 +528,26 @@ pub fn should_keep_staged_auth(
 }
 
 /// ホストの `~/.codex/auth.json`(と存在すれば `config.toml`)を
-/// `<config_dir>/runtime/<container_name>/codex/` にコピーし、そのディレクトリの
-/// パスを返す。呼び出し元はこのパスをコンテナへ `/home/vibepod/.codex` として
-/// **rw** マウントする(codex がトークンリフレッシュ時に auth.json を書き換える
-/// ため。コピーなのでホスト原本には影響しない — `.claude.json` と同じパターン)。
+/// `<config_dir>/codex/` にコピーし、そのディレクトリのパスを返す。呼び出し元は
+/// このパスをコンテナへ `/home/vibepod/.codex` として **rw** マウントする(codex が
+/// トークンリフレッシュ時に auth.json を書き換えるため。コピーなのでホスト原本には
+/// 影響しない — `.claude.json` と同じパターン)。
+///
+/// **全コンテナ共有のユーザー単位ステージ**(`<config_dir>/codex/`)であり、
+/// per-container ではない(round 4 で per-container 配置から移行)。per-container
+/// 配置だと、disposable 実行(`--new` / worktree)の終了処理が
+/// `<config_dir>/runtime/<container_name>/` を丸ごと `remove_dir_all` する際に、
+/// コンテナ内 codex がリフレッシュした auth.json(トークンローテーション後の
+/// 唯一の有効コピー)ごと失われてしまう。ユーザー単位の共有パスに置くことで、
+/// per-container cleanup の削除対象から構造的に外れる。
+///
+/// **トレードオフ(意図的な受け入れ)**: 複数コンテナを併走させている場合、
+/// それらは同一の `auth.json` ステージを共有する。1 つのコンテナ内 codex が
+/// トークンをリフレッシュすると、他の実行中コンテナにもそのファイルが反映される。
+/// これは codex 側の書き込みが(追記ではなく)ファイル置換であるため実害は限定的で
+/// あり、また per-container コピー方式を採ったとしても provider 側のリフレッシュ
+/// トークンローテーション自体は同様に起こり得る問題であるため、共有ステージに
+/// 集約する方が総合的に安全と判断した。
 ///
 /// `auth.json` が存在しない場合は `None` を返し、codex 注入をスキップする
 /// (vibepod 自体は動作継続するが、コンテナ内で codex レビューは使えない)。
@@ -545,15 +564,11 @@ pub fn should_keep_staged_auth(
 pub fn prepare_codex_mount(
     home: &std::path::Path,
     config_dir: &std::path::Path,
-    container_name: &str,
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
     let host_codex_dir = home.join(".codex");
     let entries = host_codex_stage_entries(&host_codex_dir);
 
-    let runtime_codex_dir = config_dir
-        .join("runtime")
-        .join(container_name)
-        .join("codex");
+    let codex_stage_dir = config_dir.join("codex");
 
     let has_auth = entries.iter().any(|(_, name)| *name == "auth.json");
     if !has_auth {
@@ -561,10 +576,10 @@ pub fn prepare_codex_mount(
         // ステージ済みの認証情報が残っていると、既存コンテナの bind mount
         // 経由で使われ続けてしまうため、ディレクトリ自体は残したまま中身だけ
         // 全消去する(keep が空 = allowlist 全ファイルが削除対象)。
-        reconcile_codex_stage_dir(&runtime_codex_dir, &[]).with_context(|| {
+        reconcile_codex_stage_dir(&codex_stage_dir, &[]).with_context(|| {
             format!(
                 "Failed to clear stale codex assets in {}",
-                runtime_codex_dir.display()
+                codex_stage_dir.display()
             )
         })?;
         eprintln!(
@@ -573,17 +588,14 @@ pub fn prepare_codex_mount(
         return Ok(None);
     }
 
-    std::fs::create_dir_all(&runtime_codex_dir)
-        .with_context(|| format!("Failed to create {}", runtime_codex_dir.display()))?;
+    std::fs::create_dir_all(&codex_stage_dir)
+        .with_context(|| format!("Failed to create {}", codex_stage_dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&runtime_codex_dir, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(&codex_stage_dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| {
-                format!(
-                    "Failed to set permissions on {}",
-                    runtime_codex_dir.display()
-                )
+                format!("Failed to set permissions on {}", codex_stage_dir.display())
             })?;
     }
 
@@ -591,15 +603,15 @@ pub fn prepare_codex_mount(
     // 削除された)がステージに残っていると無期限に使われ続けるため、コピー前に
     // 差分を削除しておく。
     let keep_names: Vec<&str> = entries.iter().map(|(_, name)| *name).collect();
-    reconcile_codex_stage_dir(&runtime_codex_dir, &keep_names).with_context(|| {
+    reconcile_codex_stage_dir(&codex_stage_dir, &keep_names).with_context(|| {
         format!(
             "Failed to reconcile stale codex assets in {}",
-            runtime_codex_dir.display()
+            codex_stage_dir.display()
         )
     })?;
 
     for (src, name) in &entries {
-        let dst = runtime_codex_dir.join(name);
+        let dst = codex_stage_dir.join(name);
 
         if *name == "auth.json" && dst.is_file() {
             let staged_mtime = std::fs::metadata(&dst)
@@ -627,7 +639,7 @@ pub fn prepare_codex_mount(
         }
     }
 
-    Ok(Some(runtime_codex_dir))
+    Ok(Some(codex_stage_dir))
 }
 
 pub(super) fn build_container_config(

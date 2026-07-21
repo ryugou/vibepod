@@ -84,8 +84,7 @@ fn prepare_codex_mount_returns_none_when_auth_json_missing() {
     let home_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
 
-    let result =
-        prepare_codex_mount(home_dir.path(), config_dir.path(), "vibepod-test-none").unwrap();
+    let result = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     assert!(
         result.is_none(),
@@ -103,8 +102,7 @@ fn prepare_codex_mount_returns_none_when_only_config_toml_present() {
     fs::create_dir_all(&codex_dir).unwrap();
     fs::write(codex_dir.join("config.toml"), "model = \"gpt\"\n").unwrap();
 
-    let result =
-        prepare_codex_mount(home_dir.path(), config_dir.path(), "vibepod-test-cfg-only").unwrap();
+    let result = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     assert!(
         result.is_none(),
@@ -118,12 +116,7 @@ fn prepare_codex_mount_copies_both_files_and_returns_dir() {
     let config_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let result = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-both-files",
-    )
-    .unwrap();
+    let result = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     let dir = result.expect("should return Some(dir) when auth.json is present");
 
@@ -181,12 +174,7 @@ fn prepare_codex_mount_removes_staged_files_when_auth_json_disappears() {
     let config_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-auth-disappears",
-    )
-    .unwrap();
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json + config.toml");
     assert!(dir.join("auth.json").is_file());
     assert!(dir.join("config.toml").is_file());
@@ -194,12 +182,7 @@ fn prepare_codex_mount_removes_staged_files_when_auth_json_disappears() {
     // Host revokes auth (e.g. `codex logout`): auth.json is gone.
     fs::remove_file(home_dir.path().join(".codex/auth.json")).unwrap();
 
-    let second = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-auth-disappears",
-    )
-    .unwrap();
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     assert!(
         second.is_none(),
@@ -226,12 +209,7 @@ fn prepare_codex_mount_reconciles_config_toml_removal_and_refreshes_auth() {
     let config_dir = tempfile::tempdir().unwrap();
     make_host_codex(home_dir.path());
 
-    let first = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-config-removed",
-    )
-    .unwrap();
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json + config.toml");
     assert!(dir.join("config.toml").is_file());
 
@@ -243,12 +221,7 @@ fn prepare_codex_mount_reconciles_config_toml_removal_and_refreshes_auth() {
     )
     .unwrap();
 
-    let second = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-config-removed",
-    )
-    .unwrap();
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     let second_dir = second.expect("auth.json is still present, so a mount should be prepared");
     assert_eq!(second_dir, dir);
@@ -303,12 +276,7 @@ fn prepare_codex_mount_keeps_staged_auth_when_newer_than_host() {
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-keep-newer-staged-auth",
-    )
-    .unwrap();
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
 
@@ -318,12 +286,7 @@ fn prepare_codex_mount_keeps_staged_auth_when_newer_than_host() {
     fs::write(&staged_auth, r#"{"token":"CONTAINER_REFRESHED"}"#).unwrap();
     set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
 
-    let second = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-keep-newer-staged-auth",
-    )
-    .unwrap();
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -344,12 +307,7 @@ fn prepare_codex_mount_overwrites_staged_auth_when_host_is_newer() {
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-host-newer-auth",
-    )
-    .unwrap();
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json");
     let staged_auth = dir.join("auth.json");
     set_mtime(&staged_auth, t0);
@@ -359,12 +317,7 @@ fn prepare_codex_mount_overwrites_staged_auth_when_host_is_newer() {
     fs::write(&host_auth, r#"{"token":"HOST_RELOGIN"}"#).unwrap();
     set_mtime(&host_auth, t0 + Duration::from_secs(3_600));
 
-    let second = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-host-newer-auth",
-    )
-    .unwrap();
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -384,12 +337,7 @@ fn prepare_codex_mount_always_overwrites_config_toml_even_if_staged_is_newer() {
     let t0 = SystemTime::now();
     set_mtime(&host_config, t0);
 
-    let first = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-config-toml-no-keep-newer",
-    )
-    .unwrap();
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
     let dir = first.expect("first run should stage config.toml");
     let staged_config = dir.join("config.toml");
 
@@ -403,12 +351,7 @@ fn prepare_codex_mount_always_overwrites_config_toml_even_if_staged_is_newer() {
     fs::write(&host_config, "model = \"host-updated\"\n").unwrap();
     set_mtime(&host_config, t0 + Duration::from_secs(60));
 
-    let second = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-config-toml-no-keep-newer",
-    )
-    .unwrap();
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     assert_eq!(second, Some(dir));
     assert_eq!(
@@ -431,24 +374,14 @@ fn prepare_codex_mount_auth_removal_ignores_staged_mtime() {
     let t0 = SystemTime::now();
     set_mtime(&host_auth, t0);
 
-    let first = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-auth-removal-ignores-mtime",
-    )
-    .unwrap();
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
     let dir = first.expect("first run should stage auth.json + config.toml");
     let staged_auth = dir.join("auth.json");
     set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
 
     fs::remove_file(&host_auth).unwrap();
 
-    let second = prepare_codex_mount(
-        home_dir.path(),
-        config_dir.path(),
-        "vibepod-test-auth-removal-ignores-mtime",
-    )
-    .unwrap();
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
 
     assert!(
         second.is_none(),
@@ -461,5 +394,63 @@ fn prepare_codex_mount_auth_removal_ignores_staged_mtime() {
     assert!(
         !dir.join("config.toml").exists(),
         "staged config.toml must be deleted alongside auth.json on host revocation"
+    );
+}
+
+// --- prepare_codex_mount: shared user-level stage survives disposable
+// container cleanup (codex review round 4, P1) ---
+
+#[test]
+fn prepare_codex_mount_survives_disposable_runtime_dir_cleanup() {
+    // round 4 P1: disposable runs (`--new` / worktree) delete
+    // `<config_dir>/runtime/<container_name>/` wholesale on exit
+    // (`std::fs::remove_dir_all(&ctx.runtime_dir)` in interactive.rs /
+    // prompt.rs). Before this fix, the codex stage lived *inside* that
+    // per-container runtime dir, so a container-refreshed auth.json (the
+    // only valid copy once the refresh token has rotated) was destroyed
+    // along with it. The fix moves the stage to `<config_dir>/codex/`,
+    // structurally outside anything a per-container cleanup ever touches.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let staged = prepare_codex_mount(home_dir.path(), config_dir.path())
+        .unwrap()
+        .expect("auth.json is present on the host, so a stage dir must be returned");
+
+    assert_eq!(
+        staged,
+        config_dir.path().join("codex"),
+        "codex stage must live directly under <config_dir>/codex, not under \
+         <config_dir>/runtime/<container_name>/, so per-container cleanup never touches it"
+    );
+
+    // Simulate the in-container codex rotating the refresh token: the staged
+    // (rw-mounted) auth.json is rewritten to a value that exists nowhere else.
+    let staged_auth = staged.join("auth.json");
+    fs::write(
+        &staged_auth,
+        r#"{"token":"CONTAINER_REFRESHED_BEFORE_CLEANUP"}"#,
+    )
+    .unwrap();
+
+    // Simulate a disposable run's exact cleanup call: create a per-container
+    // runtime dir (as `prepare_context` would for temp claude.json / sanitized
+    // settings), then wholesale-remove it exactly like
+    // `interactive.rs:169` / `prompt.rs:482` do.
+    let runtime_dir = config_dir.path().join("runtime").join("vibepod-disposable");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(runtime_dir.join(".claude.json"), "{}").unwrap();
+    fs::remove_dir_all(&runtime_dir).ok();
+
+    assert!(
+        !runtime_dir.exists(),
+        "sanity check: the simulated per-container runtime dir must actually be gone"
+    );
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"CONTAINER_REFRESHED_BEFORE_CLEANUP"}"#,
+        "the shared codex stage (and its container-refreshed auth.json) must survive \
+         disposable per-container runtime dir cleanup"
     );
 }
