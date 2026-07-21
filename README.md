@@ -148,7 +148,9 @@ When `--template <name>` is passed, each `(project, template)` combination gets 
 
 #### Review mode (read-only evaluation)
 
-`--mode review` mounts a reviewer-focused bundle that blocks `Edit`/`Write` and most state-mutating shell commands via `permissions.deny`, so the agent can inspect a codebase without modifying it.
+`--mode review` mounts a reviewer-focused bundle whose `permissions.deny` blocks the **main write paths** — `Edit`, `Write`, `NotebookEdit`, and destructive shell commands (`rm`, `mv`, and history-rewriting/state-mutating `git` subcommands like `commit`, `push`, `reset`, `rebase`) — so the agent inspects a codebase without the obvious ways to change it.
+
+> **This is a guard rail, not a sandbox.** `permissions.deny` blocks the named tools and command patterns; it does **not** turn the container read-only. An agent can still write through the shell by other means — e.g. `Bash(tee ...)`, output redirection (`>`, `>>`), or `sed -i`. Treat review mode as "the direct edit/commit paths are blocked," and rely on the container boundary itself (and git) for the hard guarantee that nothing escapes to your host. A future release (see the v1.8 issue in `docs/`) will move to a deny-by-default posture that closes the shell-write gap.
 
 ```bash
 # Language-agnostic reviewer
