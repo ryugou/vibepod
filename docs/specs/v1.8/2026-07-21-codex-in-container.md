@@ -526,6 +526,71 @@ test から呼べるよう `pub`)へ切り出し、interactive.rs / prompt.rs �
 runtime_dir` の直接テストを2本追加し、失敗(Running)時に runtime dir が保持され store には
 検証付き同期が反映されること、成功(Stopped)時に runtime dir が削除されることを固定した。
 
+## codex レビュー指摘対応(round 13、2026-07-22)
+
+round 12 対応は解消を確認。新規指摘2件、対応必須。
+
+### P1: ホスト側 `~/.codex/` の symlink を辿ってコピーしている(`src/cli/run/mod.rs:507-508` 付近)
+
+`host_codex_stage_entries` の `is_file()` は symlink を辿るため、ホストの auth.json /
+config.toml が別ファイルへのリンクだとリンク先内容が store/コンテナへ流れる。
+SECURITY.md の「コピー元も通常ファイルのみ・symlink 拒否」の記述と実装が矛盾。
+
+対応: 列挙を `symlink_metadata().file_type().is_file()` 判定に変更し、symlink は
+コピー対象から除外する。除外時は「~/.codex/auth.json is a symlink; skipped
+(codex auth must be a regular file)」のように、dotfiles 等で symlink 運用している
+ユーザーが原因に気づける警告を stderr に出すこと(無言除外は不可)。
+
+### P2: runtime dir 削除失敗が無言(`src/cli/run/mod.rs:1511-1512` 付近)
+
+`remove_dir_all(...).ok()` は失敗を捨てるため、auth.json を含むディレクトリが残置されても
+「removed」と表示され、後片付け完了と誤認される。
+
+対応: 削除失敗時に stderr へ警告(失敗理由・残置パス・「手動で削除してください:
+rm -rf <path>」相当の対処)を出す。処理自体は続行してよい(fatal にしない)。
+
+### テスト追加(round 13 対応分)
+
+- ホストの auth.json を symlink にして呼ぶ → コピーされず、警告が出て、auth 無し扱い
+  (config.toml 側も同様の1ケース)
+- 既存の「実ファイルは従来どおりコピーされる」回帰確認
+
+### 対応結果(round 13、実装記録)
+
+P1: `host_codex_stage_entries` の列挙を `path.is_file()` から
+`std::fs::symlink_metadata(&path)`(= lstat 相当、リンクを辿らない)ベースに変更した。
+`file_type().is_file()` が真のものだけをコピー対象に含め、`is_symlink()` の場合は
+`~/.codex/auth.json is a symlink; skipped (codex auth must be a regular file)` を
+実際のフルパス付きで stderr に警告して除外する(無言除外の禁止)。`NotFound` は
+`config.toml` が無いホストの通常運用として従来どおり無言スキップ。パーミッション等
+`NotFound` 以外の stat 失敗も握りつぶさず `failed to stat <path>: <e>; skipped` を
+stderr に出してスキップし、誤ってエントリに含めない。ディレクトリ等の非通常ファイルは
+allowlist が想定しない形状のため無言スキップ。関数シグネチャは不変で、host 側 `~/.codex`
+と store_dir 双方の列挙(Hop2 再列挙含む)に同じ symlink 拒否が効く。store は host-only
+かつ書き込みが atomic persist + `remove_dst_if_not_regular_file` で通常ファイルに限定
+されるため、正当運用を壊さずコンテナによる store 内 symlink 差し替えの防御として整合する。
+host auth.json が symlink の場合は `has_auth=false`(codex unavailable フォールバック)と
+なるが、これは警告でユーザーが原因に気づける前提の意図的トレードオフ。
+
+P2: `finalize_disposable_runtime_dir` の `ContainerLiveness::Stopped` 経路で
+`remove_dir_all(runtime_dir).ok()` が削除失敗を捨てていたのを `if let Err(e)` に変更し、
+失敗時に `failed to remove runtime dir <path>: <e>; manual cleanup required: rm -rf <path>`
+を stderr に出す。auth.json を含む runtime dir の残置を「後片付け完了」と誤認させず、
+運用者が手動対処できるようにする。処理は fatal 化せず継続(`Running` 経路は round 12 の
+まま不変)。
+
+テスト: `mod tests` に4本追加。symlink 化した `auth.json` / `config.toml` がそれぞれ
+`host_codex_stage_entries` の結果から除外されること(`#[cfg(unix)]`、リンク先は実在する
+通常ファイルにしてあるため旧 `is_file()` 実装なら混入してアサート失敗する=バグと修正を
+弁別)、通常ファイルは従来どおり含まれる回帰、`.codex` に対象が無い場合に無言で空リストに
+なること(`NotFound` 無言スキップ)を固定した。
+
+未対応(reviewer 一次レビューの Suggestion、round 13 spec 要件外につき今回受理・将来候補):
+symlink 除外時の `eprintln!` 出力そのものの固定(stderr キャプチャに writer 注入の
+リファクタが必要)、`NotFound` 以外の stat 失敗・P2 の削除失敗分岐の直接テスト、P2 で
+`remove_dir_all` が `NotFound`(既に片付け済み)を返した場合を無警告スキップに分岐する案
+(spec の「削除失敗時に警告」の文言に忠実な現状実装を維持し、literal 準拠を優先した)。
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

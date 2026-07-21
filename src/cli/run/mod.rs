@@ -496,16 +496,49 @@ pub fn prepare_sanitized_settings_mount(
 pub const HOST_CODEX_ALLOWLIST: &[&str] = &["auth.json", "config.toml"];
 
 /// `codex_dir`(= `<home>/.codex`)配下で、allowlist に載っていてかつ実際に
-/// 存在するファイルを `(絶対パス, ファイル名)` で返す。存在しないものは
-/// 黙ってスキップする(`config.toml` が無いホストは異常ではなく通常の運用)。
+/// 存在する**通常ファイル**を `(絶対パス, ファイル名)` で返す。存在しないもの
+/// (`NotFound`)は黙ってスキップする(`config.toml` が無いホストは異常では
+/// なく通常の運用)。
+///
+/// symlink は `symlink_metadata`(リンクを辿らない)で判定して**除外**する
+/// (codex レビュー round 13 P1)。`is_file()` はリンクを辿ってしまうため、
+/// ホストの `auth.json` / `config.toml` が別ファイルへの symlink だと
+/// リンク先の内容が検証なしで store/コンテナへ流れてしまい、SECURITY.md の
+/// 「コピー元も通常ファイルのみ・symlink 拒否」と矛盾する。symlink を検出
+/// した場合は無言で捨てず、dotfiles 管理ツール等で symlink 運用している
+/// ユーザーが原因に気づけるよう stderr に警告する。
+///
+/// この関数は host 側 `~/.codex` と store_dir の両方の列挙に使われる。
+/// 両方に同じ symlink 拒否が効くのは意図通り(store 内が symlink に
+/// 差し替えられていてもリンク先を流さないため)。
 pub fn host_codex_stage_entries(
     codex_dir: &std::path::Path,
 ) -> Vec<(std::path::PathBuf, &'static str)> {
     let mut entries = Vec::new();
     for name in HOST_CODEX_ALLOWLIST {
         let path = codex_dir.join(name);
-        if path.is_file() {
-            entries.push((path, *name));
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if file_type.is_file() {
+                    entries.push((path, *name));
+                } else if file_type.is_symlink() {
+                    eprintln!(
+                        "warning: {} is a symlink; skipped (codex auth must be a regular file)",
+                        path.display()
+                    );
+                }
+                // ディレクトリ等、ファイルでも symlink でもない場合は
+                // allowlist が想定しない形状のため黙ってスキップする。
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // config.toml が無いホストは通常運用。警告不要で黙ってスキップ。
+            }
+            Err(e) => {
+                // パーミッション等 NotFound 以外の失敗は握りつぶさず、
+                // 運用者が原因調査できるよう stderr に警告してスキップする。
+                eprintln!("warning: failed to stat {}: {e}; skipped", path.display());
+            }
         }
     }
     entries
@@ -1509,7 +1542,17 @@ pub fn finalize_disposable_runtime_dir(
     }
     match liveness {
         ContainerLiveness::Stopped => {
-            std::fs::remove_dir_all(runtime_dir).ok();
+            if let Err(e) = std::fs::remove_dir_all(runtime_dir) {
+                // 削除失敗を捨てると、auth.json を含む runtime dir が残置
+                // されたまま「後片付け完了」と誤認されてしまう(codex レビュー
+                // round 13 P2)。fatal にはしないが、運用者が残置を検知して
+                // 手動対処できるよう stderr に警告する。
+                eprintln!(
+                    "warning: failed to remove runtime dir {}: {e}; manual cleanup required: rm -rf {}",
+                    runtime_dir.display(),
+                    runtime_dir.display()
+                );
+            }
         }
         ContainerLiveness::Running => {
             // コンテナ削除に失敗して稼働継続の可能性があるため、ステージを含む
@@ -1833,6 +1876,95 @@ mod tests {
             r#"{"token":"HOST_AUTH"}"#,
             "dst must be correctly staged from src despite the hostile fixed-name tmp file \
              sharing its directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_codex_stage_entries_excludes_symlinked_auth_json() {
+        // codex レビュー round 13 P1: `auth.json` がホスト上で別ファイルへの
+        // symlink になっている場合(dotfiles 管理ツール等で起こり得る)、
+        // `is_file()` はリンクを辿ってしまいリンク先の内容が store/コンテナへ
+        // 流れてしまう。symlink_metadata ベースの判定でこれを除外することを
+        // 固定する。
+        let codex_dir = tempfile::tempdir().expect("failed to create codex_dir tempdir");
+        let target_dir = tempfile::tempdir().expect("failed to create symlink target tempdir");
+
+        let target = target_dir.path().join("real_auth.json");
+        std::fs::write(&target, r#"{"token":"LINKED_AWAY"}"#)
+            .expect("failed to write symlink target");
+
+        let auth_path = codex_dir.path().join("auth.json");
+        std::os::unix::fs::symlink(&target, &auth_path)
+            .expect("failed to create auth.json symlink");
+
+        let entries = host_codex_stage_entries(codex_dir.path());
+
+        assert!(
+            !entries.iter().any(|(_, name)| *name == "auth.json"),
+            "a symlinked auth.json must be excluded from stage entries, got: {entries:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_codex_stage_entries_excludes_symlinked_config_toml() {
+        // 上と同じ懸念を config.toml 側でも固定する。
+        let codex_dir = tempfile::tempdir().expect("failed to create codex_dir tempdir");
+        let target_dir = tempfile::tempdir().expect("failed to create symlink target tempdir");
+
+        let target = target_dir.path().join("real_config.toml");
+        std::fs::write(&target, "model = \"linked-away\"").expect("failed to write symlink target");
+
+        let config_path = codex_dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &config_path)
+            .expect("failed to create config.toml symlink");
+
+        let entries = host_codex_stage_entries(codex_dir.path());
+
+        assert!(
+            !entries.iter().any(|(_, name)| *name == "config.toml"),
+            "a symlinked config.toml must be excluded from stage entries, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn host_codex_stage_entries_includes_regular_files() {
+        // 回帰確認: symlink 拒否を入れても、通常ファイルの auth.json /
+        // config.toml は従来どおりエントリに含まれること。
+        let codex_dir = tempfile::tempdir().expect("failed to create codex_dir tempdir");
+        std::fs::write(codex_dir.path().join("auth.json"), r#"{"token":"REAL"}"#)
+            .expect("failed to write auth.json");
+        std::fs::write(codex_dir.path().join("config.toml"), "model = \"real\"")
+            .expect("failed to write config.toml");
+
+        let entries = host_codex_stage_entries(codex_dir.path());
+
+        assert!(
+            entries
+                .iter()
+                .any(|(path, name)| *name == "auth.json" && path.is_file()),
+            "a regular auth.json must still be included, got: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(path, name)| *name == "config.toml" && path.is_file()),
+            "a regular config.toml must still be included, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn host_codex_stage_entries_skips_missing_files_silently() {
+        // 回帰確認: `.codex` 配下に何も無い(config.toml が無いホストの通常
+        // 運用)場合、エントリは空になる(NotFound は警告不要で黙ってスキップ)。
+        let codex_dir = tempfile::tempdir().expect("failed to create codex_dir tempdir");
+
+        let entries = host_codex_stage_entries(codex_dir.path());
+
+        assert!(
+            entries.is_empty(),
+            "an empty .codex dir must yield no stage entries, got: {entries:?}"
         );
     }
 }
