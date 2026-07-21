@@ -127,12 +127,10 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
-| `--lang <name>` | Select an official bundle (`rust`, `node`, `python`, `go`, `java`) — installs the language toolchain **and** mounts the matching agents/skills from the ecc cache. Auto-detected from project files if omitted |
-| `--mode <impl\|review>` | Select bundle mode. `impl` (default) mounts an implementation-focused bundle; `review` mounts a read-only reviewer bundle with state-mutating shell commands blocked. See "Review mode" below |
+| `--lang <name>` | Install a language toolchain in the container (`rust`, `node`, `python`, `go`, `java`). Auto-detected from project files if omitted |
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 | `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
-| `--template <name>` | Mount a **custom** template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/`, layered on top of your host `~/.claude/` assets. For official language bundles, use `--lang` instead. Template names may be a single segment or nested slash-separated segments (e.g., `foo` or `foo/bar`); each segment must match `[a-zA-Z0-9_-]+`. Absolute paths and `..` are rejected. Cannot be combined with `--mode review`. See "Templates" below |
 | `--update` | Check for a Claude Code update inside the container now, ignoring the once-a-day throttle |
 | `--no-update` | Skip the container's Claude Code update check entirely |
 | `--model <name>` | Pass `--model <name>` straight through to Claude Code inside the container. Not validated by VibePod — Claude Code decides if it is valid. Works in both interactive and `--prompt` mode. Omit to use Claude Code's own default |
@@ -144,33 +142,9 @@ Runs an AI coding agent inside a container, mounting your project directory.
 
 **Container reuse is the default.** VibePod creates one container per project (named `vibepod-{project}-{hash}`) and reuses it across runs. Setup only runs once; subsequent `vibepod run` calls skip setup and connect instantly via `docker exec`. Use `--new` to force a fresh container.
 
-When `--template <name>` is passed, each `(project, template)` combination gets its own persistent container, so you can switch between host mode and multiple templates on the same project without `--new`.
-
-#### Review mode (read-only evaluation)
-
-`--mode review` mounts a reviewer-focused bundle whose `permissions.deny` blocks the **main write paths** — `Edit`, `Write`, `NotebookEdit`, and destructive shell commands (`rm`, `mv`, and history-rewriting/state-mutating `git` subcommands like `commit`, `push`, `reset`, `rebase`) — so the agent inspects a codebase without the obvious ways to change it.
-
-> **This is a guard rail, not a sandbox.** `permissions.deny` blocks the named tools and command patterns; it does **not** turn the container read-only. An agent can still write through the shell by other means — e.g. `Bash(tee ...)`, output redirection (`>`, `>>`), or `sed -i`. Treat review mode as "the direct edit/commit paths are blocked," and rely on the container boundary itself (and git) for the hard guarantee that nothing escapes to your host. A future release (see the v1.8 issue in `docs/`) will move to a deny-by-default posture that closes the shell-write gap.
-
-```bash
-# Language-agnostic reviewer
-vibepod run --mode review --prompt "review the uncommitted changes"
-
-# Language-specific reviewer (Rust-aware rules, unsafe-block triggers, etc.)
-vibepod run --lang rust --mode review --prompt "review this PR"
-```
-
-Per-language review bundles include `santa-method` dual-reviewer convergence triggers keyed to each language's highest-risk primitives (Rust `unsafe`, Go `cgo`/`unsafe`, Node `eval`/prototype pollution, Python `pickle`/`eval`, Java JNDI/reflection/XXE). Combining `--template <name>` with `--mode review` is rejected at CLI parse-time.
-
-#### Content model (v1.6+)
-
-Language bundles pull their agents and skills from a local clone of [everything-claude-code (ecc)](https://github.com/affaan-m/everything-claude-code) cached at `~/.config/vibepod/ecc-cache/`. `vibepod init` initializes the cache; a TTL-based background `git fetch` keeps it up-to-date. Use `vibepod template update [--ref <ref>]` for explicit refresh and `vibepod template status` to inspect cache state (repo, ref, last fetch time, current commit). Pin a specific ecc ref via the `[ecc]` section in `~/.config/vibepod/config.toml`.
-
-Custom templates can opt into ecc content by adding an `[ecc]` section to their `vibepod-template.toml`, listing the `skills/` and `agents/` paths to pull from the cache.
-
 #### Your host `~/.claude/` always comes along
 
-Every mode — host, `--lang`, and `--template` — carries these host assets into the container (read-only, skipped when absent):
+VibePod carries these host assets into the container (read-only, skipped when absent):
 
 - `~/.claude/CLAUDE.md`
 - `~/.claude/agents/`
@@ -180,26 +154,9 @@ Every mode — host, `--lang`, and `--template` — carries these host assets in
 
 This is an **allowlist**. Session and history data — `sessions/`, `projects/`, `history.jsonl`, `backups/`, `file-history/`, `shell-snapshots/`, `todos/` — is never copied into the container, both because it is large and because it contains other projects' conversations.
 
-**On collision, the template wins.** Host and template assets are merged per file, so a template that ships one skill does not erase your other skills — but where both define the same name, the template's version is used. This ordering is what makes `--mode review` trustworthy: its `permissions.deny` rules must not be shadowable by whatever happens to be in your `~/.claude/`.
-
-`settings.json` is the one asset that never merges. In host mode you get a sanitized copy of yours (`hooks` and `statusLine` stripped); in template mode the template's `settings.json` is used alone and yours is ignored entirely.
+`settings.json` is mounted as a sanitized copy of yours (`hooks` and `statusLine` stripped), written to `~/.config/vibepod/runtime/<container>/settings.json`.
 
 Because bind mounts are fixed at container creation, adding a new asset to `~/.claude/` (a first-ever `specs/`, say) changes the mount set and requires `vibepod run --new` to take effect. VibePod detects this and tells you.
-
-#### Templates (Phase 2 preview)
-
-Templates let you layer an alternate `.claude/` configuration over your host's. A template is a directory under `~/.config/vibepod/templates/<name>/` that can contain any subset of:
-
-- `CLAUDE.md`
-- `skills/`
-- `agents/`
-- `specs/`
-- `plugins/` (plain files only in Phase 2 — templates that ship an `installed_plugins.json` registry are rejected until Phase 3/4 lands the installPath-rewrite support)
-- `settings.json` (**not** sanitized — unlike host mode, template `settings.json` is mounted as-is, so don't put secrets in a template you share)
-
-An empty template (`~/.config/vibepod/templates/blank/` with nothing inside) is allowed and means "mount nothing into `/home/vibepod/.claude/`" — useful for a clean Claude home.
-
-`--worktree --template <name>` is rejected in Phase 2. The disposable `--worktree` container naming and the per-template persistent-container naming would conflict; template support for worktree mode will land in a later phase.
 
 #### When to use which?
 
@@ -246,9 +203,8 @@ This follows [Anthropic's official recommendation](https://docs.anthropic.com/en
 |------|----------------------------------|-----------------|
 | `vibepod run` (interactive) | **Off** — permission prompts work normally | User approves each action |
 | `vibepod run --prompt` | **On** — autonomous execution | Container isolation is the safety boundary |
-| `vibepod run --mode review` (± `--prompt`) | **Off** — never bypassed, even under `--prompt` | Bundle `permissions.deny` blocks the main write paths, plus container isolation |
 
-In interactive mode, Claude Code asks for confirmation before each potentially destructive action. In `--prompt` mode these prompts are bypassed — the container's isolation is what prevents damage to your host. **`--mode review` is the exception:** it does **not** bypass permissions even when combined with `--prompt`; instead the reviewer bundle's `permissions.deny` blocks the main write paths (see "Review mode" above). Do not read the `--prompt` row as "always bypasses" — review runs autonomously without the bypass flag.
+In interactive mode, Claude Code asks for confirmation before each potentially destructive action. In `--prompt` mode these prompts are bypassed — the container's isolation is what prevents damage to your host.
 
 See [SECURITY.md](SECURITY.md) for the full security details.
 
@@ -323,7 +279,7 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 VibePod is heading to **v2.0**, where it will be reorganized into a clear pair:
 
 - **vibepod CLI** — a sandbox primitive that safely runs Claude Code (or other agent runtimes) inside Docker containers. No opinions about how you write code.
-- **vibepod plugin for Claude Code** — a Claude Code plugin that wraps the CLI and provides opinionated templates (e.g., quality coding flow, strict review flow) for autonomous tasks.
+- **vibepod plugin for Claude Code** — a Claude Code plugin that wraps the CLI and provides opinionated workflows for autonomous tasks.
 
 Until v2.0 is released, no intermediate releases will be cut.
 
