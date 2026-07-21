@@ -20,7 +20,6 @@ fn base_opts() -> RunOptions {
         worktree: false,
         mount: vec![],
         new_container: false,
-        template: None,
         mode: RunMode::Impl,
         update_policy: vibepod::update::UpdatePolicy::default(),
         model: None,
@@ -79,61 +78,4 @@ fn interactive_review_mode_never_bypasses_permissions() {
         "interactive review mode must never bypass permissions; got {:?}",
         args
     );
-}
-
-/// Every review bundle must pin `"enabledPlugins": {}` (present AND empty).
-///
-/// Review mode does **not** bypass permissions — `build_claude_args` never
-/// adds `--dangerously-skip-permissions` for `RunMode::Review` (see the
-/// `review_mode_*` tests above). So the guard rail is the bundle's
-/// `permissions.deny` list. The catch: the host's `~/.claude/plugins` is
-/// bind-mounted into the container, and an enabled plugin can inject its own
-/// allow rules or hooks that *widen* what is permitted — even under a
-/// non-interactive `-p` run. Pinning `enabledPlugins` to `{}` keeps those
-/// plugins mounted but inert, so none of them can loosen the deny list. If a
-/// bundle dropped the key (Claude Code would fall back to its own default) or
-/// set it non-empty, that guarantee would silently break — so this fails on
-/// either.
-#[test]
-fn all_review_bundles_pin_enabled_plugins_to_empty() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    // The full set of review bundles vibepod ships. Kept explicit (not a
-    // directory scan) so that a newly added review bundle without the key
-    // would need to be listed here, drawing attention to the invariant.
-    let bundles = ["generic", "go", "java", "node", "python", "rust"];
-
-    for bundle in bundles {
-        let path = manifest_dir
-            .join("templates-data")
-            .join(bundle)
-            .join("review")
-            .join("settings.json");
-        let raw = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-        let json: serde_json::Value = serde_json::from_str(&raw)
-            .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", path.display()));
-
-        let enabled_plugins = json.get("enabledPlugins").unwrap_or_else(|| {
-            panic!(
-                "{} is missing the `enabledPlugins` key; review bundles must \
-                 pin it to {{}} so no host plugin is activated under \
-                 --dangerously-skip-permissions",
-                path.display()
-            )
-        });
-        let obj = enabled_plugins.as_object().unwrap_or_else(|| {
-            panic!(
-                "{}: `enabledPlugins` must be an object, got {}",
-                path.display(),
-                enabled_plugins
-            )
-        });
-        assert!(
-            obj.is_empty(),
-            "{}: `enabledPlugins` must be empty ({{}}), but activates {:?}. \
-             A review bundle must not enable any plugin.",
-            path.display(),
-            obj.keys().collect::<Vec<_>>()
-        );
-    }
 }

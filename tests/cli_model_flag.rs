@@ -18,7 +18,6 @@ fn base_opts() -> RunOptions {
         worktree: false,
         mount: vec![],
         new_container: false,
-        template: None,
         mode: RunMode::Impl,
         update_policy: vibepod::update::UpdatePolicy::default(),
         model: None,

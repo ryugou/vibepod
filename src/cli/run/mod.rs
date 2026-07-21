@@ -8,7 +8,6 @@ mod interactive;
 pub mod lock;
 pub mod prepare;
 mod prompt;
-pub mod template;
 
 /// CLI `run` サブコマンドのオプション
 ///
@@ -24,12 +23,8 @@ pub struct RunOptions {
     pub mount: Vec<String>,
     /// `--new` フラグ: 既存コンテナを破棄して新規作成する
     pub new_container: bool,
-    /// `--template <name>` フラグ: vibepod 管理の template を
-    /// `/home/vibepod/.claude/` にマウントする。未指定時は host の
-    /// `~/.claude/` をマウントする（v1.4.3 互換挙動）
-    pub template: Option<String>,
     /// `--mode` フラグ: `impl`（デフォルト、コード編集）または `review`（読み取り専用レビュー）。
-    /// 現時点では主に実行モードの分岐（permissions.deny の適用や template 選択）に使用する。
+    /// 非対話モードでの `--dangerously-skip-permissions` 付与の分岐に使用する。
     pub mode: crate::cli::RunMode,
     /// コンテナ内 Claude Code の更新チェック方針（`--update` / `--no-update`）。
     pub update_policy: crate::update::UpdatePolicy,
@@ -168,15 +163,6 @@ pub(super) struct RunContext {
     /// uniqueness without re-normalizing. `lang_display` is the
     /// separate human-readable form shown in startup logs.
     pub(super) lang_names: Vec<String>,
-    /// Fingerprint of the template `setup_commands` that will run
-    /// at container creation. Empty string when no template was
-    /// selected or the template declared no setup_commands.
-    /// Persisted in the `vibepod.template_setup_hash` label so the
-    /// Phase-4.7 reuse gate can detect when a template's setup
-    /// sequence has changed and force `--new` (setup only runs at
-    /// creation, so we cannot retrofit new commands onto an existing
-    /// container).
-    pub(super) template_setup_hash: String,
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
@@ -247,13 +233,6 @@ pub fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static st
     langs
 }
 
-/// Single source of truth for language identifiers vibepod knows how
-/// to install inside its container. `get_lang_install_cmd` matches on
-/// these names, `is_supported_lang` checks membership, and error
-/// messages that enumerate supported values read from this list so
-/// they cannot drift out of sync.
-pub const SUPPORTED_LANGS: &[&str] = &["rust", "node", "python", "go", "java"];
-
 pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
     match lang {
         "rust" => Some("sudo apt-get update && sudo apt-get install -y build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && . $HOME/.cargo/env"),
@@ -263,14 +242,6 @@ pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
         "java" => Some("sudo apt-get update && sudo apt-get install -y default-jdk"),
         _ => None,
     }
-}
-
-/// Return `true` iff `lang` has a known install command. Used by
-/// template metadata parsing to reject `required_langs` values that
-/// cannot actually be installed (a typo like "rsut" or an unsupported
-/// runtime), instead of silently dropping them at install time.
-pub fn is_supported_lang(lang: &str) -> bool {
-    get_lang_install_cmd(lang).is_some()
 }
 
 pub fn validate_slack_channel_id(id: &str) -> bool {
@@ -323,11 +294,8 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
 /// - `sessions/` `projects/` `history.jsonl` `backups/` `file-history/`
 ///   `shell-snapshots/` `todos/` — 実行履歴・セッションデータ。サイズが
 ///   大きく、他プロジェクトの会話内容という機微情報を含むため。
-/// - `settings.json` — host mode では `prepare_sanitized_settings_mount` が
-///   hooks/statusLine を除去した別経路で扱う。template mode では
-///   template 側の `permissions.deny`（review モードで `Edit(*)` /
-///   `Write(*)` 等を封じる安全性の根拠）がホスト設定で上書きされては
-///   ならないため、そもそも持ち込まない。
+/// - `settings.json` — `prepare_sanitized_settings_mount` が hooks/statusLine を
+///   除去した別経路で扱うため、この allowlist には含めない。
 /// - `plugins/` — コンテナ側 2 箇所へのマウントが必要でファイルコピーでは
 ///   表現できないため、`plugins_mount_entries` が別途処理する。
 pub const HOST_CLAUDE_ALLOWLIST: &[(&str, bool)] = &[
@@ -374,78 +342,6 @@ pub fn host_claude_stage_entries(
         }
     }
     entries
-}
-
-/// template と host の `CLAUDE.md` を 1 ファイルに連結する。
-///
-/// 全公式バンドルが `CLAUDE.md` を同梱するため、ファイル単位の後勝ちコピー
-/// では host の `~/.claude/CLAUDE.md` が必ず失われる。要件「CLAUDE.md を
-/// 常にマウント」を満たすため、**template 本文を先頭、host 本文を後段**に
-/// 区切りヘッダを挟んで連結する。
-///
-/// - template を先頭に置くことで、他の staging 資産と同じ「衝突時は template
-///   優先」の順序を CLAUDE.md でも保つ（読み手はまず template の指示を読む）。
-/// - `settings.json` は権限境界なので連結すると review モードの安全性論拠
-///   (`permissions.deny`) が薄まるため決して連結しないが、`CLAUDE.md` は
-///   単なる指示テキストであり、host の個人指示を後段に足しても
-///   `permissions.deny` は無傷。よって連結してよい。
-///
-/// 区切りヘッダには由来（template 名 / host パス）を明記し、どちらの節が
-/// どこ由来かを人間が判別できるようにする。両方存在しない場合のみ `None`。
-pub fn merge_claude_md(
-    template: Option<&str>,
-    host: Option<&str>,
-    template_name: &str,
-) -> Option<String> {
-    match (template, host) {
-        (None, None) => None,
-        (Some(t), None) => Some(t.to_string()),
-        (None, Some(h)) => Some(h.to_string()),
-        (Some(t), Some(h)) => Some(format!(
-            "{template_body}\n\n\
-             <!-- ============================================================ -->\n\
-             <!-- Above: vibepod template '{template_name}' CLAUDE.md (takes precedence on conflict). -->\n\
-             <!-- Below: your host ~/.claude/CLAUDE.md (personal instructions). -->\n\
-             <!-- ============================================================ -->\n\n\
-             {host_body}",
-            template_body = t.trim_end(),
-            host_body = h.trim_start(),
-        )),
-    }
-}
-
-/// template mode で、ホストの `~/.claude/plugins` をマウント集合に合流させる。
-///
-/// **優先順位: template 側が勝つ。** template が `plugins/` を持つ場合、
-/// その mount が既に `/home/vibepod/.claude/plugins` を占有しているので
-/// ホスト側は一切持ち込まない（docker は同一マウント先の重複を拒否するし、
-/// そもそも template が plugin セットを規定する意図で置いている）。
-///
-/// ホスト plugins を staging へ**コピーしない**理由:
-/// `installed_plugins.json` の `installPath` はホスト絶対パスを持つため、
-/// staging 経由で単一マウントすると container 内で解決できず
-/// `validate_template_installed_plugins` が hard fail する。host mode と
-/// 同じ 2 重マウント（`plugins_mount_entries`）でホスト絶対パスを
-/// container に投影するのが唯一整合する方法である。
-pub fn merge_host_plugins_mounts(
-    template_mounts: &mut Vec<(String, String)>,
-    host_plugins: Option<&str>,
-    home: &std::path::Path,
-) {
-    let Some(host_plugins) = host_plugins else {
-        return;
-    };
-    let template_owns_plugins = template_mounts
-        .iter()
-        .any(|(_, container)| container == DEFAULT_PLUGINS_CONTAINER_PATH);
-    if template_owns_plugins {
-        eprintln!(
-            "  Note: the template defines its own plugins/, so your host \
-             ~/.claude/plugins is not mounted (the template's plugin set takes precedence)."
-        );
-        return;
-    }
-    template_mounts.extend(plugins_mount_entries(host_plugins, home));
 }
 
 /// plugins ディレクトリに対応する 2 重マウントエントリを返す（ファイル存在チェック
@@ -587,33 +483,16 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     // lang: persist the FULL set of languages the container was
     // provisioned with. `ctx.lang_names` is already sorted and
     // deduped (invariant established by `prepare_context`), so this
-    // is a direct join. Using lang_display's first token would lose
-    // template-added langs (e.g. "python (detected) + rust (template)"
-    // → "python") and break the reuse check that verifies every
-    // template-required lang is present.
+    // is a direct join. Storing the whole set (not lang_display's first
+    // token) keeps the reuse check honest when multiple languages are
+    // installed.
     labels.insert("vibepod.lang".to_string(), ctx.lang_names.join(","));
 
     // Label schema version.
     //
-    // - Missing / "1": pre-Phase-4.6, `vibepod.lang` may be in the
-    //   legacy single-token format.
-    // - "2": Phase 4.6 — `vibepod.lang` stores the full comma-joined
-    //   lang set. Template `required_langs` hard-fail gate is enabled.
-    // - "3": Phase 4.7 — adds `vibepod.template_setup_hash`. Template
-    //   `setup_commands` hash gate is enabled. Containers labeled with
-    //   version < 3 fall back to warnings on setup_commands drift
-    //   because their stored hash is absent and cannot be trusted.
-    labels.insert("vibepod.labels_version".to_string(), "3".to_string());
-
-    // Template setup_commands fingerprint. Empty string when the
-    // container was not created with a template, or the template
-    // declared no setup_commands. Updating a template's setup_commands
-    // mutates this hash; the reuse gate then forces the user to
-    // `--new` because setup_cmd only runs at container creation.
-    labels.insert(
-        "vibepod.template_setup_hash".to_string(),
-        ctx.template_setup_hash.clone(),
-    );
+    // - Missing / "1": legacy `vibepod.lang` single-token format.
+    // - "2"+: `vibepod.lang` stores the full comma-joined lang set.
+    labels.insert("vibepod.labels_version".to_string(), "2".to_string());
 
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(

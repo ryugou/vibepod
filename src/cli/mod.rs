@@ -7,7 +7,6 @@ pub mod restore;
 pub mod rm;
 pub mod run;
 pub mod stop;
-pub mod template;
 
 use clap::{Parser, Subcommand};
 
@@ -84,11 +83,6 @@ pub enum Commands {
         /// Force create a new container (error if running, replace if stopped)
         #[arg(long)]
         new: bool,
-        /// Mount a vibepod-managed template into /home/vibepod/.claude/ instead of
-        /// the host's ~/.claude/. Template directories live under
-        /// ~/.config/vibepod/templates/<name>/.
-        #[arg(long)]
-        template: Option<String>,
         /// Usage mode: `impl` (default, write code) or `review` (read-only review).
         #[arg(long, value_enum, default_value_t = RunMode::Impl)]
         mode: RunMode,
@@ -154,45 +148,5 @@ pub enum Commands {
         /// Stop all VibePod containers
         #[arg(long)]
         all: bool,
-    },
-    /// Manage vibepod templates (list / set-default)
-    Template {
-        #[command(subcommand)]
-        subcommand: TemplateSubcommand,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum TemplateSubcommand {
-    /// List available templates (embedded and user-added)
-    List {},
-    /// Set the default template used when `--prompt` is passed without `--template`
-    SetDefault {
-        /// Template name (must exist in `vibepod template list`)
-        name: String,
-    },
-    /// Re-extract an embedded template from the vibepod binary.
-    ///
-    /// Use this after upgrading vibepod if the bundled template has changed
-    /// (e.g. new plugin bundle). The existing directory is removed and
-    /// replaced with a fresh extraction from the binary. **User edits to the
-    /// target directory are lost.** Pass `--force` to confirm.
-    Reset {
-        /// Template name (must be an embedded template)
-        name: String,
-        /// Confirm that existing edits in the target directory will be lost
-        #[arg(long)]
-        force: bool,
-    },
-    /// Show ecc-cache state (location, current commit, last fetch time,
-    /// configured ref, auto-refresh setting).
-    Status {},
-    /// Fetch the latest ecc ref and hard-reset the cache immediately
-    /// (blocking). Use this for explicit refresh instead of waiting for
-    /// auto-refresh.
-    Update {
-        /// Override the configured ref for this update only.
-        #[arg(long)]
-        r#ref: Option<String>,
     },
 }

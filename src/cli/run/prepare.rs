@@ -103,7 +103,6 @@ fn warn_config_changes(
         "vibepod.network",
         "vibepod.mounts",
         "vibepod.env_hash",
-        "vibepod.template_setup_hash",
     ] {
         let label_name = key.strip_prefix("vibepod.").unwrap_or(key);
         let raw_stored = stored.get(*key).map(|s| s.as_str()).unwrap_or("");
@@ -152,40 +151,11 @@ fn warn_config_changes(
 }
 
 pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunContext>> {
-    if opts.template.is_some() && opts.mode == crate::cli::RunMode::Review {
-        anyhow::bail!(
-            "--mode review cannot be combined with --template: custom templates \
-             define their own behavior (use one or the other)."
-        );
-    }
-
     // 実時間上限を先に解釈して fail-fast する（コンテナ作成やイメージ
     // ビルドの前に不正な --timeout を弾く）。未指定時は既定値。
     let overall_timeout = match &opts.timeout {
         Some(raw) => super::parse_timeout_secs(raw)?,
         None => super::DEFAULT_OVERALL_TIMEOUT_SECS,
-    };
-
-    // v1.6: Resolve official (lang, mode) template when the user didn't
-    // pass `--template` explicitly. `opts.template` is the explicit path
-    // for custom templates; for language bundles we compute from `--lang`
-    // or cwd auto-detect and feed the (lang, mode) matrix.
-    //
-    // This is computed here (before the git/docker checks) so the trace
-    // output is observable even when downstream checks fail — useful for
-    // debugging template selection without Docker/git setup.
-    let effective_template_v16: Option<String> = if let Some(t) = &opts.template {
-        Some(t.clone())
-    } else {
-        let cwd_for_detect = std::env::current_dir()?;
-        let lang_hint: Option<String> = opts.lang.clone().or_else(|| {
-            detect_languages(&cwd_for_detect)
-                .into_iter()
-                .next()
-                .map(|(name, _)| name)
-        });
-        super::template::resolve_official_template_dir(lang_hint.as_deref(), opts.mode)
-            .map(|s| s.to_string())
     };
 
     let interactive = !opts.resume && opts.prompt.is_none();
@@ -202,13 +172,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
     if opts.worktree && opts.prompt.is_none() {
         bail!("--worktree requires --prompt");
-    }
-    if opts.worktree && opts.template.is_some() {
-        // --worktree は毎回ランダム名の使い捨てコンテナを作る一方、
-        // --template は (project, template) ごとに永続コンテナを作る。
-        // この 2 つは命名モデルが衝突するため Phase 2 では同時指定を
-        // 禁止する。template 対応の worktree モードは将来の phase で検討。
-        bail!("--worktree and --template cannot be used together in Phase 2");
     }
 
     // Record session for restore
@@ -346,136 +309,9 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     let config_dir = config::default_config_dir()?;
     let vibepod_config = config::VibepodConfig::load(&cwd, &config_dir)?;
 
-    // Template resolution (early): we need the template's canonical
-    // path *and* its metadata (vibepod-template.toml → required_langs)
-    // **before** we compute the language install plan, because the
-    // template can declare languages that MUST be installed regardless
-    // of what the cwd-detection or --lang would choose.
-    //
-    // This block does the lazy extract + resolve that Phase 3/4 would
-    // otherwise do inline near the container-name hashing step below.
-    // We capture the result here and reuse it when computing the
-    // container name, so extraction / resolve is not repeated.
-    // Prefer the v1.6 (lang, mode) resolver result when it produced a name;
-    // otherwise fall back to the legacy resolver which additionally consults
-    // `default_prompt_template` from config. This keeps existing behavior
-    // for users who configured a default template but adds (lang, mode)
-    // routing on top.
-    // v1.6: Official (lang-based) bundles require the ecc cache. Custom
-    // templates (`opts.template.is_some()`) are exempt — their [ecc]
-    // selection (if any) is validated by stage_files at mount time.
-    if opts.template.is_none() {
-        if let Some(ref t) = effective_template_v16 {
-            let cache = crate::ecc::cache_dir(&config_dir);
-            if !cache.join(".git").exists() {
-                anyhow::bail!(
-                    "Template '{t}' requires the ecc cache at {}. \
-                     Run `vibepod init` first to clone it.",
-                    cache.display()
-                );
-            }
-        }
-    }
-
-    let effective_template = effective_template_v16
-        .or_else(|| super::template::effective_template_name(opts, &vibepod_config, &config_dir));
-
-    if std::env::var("VIBEPOD_TRACE").is_ok() {
-        eprintln!(
-            "vibepod: selected template = {}",
-            effective_template.as_deref().unwrap_or("<host>")
-        );
-    }
-
-    let resolved_template: Option<(String, std::path::PathBuf)> = if opts.worktree {
-        None
-    } else if let Some(ref tmpl) = effective_template {
-        // First try resolving the template as-is. User-provided templates
-        // must work on read-only ~/.config/vibepod/ without any extraction.
-        let canonical = match super::template::resolve_template_dir(tmpl, &config_dir) {
-            Ok(path) => path,
-            Err(first_err) => {
-                // Only trigger embedded extraction on an exact name match
-                // (case-sensitive). See the comment in the earlier inline
-                // location for the rationale (typo mutation / read-only).
-                // v1.6 official bundles use nested names like "rust/impl".
-                // embedded_template_names() returns top-level container names
-                // only, so match the top-level parent segment of `tmpl`.
-                // split("/").next() always yields Some on any non-empty
-                // string; unwrap_or defensive fallback to the whole name
-                // handles hypothetical empty-name edge cases.
-                let container_name: &str = tmpl.split('/').next().unwrap_or(tmpl.as_str());
-                let is_embedded = super::template::embedded_template_names()
-                    .iter()
-                    .any(|n| n == container_name);
-                if !is_embedded {
-                    return Err(first_err);
-                }
-                // Extract the embedded container — for nested bundles
-                // (e.g., `rust/impl`) this lays down the whole `rust/`
-                // subtree including sibling modes (`rust/review`).
-                super::template::extract_single_embedded_template_if_missing(
-                    &config_dir,
-                    container_name,
-                )?;
-                super::template::resolve_template_dir(tmpl, &config_dir)?
-            }
-        };
-        Some((tmpl.clone(), canonical))
-    } else {
-        None
-    };
-
-    // Read template metadata (required_langs, etc.) if in template mode.
-    //
-    // Explicit `--template` is fail-fast: a malformed vibepod-template.toml
-    // for a user-chosen template is a clear user-visible error. But
-    // when the template came from `default_prompt_template` in config
-    // (best-effort default path), we must NOT turn metadata parse
-    // failures into fatal run errors — the spec for that code path is
-    // "fall back to host mount on any resolution failure". Emit a
-    // warning and drop the template so the run continues on host
-    // mounts, mirroring `effective_template_name`'s own fallback.
-    let template_is_explicit = opts.template.is_some();
-    let (resolved_template, template_metadata) = match resolved_template {
-        Some((name, canonical)) => match super::template::read_template_metadata(&canonical) {
-            Ok(meta) => (Some((name, canonical)), meta),
-            Err(e) if !template_is_explicit => {
-                eprintln!(
-                    "warning: configured default template '{}' has invalid \
-                     vibepod-template.toml and will be ignored; falling back \
-                     to host mount. Underlying error: {}",
-                    name, e
-                );
-                (None, super::template::TemplateMetadata::default())
-            }
-            Err(e) => return Err(e),
-        },
-        None => (None, super::template::TemplateMetadata::default()),
-    };
-    // Keep `effective_template` (the name) in sync with `resolved_template`.
-    // When we drop the default template above, downstream template-mode
-    // checks should also see "no template" so the run proceeds on host mounts.
-    let effective_template: Option<String> = resolved_template.as_ref().map(|(n, _)| n.clone());
-
-    // Fingerprint of the template's `setup_commands` list. Empty string
-    // when no template was selected or when the template declared no
-    // setup_commands. Used by:
-    //   - build_config_labels (persisted as `vibepod.template_setup_hash`)
-    //   - the template-mode reuse gate below (detects drift vs. stored
-    //     hash and hard-fails with a `--new` hint).
-    // Newlines are disallowed inside entries (validated at parse time)
-    // so joining on '\n' is an unambiguous canonical form.
-    let template_setup_hash: String = {
-        let cmds = &template_metadata.runtime.setup_commands;
-        if cmds.is_empty() {
-            String::new()
-        } else {
-            path_hash_8(&cmds.join("\n"))
-        }
-    };
-
-    // Language detection
+    // Language detection: `--lang` > project/global config `lang` > cwd
+    // auto-detect. The selected languages drive the in-container setup
+    // command (toolchain install).
     let effective_lang = opts.lang.clone().or_else(|| vibepod_config.lang());
     let detected_langs: Vec<(String, &'static str)> = if effective_lang.is_none() {
         detect_languages(&cwd)
@@ -483,57 +319,27 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         Vec::new()
     };
 
-    let (mut lang_names, mut lang_display): (Vec<String>, String) =
-        if let Some(ref l) = effective_lang {
-            (vec![l.clone()], format!("{} (--lang)", l))
-        } else if detected_langs.len() == 1 {
-            let (name, file) = &detected_langs[0];
-            (
-                vec![name.clone()],
-                format!("{} (detected from {})", name, file),
-            )
-        } else if detected_langs.len() > 1 {
-            let names: Vec<String> = detected_langs.iter().map(|(n, _)| n.clone()).collect();
-            let display = format!("{} (auto-detected)", names.join(", "));
-            (names, display)
-        } else {
-            (Vec::new(), String::new())
-        };
-
-    // Union template-required langs into the install plan. `--lang`
-    // / config / auto-detect are respected as the primary source;
-    // template required_langs are ADDED on top so a `--lang rust` run
-    // in a Python project still installs Rust.
-    if !template_metadata.runtime.required_langs.is_empty() {
-        let mut template_added: Vec<String> = Vec::new();
-        for req in &template_metadata.runtime.required_langs {
-            if !lang_names.iter().any(|n| n == req) {
-                lang_names.push(req.clone());
-                template_added.push(req.clone());
-            }
-        }
-        if !template_added.is_empty() {
-            let suffix = format!("+ {} (template)", template_added.join(", "));
-            if lang_display.is_empty() {
-                lang_display = suffix.trim_start_matches("+ ").to_string();
-            } else {
-                lang_display = format!("{} {}", lang_display, suffix);
-            }
-        }
-    }
+    let (lang_names, lang_display): (Vec<String>, String) = if let Some(ref l) = effective_lang {
+        (vec![l.clone()], format!("{} (--lang)", l))
+    } else if detected_langs.len() == 1 {
+        let (name, file) = &detected_langs[0];
+        (
+            vec![name.clone()],
+            format!("{} (detected from {})", name, file),
+        )
+    } else if detected_langs.len() > 1 {
+        let names: Vec<String> = detected_langs.iter().map(|(n, _)| n.clone()).collect();
+        let display = format!("{} (auto-detected)", names.join(", "));
+        (names, display)
+    } else {
+        (Vec::new(), String::new())
+    };
 
     let setup_cmd: Option<String> = {
-        let mut setup_parts: Vec<String> = lang_names
+        let setup_parts: Vec<String> = lang_names
             .iter()
             .filter_map(|l| get_lang_install_cmd(l).map(|s| s.to_string()))
             .collect();
-        // Phase 4.7: append template-declared setup_commands AFTER the
-        // language install chain. Order matters — commands like
-        // `rustup component add rust-analyzer` depend on rustup having
-        // already been installed by the `rust` lang step.
-        for cmd in &template_metadata.runtime.setup_commands {
-            setup_parts.push(cmd.clone());
-        }
         if setup_parts.is_empty() {
             None
         } else {
@@ -545,16 +351,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         eprintln!("Note: Language/tool setup requires sudo in the container. If setup fails, run `vibepod init` to rebuild the image.");
     }
 
-    // 2. Load global config (config_dir already loaded at the top
-    // because template metadata resolution needs it early).
+    // 2. Load global config (config_dir already loaded at the top).
     let global_config = config::load_global_config(&config_dir)?;
-
-    // Note: 埋め込み template の展開はここでは**行わない**。展開は
-    // template mode が使われ、かつ要求された template が user-provided
-    // として解決できない時だけ遅延実行する（step 4 の container_name
-    // 計算内）。`vibepod template list` / `template set-default` は
-    // 列挙のみで write を行わないため、host mode 専用ユーザーの
-    // read-only `~/.config/vibepod/` setup を壊さない。
 
     // 3. Check Docker & image
     let runtime = DockerRuntime::new()
@@ -573,41 +371,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     .await?;
 
     // 4. Compute container name
-    // --worktree: ランダムハッシュ（使い捨て）
-    // それ以外:
-    //   - host mode (--template 未指定): プロジェクトパスの SHA256 先頭 8 文字（v1.4.3 互換）
-    //   - template mode (--template <name>): プロジェクトパス + template の canonical path の SHA256
-    //
-    // template 指定時だけ hash を変えることで、template モードは host
-    // mode とは別の container に落ちつつ、既存の host mode container は
-    // v1.4.3 と同じ名前のままで互換性を保つ。
-    //
-    // template mode の hash 入力には **canonical path** を使う。これで
-    // macOS のような case-insensitive FS で `--template review` と
-    // `--template Review` が同じディレクトリに解決される場合に同じ container
-    // に落ちる（raw 名を使うと 2 つの container に split されてしまう）。
-    // 同時に、resolve_template_dir が symlink escape を防ぐので path
-    // traversal の心配もない。
-    // Container naming:
     //   - worktree: random short hash (disposable)
-    //   - template mode: project path + canonical template path → SHA256[:8]
-    //     (canonical path keeps macOS case-insensitive FS consistent)
-    //   - host mode: project path → SHA256[:8] (v1.4.3 compatible)
-    //
-    // Template resolution (lazy extract + resolve_template_dir) already
-    // happened earlier because the lang pipeline needs the template
-    // metadata. Reuse `resolved_template` here instead of re-resolving.
+    //   - otherwise: project path → SHA256[:8] (v1.4.3 compatible)
     let container_name = if opts.worktree {
         let short_hash: String = (0..6)
             .map(|_| format!("{:x}", rand::random::<u8>() & 0x0f))
             .collect();
         format!("vibepod-{}-{}", project_name, short_hash)
-    } else if let Some((_, ref canonical_template)) = resolved_template {
-        let hash_input = format!("{}|template={}", cwd_str, canonical_template.display());
-        let hash = path_hash_8(&hash_input);
-        format!("vibepod-{}-{}", project_name, hash)
     } else {
-        // Host mode: v1.4.3 互換の hash 計算を維持
         let hash = path_hash_8(&cwd_str);
         format!("vibepod-{}-{}", project_name, hash)
     };
@@ -746,85 +517,21 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 9b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
-    // vibepod v2 の mode 切り替え mechanism: --template 指定時は template
-    // mount、未指定時は従来の host mount を使う。`effective_template` は
-    // 既に container_name 計算時 (step 4) に resolve 済み。
     let home = crate::config::home_dir()?;
 
-    // Per-container runtime directory: created here (earlier than strictly
-    // needed for the temp claude.json / sanitized settings writes below)
-    // so that template-mode staging assembly can place ecc-staged files
-    // under `<runtime_dir>/ecc-staging/` before building the mount set.
+    // Per-container runtime directory: holds the temp claude.json copy and
+    // the sanitized settings.json written below. Created here so cleanup of
+    // disposable containers can remove the whole directory unconditionally.
     let runtime_dir = config_dir.join("runtime").join(&container_name);
     std::fs::create_dir_all(&runtime_dir)
         .with_context(|| format!("Failed to create runtime dir: {}", runtime_dir.display()))?;
 
-    // claude_config_mounts / host_settings_exists は label 計算（9b）と
-    // extra_mounts 構築（下部）の両方で共有される。1 度だけ計算して使い回す。
-    //
-    // Template mode: v1.6 から mount source は extracted template dir
-    // そのものではなく、per-container **staging dir** を使う。staging は
-    // `assemble_staging` が (1) template dir の中身を丸ごとコピーし
-    // (2) template の `[ecc]` section で選ばれた ecc-cache のファイルを
-    // `.claude/` 配下にコピーして組み立てる。これにより official bundle
-    // でも custom template でも `[ecc]` を宣言すれば ecc-cache の内容を
-    // container に持ち込める。
-    //
-    // ecc の `maybe_background_refresh` は **staging 組み立て完了後** に
-    // 発火させる: 先に fire すると fetch+reset が staging コピーと race して
-    // 中途半端なファイルを掴む可能性があるため。
-    let (claude_config_mounts, host_settings_exists) =
-        if let Some((ref template_name, ref canonical)) = resolved_template {
-            // template mode: staging には host `~/.claude/` の allowlist 資産
-            // (CLAUDE.md / agents / skills / specs) も合流させたうえで、
-            // 同名衝突は template 側が勝つ（詳細は assemble_staging のドキュメント）。
-            //
-            // host の settings.json は staging に入れない。template の
-            // `permissions.deny`（review モードの安全性の根拠）が host 設定で
-            // 上書きされてはならないため、v1.6 までの挙動を維持する。
-            let staging = crate::ecc::staging_dir(&runtime_dir);
-
-            // Reassembling wipes and rebuilds the staging dir, which is the
-            // bind-mount SOURCE for a persistent container's ~/.claude/.
-            // Doing that while reusing a Running container would empty its
-            // live mount. Skip in that case and keep the existing staging;
-            // host ~/.claude/ changes then need `--new` to take effect.
-            let is_running_reuse = container_status == ContainerStatus::Running;
-            if should_reassemble_staging(is_running_reuse, staging.exists()) {
-                assemble_staging(&config_dir, &runtime_dir, canonical, &home, template_name)?;
-
-                // Staging is complete; it's now safe to kick off the background
-                // refresh of the ecc-cache. Fire-and-forget; do not await.
-                let ecc_cfg = config::load_ecc_config(&config_dir)?;
-                crate::ecc::maybe_background_refresh(&config_dir, &ecc_cfg);
-            } else {
-                eprintln!(
-                    "  Note: reusing the running container; kept its already-staged \
-                     ~/.claude/. To pick up host ~/.claude/ changes, recreate it with `--new`."
-                );
-            }
-
-            let mut mounts =
-                super::template::build_template_mounts_from_dir(&staging, template_name)?;
-
-            // plugins だけは staging コピーではなく bind mount で合流させる
-            // （`installed_plugins.json` の installPath がホスト絶対パスを
-            // 持つため。詳細は merge_host_plugins_mounts のドキュメント）。
-            let host_plugins = home.join(".claude").join("plugins");
-            let host_plugins = if host_plugins.is_dir() {
-                Some(host_plugins.to_string_lossy().to_string())
-            } else {
-                None
-            };
-            super::merge_host_plugins_mounts(&mut mounts, host_plugins.as_deref(), &home);
-
-            (mounts, false)
-        } else {
-            // host mode: v1.4.3 互換挙動
-            let mounts = super::build_claude_config_mounts(&home);
-            let exists = home.join(".claude").join("settings.json").is_file();
-            (mounts, exists)
-        };
+    // Mount the host's `~/.claude/` allowlist (CLAUDE.md / agents / skills /
+    // specs / plugins) read-only. `claude_config_mounts` / `host_settings_exists`
+    // are shared by the label computation (9b) and the extra_mounts assembly
+    // below, so they are computed once here and reused.
+    let claude_config_mounts = super::build_claude_config_mounts(&home);
+    let host_settings_exists = home.join(".claude").join("settings.json").is_file();
 
     if let Some(stored_labels) = stored_labels_opt {
         let mut mounts_parts: Vec<String> = Vec::new();
@@ -846,14 +553,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
         mounts_parts.sort();
 
-        // Encode the FULL sorted lang_names set, not just the display's
-        // first token. Previously we stored only the first whitespace-
-        // delimited word of `lang_display`, which meant e.g. "python
-        // (detected from ...) + rust (template)" stored as "python".
-        // A pre-existing container (created before the template added
-        // rust) would then match the label and be reused WITHOUT
-        // running `setup_cmd`, leaving the template-required runtime
-        // uninstalled. Storing the whole set forces re-provisioning
+        // Encode the FULL sorted lang_names set so reuse re-provisions
         // whenever any language is added or removed.
         let current_lang = {
             let mut names = lang_names.clone();
@@ -871,160 +571,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
-        // Phase 4.7: include the template_setup_hash so warn_config_changes
-        // can surface a drift diff. Note that legacy template containers
-        // (labels_version < 3) under a template that declares non-empty
-        // setup_commands are NOT silently reused — they are hard-failed
-        // by the reuse gate below with a `--new` hint. The presence of
-        // this label in current_labels still helps the warning path
-        // describe drift in the remaining edge cases (labels_version >= 3
-        // containers that hit the gate, host-mode reuse where the value
-        // is empty on both sides, etc.).
-        current_labels.insert(
-            "vibepod.template_setup_hash".to_string(),
-            template_setup_hash.clone(),
-        );
-
-        // Template mode では mount set の変更は **critical**。
-        // docker のバインドマウントはコンテナ作成時に固定されるため、
-        // template に CLAUDE.md / skills/ / agents/ / plugins/ /
-        // settings.json を追加・削除しても既存コンテナには反映されない。
-        // warn_config_changes は通常の非致命的な変更（lang / env 等）の
-        // 警告表示用なので、template mode の mount 変更はそれより前に
-        // hard fail させる。
-        if effective_template.is_some() {
-            let stored_mounts_raw = stored_labels
-                .get("vibepod.mounts")
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            let current_mounts_raw = current_labels
-                .get("vibepod.mounts")
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            // warn_config_changes と同じ legacy 正規化ロジックを適用
-            let stored_mounts = normalize_mounts_label_legacy(stored_mounts_raw);
-            if stored_mounts != current_mounts_raw {
-                bail!(
-                    "Template mount set changed since this container was created \
-                     (template: '{}'). Bind mounts are fixed at container creation \
-                     time, so edits that add or remove files/directories in the \
-                     template (CLAUDE.md, skills/, agents/, plugins/, settings.json) \
-                     cannot take effect on the existing container. Run with --new to \
-                     recreate the container with the updated mount set.",
-                    effective_template.as_deref().unwrap_or("")
-                );
-            }
-
-            // Template-required langs must all be present in the stored
-            // lang set of the existing container. `setup_cmd` only runs
-            // at container creation time, so a container created before
-            // the template added a `required_langs` entry will not
-            // have that toolchain even though the warning would let
-            // the reuse through. Hard-fail here with a clear --new hint.
-            //
-            // Gate on `vibepod.labels_version >= 2`. Pre-Phase-4.6
-            // containers do not have that label; their `vibepod.lang`
-            // is in the legacy single-token format that cannot be
-            // trusted as the complete installed set (e.g. a polyglot
-            // container with multiple langs would still have just the
-            // first token stored). Falling through to warn_config_changes
-            // in the legacy case gives the user a readable diff instead
-            // of forcing --new unnecessarily.
-            let labels_version = stored_labels
-                .get("vibepod.labels_version")
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            if labels_version >= 2 && !template_metadata.runtime.required_langs.is_empty() {
-                let stored_lang_set: std::collections::BTreeSet<&str> = stored_labels
-                    .get("vibepod.lang")
-                    .map(|s| {
-                        s.split([',', ' '])
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let missing: Vec<String> = template_metadata
-                    .runtime
-                    .required_langs
-                    .iter()
-                    .filter(|req| !stored_lang_set.contains(req.as_str()))
-                    .cloned()
-                    .collect();
-                if !missing.is_empty() {
-                    bail!(
-                        "Template '{}' requires language(s) [{}] but the existing \
-                         container was created without them (stored lang set: {:?}). \
-                         Language installation only runs at container creation, so \
-                         the required toolchain cannot be added to the existing \
-                         container. Run with --new to recreate the container with \
-                         the required toolchain installed.",
-                        effective_template.as_deref().unwrap_or(""),
-                        missing.join(", "),
-                        stored_labels
-                            .get("vibepod.lang")
-                            .cloned()
-                            .unwrap_or_else(|| "(none)".to_string())
-                    );
-                }
-            }
-
-            // Phase 4.7: template_setup_hash drift gate.
-            //
-            // setup_commands run exactly once, at container creation,
-            // chained after the language install. If a template's
-            // setup_commands list changes (entry added / removed /
-            // reordered / edited), the existing container cannot
-            // retroactively re-run the new chain, so reuse would leave
-            // the container in a half-configured state relative to the
-            // updated template. Hard-fail with a clear --new hint.
-            //
-            // Two cases:
-            //   * labels_version >= 3: compare stored hash to current.
-            //     Any difference is drift → bail.
-            //   * labels_version < 3 (pre-Phase-4.7 legacy container):
-            //     the container has no stored hash at all, so we cannot
-            //     tell whether any setup_commands have ever run inside
-            //     it. If the current template declares non-empty
-            //     setup_commands, we MUST assume the legacy container
-            //     is missing them and bail with --new. If the current
-            //     template has empty setup_commands there is nothing
-            //     to install so reuse is safe.
-            let stored_setup_hash = stored_labels
-                .get("vibepod.template_setup_hash")
-                .cloned()
-                .unwrap_or_default();
-            let setup_hash_mismatch = if labels_version >= 3 {
-                stored_setup_hash != template_setup_hash
-            } else {
-                // Legacy (no label): treat as "has ever run any
-                // setup" = false. Mismatch if the current template
-                // wants any setup done.
-                !template_metadata.runtime.setup_commands.is_empty()
-            };
-            if setup_hash_mismatch {
-                bail!(
-                    "Template '{}' setup_commands hash mismatch (stored: {:?}, \
-                     current: {:?}; labels_version={}). setup_commands run only \
-                     at container creation, so the declared commands cannot be \
-                     retroactively applied to the existing container. Run with \
-                     --new to recreate the container with the updated setup \
-                     sequence.",
-                    effective_template.as_deref().unwrap_or(""),
-                    if stored_setup_hash.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        stored_setup_hash
-                    },
-                    if template_setup_hash.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        template_setup_hash.clone()
-                    },
-                    labels_version
-                );
-            }
-        }
 
         warn_config_changes(&stored_labels, &current_labels)?;
     }
@@ -1083,21 +629,17 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         extra_mounts.push(parsed);
     }
 
-    // `claude_config_mounts` は 9b の分岐で既に解決済み（template mode なら
-    // template mount、host mode なら host mount）。ここで再計算せずに
-    // そのまま `extra_mounts` に積む。
+    // `claude_config_mounts`（host `~/.claude/` の allowlist マウント）は
+    // 9b で既に解決済み。そのまま `extra_mounts` に積む。
     for (host, container) in &claude_config_mounts {
         extra_mounts.push((host.clone(), container.clone()));
     }
 
-    // Host mode の場合だけ sanitized settings.json を実際に生成してマウント
-    // に追加する。template mode では host の settings.json は触らない。
-    if effective_template.is_none() {
-        if let Some((host, container)) =
-            super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
-        {
-            extra_mounts.push((host, container));
-        }
+    // ホストの settings.json を hooks/statusLine 除去のうえマウントする。
+    if let Some((host, container)) =
+        super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
+    {
+        extra_mounts.push((host, container));
     }
 
     // Normalize lang_names before storing in RunContext so downstream
@@ -1126,7 +668,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         worktree_dir_name,
         lang_display,
         lang_names,
-        template_setup_hash,
         store,
         deferred_session,
         extra_mounts,
@@ -1137,278 +678,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         overall_timeout,
         verbose: opts.verbose,
     }))
-}
-
-/// Assemble the staging directory used as the container's
-/// `/home/vibepod/.claude/` mount source.
-///
-/// Layers are copied in **increasing priority order**, so a later layer
-/// overwrites a same-named file from an earlier one:
-///
-///   1. **Host** `~/.claude/` — the allowlisted entries only
-///      (`HOST_CLAUDE_ALLOWLIST`: CLAUDE.md / agents / skills / specs).
-///      Lowest priority: the host's personal assets ride along, but must
-///      never dictate container behaviour.
-///   2. **Template** — all files from `template_dir` copied as-is
-///      (CLAUDE.md, settings.json, vibepod-template.toml, plus any
-///      additional files the template defines).
-///   3. **ECC** — files selected by `template_dir/vibepod-template.toml`'s
-///      `[ecc]` section, copied from the ecc-cache into staging's
-///      `skills/<name>/SKILL.md` and `agents/<name>.md` (the staging
-///      layout mirrors the template root; the `.claude/` prefix is
-///      applied at mount time via `build_template_mounts`, not at
-///      stage time).
-///
-/// **Why the template wins over the host on collision**: a template
-/// defines mode-specific behaviour — most importantly `review` mode,
-/// whose `settings.json` `permissions.deny` blocking `Edit(*)` /
-/// `Write(*)` / `git commit` is the entire safety argument for running
-/// with `--dangerously-skip-permissions` inside the container. If a host
-/// file of the same name could shadow a template file, that guarantee
-/// would silently depend on whatever the user happens to have in
-/// `~/.claude/`. Host assets are therefore additive only: they fill in
-/// names the template does not already define.
-///
-/// **`CLAUDE.md` is the deliberate exception.** Every official bundle ships
-/// its own `CLAUDE.md`, so the plain per-file overwrite above would drop the
-/// host's 100% of the time — defeating requirement 1's "always mount the
-/// host CLAUDE.md". So after the copy passes, the two `CLAUDE.md` bodies are
-/// concatenated (template first, host second; see [`merge_claude_md`]).
-/// Unlike `settings.json`, `CLAUDE.md` is instruction text, not a permission
-/// boundary, so concatenating cannot weaken review mode's safety argument;
-/// putting the template first preserves the same "template wins" precedence.
-///
-/// Because a bind mount cannot merge two directories, this file-level
-/// merge into a staging dir is the only way to get "template wins per
-/// file" rather than "template wins per whole directory".
-///
-/// Fails fast if any `[ecc]` file is missing from the cache.
-///
-/// Callers must complete this assembly BEFORE triggering
-/// `crate::ecc::maybe_background_refresh`, because the refresh may
-/// mutate ecc-cache contents concurrently.
-pub fn assemble_staging(
-    config_dir: &std::path::Path,
-    runtime_dir: &std::path::Path,
-    template_dir: &std::path::Path,
-    home: &std::path::Path,
-    template_name: &str,
-) -> anyhow::Result<std::path::PathBuf> {
-    let staging = crate::ecc::staging_dir(runtime_dir);
-
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging).map_err(|e| {
-            anyhow::anyhow!("failed to clear stale staging {}: {e}", staging.display())
-        })?;
-    }
-    std::fs::create_dir_all(&staging)
-        .map_err(|e| anyhow::anyhow!("failed to create staging {}: {e}", staging.display()))?;
-
-    stage_host_claude_assets(&home.join(".claude"), &staging)?;
-
-    copy_dir_contents(template_dir, &staging)?;
-
-    // CLAUDE.md gets special treatment: the copy passes above leave staging's
-    // CLAUDE.md equal to the template's (it overwrote the host's). Replace it
-    // with the template+host concatenation so both survive. Reads follow the
-    // original sources rather than the staged copies to keep the merge
-    // independent of copy order.
-    let template_claude = read_file_if_present(&template_dir.join("CLAUDE.md"))?;
-    let host_claude = read_file_if_present(&home.join(".claude").join("CLAUDE.md"))?;
-    if let Some(merged) = crate::cli::run::merge_claude_md(
-        template_claude.as_deref(),
-        host_claude.as_deref(),
-        template_name,
-    ) {
-        let dst = staging.join("CLAUDE.md");
-        std::fs::write(&dst, merged)
-            .map_err(|e| anyhow::anyhow!("failed to write merged {}: {e}", dst.display()))?;
-    }
-
-    let meta_path = template_dir.join("vibepod-template.toml");
-    if meta_path.is_file() {
-        let meta = crate::cli::run::template::read_template_metadata(template_dir)?;
-        if !meta.ecc.skills.is_empty() || !meta.ecc.agents.is_empty() {
-            crate::ecc::stage_files(config_dir, runtime_dir, &meta.ecc)?;
-        }
-    }
-
-    Ok(staging)
-}
-
-/// Read a file to a String, returning `None` when it does not exist.
-///
-/// `is_file()` follows symlinks, so a top-level symlinked `CLAUDE.md` is
-/// read through — matching the top-level-symlink-follow policy documented on
-/// [`crate::cli::run::host_claude_stage_entries`]. Other I/O errors (e.g. a
-/// permission problem on a file that exists) are surfaced, not swallowed.
-fn read_file_if_present(path: &std::path::Path) -> anyhow::Result<Option<String>> {
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let body = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-    Ok(Some(body))
-}
-
-/// Whether the template staging directory should be (re)assembled.
-///
-/// Reassembly wipes and rebuilds the staging dir. That dir is the bind-mount
-/// *source* for a persistent container's `~/.claude/`, so rebuilding it under
-/// a container we are about to reuse would momentarily empty that live mount.
-///
-/// - When reusing a **Running** container, skip reassembly and keep the
-///   existing staging (host `~/.claude/` edits then need `--new`).
-/// - But if no staging exists yet, always assemble: there is nothing to
-///   reuse and downstream mount-building needs the directory to exist. This
-///   also covers the rare path where a Running container is later recreated
-///   because its setup marker is missing.
-pub fn should_reassemble_staging(is_running_reuse: bool, staging_exists: bool) -> bool {
-    if !staging_exists {
-        return true;
-    }
-    !is_running_reuse
-}
-
-/// Copy the allowlisted entries of the host's `~/.claude/` into `staging`.
-///
-/// Only `HOST_CLAUDE_ALLOWLIST` entries are considered, so session and
-/// history data (`sessions/`, `projects/`, `history.jsonl`, `backups/`,
-/// `file-history/`, `shell-snapshots/`, `todos/`) never reaches the
-/// container. Missing entries are skipped silently — not having
-/// `~/.claude/specs/` is the normal case, not an error.
-fn stage_host_claude_assets(
-    claude_dir: &std::path::Path,
-    staging: &std::path::Path,
-) -> anyhow::Result<()> {
-    for (src, name) in crate::cli::run::host_claude_stage_entries(claude_dir) {
-        let dst = staging.join(name);
-        if src.is_dir() {
-            std::fs::create_dir_all(&dst)
-                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", dst.display()))?;
-            copy_host_dir_contents(&src, &dst)?;
-        } else {
-            std::fs::copy(&src, &dst).map_err(|e| {
-                anyhow::anyhow!("failed to copy {} to {}: {e}", src.display(), dst.display())
-            })?;
-        }
-    }
-    Ok(())
-}
-
-/// Recursively copy host `~/.claude/` contents, **skipping nested symlinks
-/// with a warning** instead of failing.
-///
-/// This is the "nested" half of the two-tier symlink policy (the
-/// "top-level" half lives on [`crate::cli::run::host_claude_stage_entries`]):
-///
-/// - A **top-level** allowlisted entry that is itself a symlink (a whole
-///   `~/.claude/skills` symlinked elsewhere) is followed on purpose —
-///   `stage_host_claude_assets` reaches here via `is_dir()`, which resolves
-///   it. Dotfile setups that symlink whole directories are common and are a
-///   deliberate placement by the user.
-/// - A symlink **nested inside** such a directory is skipped. It can point
-///   anywhere — a huge tree, or a secret outside `~/.claude/` — and following
-///   it would silently materialize that target into a directory we mount into
-///   the container.
-///
-/// This also differs from `copy_dir_contents` (templates), which *hard-fails*
-/// on any symlink: a template may be third-party, so a symlink there is a
-/// possible escape attempt, whereas `~/.claude/` is the user's own directory
-/// where aborting the whole run over one symlinked skill would make the tool
-/// unusable. Here we skip and name the dropped path so the asset does not go
-/// missing silently.
-fn copy_host_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| anyhow::anyhow!("failed to read_dir {}: {e}", src.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        let Some(file_name) = path.file_name() else {
-            continue;
-        };
-        let target = dst.join(file_name);
-
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| anyhow::anyhow!("failed to stat {}: {e}", path.display()))?;
-
-        if meta.file_type().is_symlink() {
-            eprintln!(
-                "  Warning: skipping symlink in host ~/.claude/: {}\n    \
-                 It will NOT be available inside the container. Replace it with \
-                 a real file or directory to have it included.",
-                path.display()
-            );
-            continue;
-        }
-
-        if meta.is_dir() {
-            std::fs::create_dir_all(&target)
-                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", target.display()))?;
-            copy_host_dir_contents(&path, &target)?;
-        } else {
-            std::fs::copy(&path, &target).map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to copy {} to {}: {e}",
-                    path.display(),
-                    target.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
-/// Recursively copy the contents of `src` into `dst`. Both must exist.
-/// Directories are created as needed; regular files are copied byte-for-byte.
-/// Symlinks are **rejected** — templates must be plain files/directories.
-/// This preserves the v1.5 template-mount escape protection (otherwise
-/// enforced by `resolve_template_entry`) end-to-end: a malicious template
-/// dropping a symlink to `/etc/passwd` would have its target content
-/// materialized into the staging dir and pass downstream checks since the
-/// staged copy is a real file. Refusing symlinks at copy time keeps the
-/// staging output honest.
-fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(src)
-        .map_err(|e| anyhow::anyhow!("failed to read_dir {}: {e}", src.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(src)
-            .map_err(|e| anyhow::anyhow!("strip_prefix failed: {e}"))?;
-        let target = dst.join(rel);
-
-        // Reject symlinks explicitly — do not follow them into staging.
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| anyhow::anyhow!("failed to stat {}: {e}", path.display()))?;
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "refusing to copy symlink into staging: {} \
-                 (templates must be plain files/directories)",
-                path.display()
-            );
-        }
-
-        if meta.is_dir() {
-            std::fs::create_dir_all(&target)
-                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", target.display()))?;
-            copy_dir_contents(&path, &target)?;
-        } else {
-            if let Some(p) = target.parent() {
-                std::fs::create_dir_all(p)
-                    .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", p.display()))?;
-            }
-            std::fs::copy(&path, &target).map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to copy {} to {}: {e}",
-                    path.display(),
-                    target.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

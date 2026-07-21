@@ -4,7 +4,6 @@ use std::path::Path;
 
 use crate::config::{self, GlobalConfig};
 use crate::runtime::DockerRuntime;
-use crate::ui::sanitize::sanitize_single_line;
 use crate::ui::{banner, prompts};
 
 /// ホストの UID/GID を返す（Dockerfile の HOST_UID / HOST_GID build-arg 用）。
@@ -299,34 +298,6 @@ pub async fn execute(rebuild: bool) -> Result<()> {
         image: image_name,
     };
     config::save_global_config(&config, &config_dir)?;
-
-    // 6. ECC cache initialization / refresh (idempotent).
-    {
-        let ecc_cfg = config::load_ecc_config(&config_dir)?;
-        ecc_cfg.validate()?;
-        let cache = crate::ecc::cache_dir(&config_dir);
-
-        if cache.join(".git").exists() {
-            println!("\n  Refreshing ecc cache at {}...", cache.display());
-            match crate::ecc::fetch_latest(&config_dir, &ecc_cfg) {
-                Ok(_) => println!("  Refreshed."),
-                Err(e) => eprintln!(
-                    "  Warning: ecc refresh failed: {}\n  \
-                     Run `vibepod template update` later to retry.",
-                    sanitize_single_line(&format!("{e}"), 500)
-                ),
-            }
-        } else {
-            println!(
-                "\n  Cloning ecc ({}@{}) into {}...",
-                sanitize_single_line(&ecc_cfg.repo, 500),
-                sanitize_single_line(&ecc_cfg.r#ref, 200),
-                cache.display()
-            );
-            crate::ecc::ensure_cloned(&config_dir, &ecc_cfg)?;
-            println!("  Cloned.");
-        }
-    }
 
     println!("\n  Done! Run `vibepod run` in any git repo to start.\n");
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use vibepod::cli::{Cli, Commands, TemplateSubcommand};
+use vibepod::cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,7 +28,6 @@ async fn main() -> Result<()> {
             worktree,
             mount,
             new,
-            template,
             mode,
             update,
             no_update,
@@ -56,7 +55,6 @@ async fn main() -> Result<()> {
                 worktree,
                 mount,
                 new_container: new,
-                template,
                 mode,
                 update_policy,
                 model,
@@ -85,21 +83,6 @@ async fn main() -> Result<()> {
         Commands::Stop { name, all } => {
             vibepod::cli::stop::execute(name, all).await?;
         }
-        Commands::Template { subcommand } => match subcommand {
-            TemplateSubcommand::List {} => {
-                vibepod::cli::template::list()?;
-            }
-            TemplateSubcommand::SetDefault { name } => {
-                vibepod::cli::template::set_default(&name)?;
-            }
-            TemplateSubcommand::Reset { name, force } => {
-                vibepod::cli::template::reset(&name, force)?;
-            }
-            TemplateSubcommand::Status {} => vibepod::cli::template::status()?,
-            TemplateSubcommand::Update { r#ref } => {
-                vibepod::cli::template::update(r#ref.as_deref())?
-            }
-        },
     }
 
     Ok(())
