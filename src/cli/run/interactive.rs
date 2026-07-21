@@ -82,7 +82,11 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
 
     let runtime = DockerRuntime::new().await?;
 
-    match ctx.container_status {
+    // `container_created` は「このコンテナが今この run で作られたか」。
+    // 新規作成直後の Claude Code はイメージに焼かれたバージョン（=
+    // 最後の `vibepod init` 時点）なので、更新チェックの throttle を
+    // 無視して必ずチェックさせる必要がある。
+    let container_created = match ctx.container_status {
         ContainerStatus::Running => {
             // 実行中でもセットアップ完了マーカーを確認する
             // （初回起動途中で中断された場合にセットアップ未完了のまま残ることがある）
@@ -90,6 +94,9 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
                 // マーカーなし: セットアップ未完了 → コンテナ削除して初回フローへ
                 runtime.remove_container(&ctx.container_name).await?;
                 create_and_setup(ctx, opts).await?;
+                true
+            } else {
+                false
             }
         }
         ContainerStatus::Stopped => {
@@ -99,13 +106,27 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
                 // マーカーなし: セットアップ未完了 → コンテナ削除して初回フローへ
                 runtime.remove_container(&ctx.container_name).await?;
                 create_and_setup(ctx, opts).await?;
+                true
+            } else {
+                false
             }
         }
         ContainerStatus::None => {
             // コンテナなし: 新規作成してセットアップ
             create_and_setup(ctx, opts).await?;
+            true
         }
-    }
+    };
+
+    // コンテナ内 Claude Code の更新（失敗しても続行する。詳細は update モジュール）
+    crate::update::maybe_update_claude(
+        &ctx.config_dir,
+        &ctx.container_name,
+        opts.update_policy,
+        opts.no_network,
+        container_created,
+    )
+    .await;
 
     // docker exec -it -e TOKEN=... {name} bash --login -c 'exec claude "$@"' -- {args}
     // bash --login でログインプロファイルをソースし、setup で設定した PATH を引き継ぐ

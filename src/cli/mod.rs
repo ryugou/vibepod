@@ -7,27 +7,8 @@ pub mod restore;
 pub mod rm;
 pub mod run;
 pub mod stop;
-pub mod template;
 
 use clap::{Parser, Subcommand};
-
-/// Usage mode for `vibepod run`: code-writing (`impl`, default) or
-/// read-only review (`review`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
-pub enum RunMode {
-    #[default]
-    Impl,
-    Review,
-}
-
-impl RunMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            RunMode::Impl => "impl",
-            RunMode::Review => "review",
-        }
-    }
-}
 
 #[derive(Parser)]
 #[command(
@@ -43,7 +24,13 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize VibePod (build Docker image)
-    Init {},
+    Init {
+        /// Rebuild the image from scratch, ignoring the Docker layer cache and
+        /// pulling a fresh base image. Use this to pick up a newer Claude Code
+        /// than the cached `install.sh` layer contains.
+        #[arg(long)]
+        rebuild: bool,
+    },
     /// Authenticate for container use (creates long-lived token)
     Login {},
     /// Remove authentication token
@@ -78,14 +65,36 @@ pub enum Commands {
         /// Force create a new container (error if running, replace if stopped)
         #[arg(long)]
         new: bool,
-        /// Mount a vibepod-managed template into /home/vibepod/.claude/ instead of
-        /// the host's ~/.claude/. Template directories live under
-        /// ~/.config/vibepod/templates/<name>/.
+        /// Check for a Claude Code update in the container now, ignoring the
+        /// usual once-a-day throttle.
+        #[arg(long, conflicts_with = "no_update")]
+        update: bool,
+        /// Skip the container's Claude Code update check entirely.
         #[arg(long)]
-        template: Option<String>,
-        /// Usage mode: `impl` (default, write code) or `review` (read-only review).
-        #[arg(long, value_enum, default_value_t = RunMode::Impl)]
-        mode: RunMode,
+        no_update: bool,
+        /// Model name passed straight through to `claude --model <name>`
+        /// inside the container (e.g. a specific Claude model id). The value
+        /// is not validated by vibepod — Claude Code decides if it is valid.
+        /// Omit to let Claude Code resolve its own default.
+        #[arg(long)]
+        model: Option<String>,
+        /// Do not automatically build the Docker image when it is missing.
+        /// By default `vibepod run` builds the image on demand; pass this to
+        /// fail fast with an instruction to run `vibepod init` instead.
+        #[arg(long)]
+        no_auto_build: bool,
+        /// Wall-clock limit for a `--prompt` session. Accepts bare seconds
+        /// (e.g. `1800`) or a duration (`30m`, `1h30m`). `0` disables the
+        /// limit. Defaults to 30 minutes when omitted. On timeout the
+        /// container is cleaned up and the run exits non-zero.
+        #[arg(long)]
+        timeout: Option<String>,
+        /// Stream Claude Code's per-event activity to stdout during a
+        /// `--prompt` run (the pre-1.7 behavior). By default only a concise
+        /// end-of-run summary is printed; the full stream is always saved to
+        /// the session `logs.txt` regardless of this flag.
+        #[arg(long)]
+        verbose: bool,
     },
     /// List running VibePod containers
     Ps {},
@@ -118,45 +127,5 @@ pub enum Commands {
         /// Stop all VibePod containers
         #[arg(long)]
         all: bool,
-    },
-    /// Manage vibepod templates (list / set-default)
-    Template {
-        #[command(subcommand)]
-        subcommand: TemplateSubcommand,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum TemplateSubcommand {
-    /// List available templates (embedded and user-added)
-    List {},
-    /// Set the default template used when `--prompt` is passed without `--template`
-    SetDefault {
-        /// Template name (must exist in `vibepod template list`)
-        name: String,
-    },
-    /// Re-extract an embedded template from the vibepod binary.
-    ///
-    /// Use this after upgrading vibepod if the bundled template has changed
-    /// (e.g. new plugin bundle). The existing directory is removed and
-    /// replaced with a fresh extraction from the binary. **User edits to the
-    /// target directory are lost.** Pass `--force` to confirm.
-    Reset {
-        /// Template name (must be an embedded template)
-        name: String,
-        /// Confirm that existing edits in the target directory will be lost
-        #[arg(long)]
-        force: bool,
-    },
-    /// Show ecc-cache state (location, current commit, last fetch time,
-    /// configured ref, auto-refresh setting).
-    Status {},
-    /// Fetch the latest ecc ref and hard-reset the cache immediately
-    /// (blocking). Use this for explicit refresh instead of waiting for
-    /// auto-refresh.
-    Update {
-        /// Override the configured ref for this update only.
-        #[arg(long)]
-        r#ref: Option<String>,
     },
 }

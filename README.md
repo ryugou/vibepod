@@ -31,6 +31,21 @@ vibepod run --prompt "Implement the login page"
 
 Builds the Docker image and creates global configuration. Detects your host UID/GID automatically for seamless file permissions.
 
+| Option | Description |
+|--------|-------------|
+| `--rebuild` | Rebuild from scratch with `docker build --pull --no-cache`. The image's Claude Code install step is cached on its command text, which never changes, so a plain `vibepod init` re-run replays the cached layer and reinstalls the *same* version. Use this when you want a genuinely fresh image |
+
+Day to day you should not need `--rebuild`: `vibepod run` keeps the container's Claude Code current on its own (see below).
+
+#### Keeping Claude Code up to date
+
+The image pins whatever Claude Code version existed when you last built it. To stop containers drifting, `vibepod run` runs `claude update` inside the container before starting the session:
+
+- **Throttled** to once per 24h per container; a freshly created container always checks, since its binary comes straight from the image.
+- **Never fatal.** A failed check warns — with the cause, the manual command, and the opt-out — and the session continues on the installed version.
+- Skipped automatically under `--no-network`.
+- Timestamps live in `~/.config/vibepod/update-check.json`. Force with `--update`, disable with `--no-update`.
+
 ### `vibepod login`
 
 Authenticates for container use. Creates a dedicated OAuth session stored in `~/.config/vibepod/auth/token.json`. This session is separate from your host's Claude credentials and is used when running containers.
@@ -112,50 +127,36 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
-| `--lang <name>` | Select an official bundle (`rust`, `node`, `python`, `go`, `java`) — installs the language toolchain **and** mounts the matching agents/skills from the ecc cache. Auto-detected from project files if omitted |
-| `--mode <impl\|review>` | Select bundle mode. `impl` (default) mounts an implementation-focused bundle; `review` mounts a read-only reviewer bundle with state-mutating shell commands blocked. See "Review mode" below |
+| `--lang <name>` | Install a language toolchain in the container (`rust`, `node`, `python`, `go`, `java`). Auto-detected from project files if omitted |
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 | `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
-| `--template <name>` | Mount a **custom** template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/` instead of the host's `~/.claude/`. For official language bundles, use `--lang` instead. Template names may be a single segment or nested slash-separated segments (e.g., `foo` or `foo/bar`); each segment must match `[a-zA-Z0-9_-]+`. Absolute paths and `..` are rejected. Cannot be combined with `--mode review`. See "Templates" below |
+| `--update` | Check for a Claude Code update inside the container now, ignoring the once-a-day throttle |
+| `--no-update` | Skip the container's Claude Code update check entirely |
+| `--model <name>` | Pass `--model <name>` straight through to Claude Code inside the container. Not validated by VibePod — Claude Code decides if it is valid. Works in both interactive and `--prompt` mode. Omit to use Claude Code's own default |
+| `--no-auto-build` | Do not build the Docker image on demand when it is missing. By default `vibepod run` auto-builds it; pass this to fail fast and be told to run `vibepod init` instead |
+| `--timeout <dur>` | Wall-clock limit for a `--prompt` session. Accepts bare seconds (`1800`) or a duration (`30m`, `1h30m`); `0` disables it. Defaults to **30 minutes**. On timeout the container-side agent is stopped, the workspace is restored, and the run exits non-zero |
+| `--verbose` | Stream Claude Code's per-event activity to stdout during `--prompt` (pre-1.7 behavior). By default only a concise end-of-run summary is printed |
+
+**Image auto-build.** The first `vibepod run` in an environment where the image is missing builds it automatically (a few minutes) instead of erroring, so you can call `vibepod run` from another session without running `vibepod init` first. Concurrent runs are serialized by a build lock so the image is built once. Use `--no-auto-build` to opt out.
 
 **Container reuse is the default.** VibePod creates one container per project (named `vibepod-{project}-{hash}`) and reuses it across runs. Setup only runs once; subsequent `vibepod run` calls skip setup and connect instantly via `docker exec`. Use `--new` to force a fresh container.
 
-When `--template <name>` is passed, each `(project, template)` combination gets its own persistent container, so you can switch between host mode and multiple templates on the same project without `--new`.
+#### Your host `~/.claude/` always comes along
 
-#### Review mode (read-only evaluation)
+VibePod carries these host assets into the container (read-only, skipped when absent):
 
-`--mode review` mounts a reviewer-focused bundle that blocks `Edit`/`Write` and most state-mutating shell commands via `permissions.deny`, so the agent can inspect a codebase without modifying it.
+- `~/.claude/CLAUDE.md`
+- `~/.claude/agents/`
+- `~/.claude/skills/`
+- `~/.claude/specs/`
+- `~/.claude/plugins/`
 
-```bash
-# Language-agnostic reviewer
-vibepod run --mode review --prompt "review the uncommitted changes"
+This is an **allowlist**. Session and history data — `sessions/`, `projects/`, `history.jsonl`, `backups/`, `file-history/`, `shell-snapshots/`, `todos/` — is never copied into the container, both because it is large and because it contains other projects' conversations.
 
-# Language-specific reviewer (Rust-aware rules, unsafe-block triggers, etc.)
-vibepod run --lang rust --mode review --prompt "review this PR"
-```
+`settings.json` is mounted as a sanitized copy of yours (`hooks` and `statusLine` stripped), written to `~/.config/vibepod/runtime/<container>/settings.json`.
 
-Per-language review bundles include `santa-method` dual-reviewer convergence triggers keyed to each language's highest-risk primitives (Rust `unsafe`, Go `cgo`/`unsafe`, Node `eval`/prototype pollution, Python `pickle`/`eval`, Java JNDI/reflection/XXE). Combining `--template <name>` with `--mode review` is rejected at CLI parse-time.
-
-#### Content model (v1.6+)
-
-Language bundles pull their agents and skills from a local clone of [everything-claude-code (ecc)](https://github.com/affaan-m/everything-claude-code) cached at `~/.config/vibepod/ecc-cache/`. `vibepod init` initializes the cache; a TTL-based background `git fetch` keeps it up-to-date. Use `vibepod template update [--ref <ref>]` for explicit refresh and `vibepod template status` to inspect cache state (repo, ref, last fetch time, current commit). Pin a specific ecc ref via the `[ecc]` section in `~/.config/vibepod/config.toml`.
-
-Custom templates can opt into ecc content by adding an `[ecc]` section to their `vibepod-template.toml`, listing the `skills/` and `agents/` paths to pull from the cache.
-
-#### Templates (Phase 2 preview)
-
-Templates let you mount an alternate `.claude/` configuration into the container in place of your host's `~/.claude/`. A template is a directory under `~/.config/vibepod/templates/<name>/` that can contain any subset of:
-
-- `CLAUDE.md`
-- `skills/`
-- `agents/`
-- `plugins/` (plain files only in Phase 2 — templates that ship an `installed_plugins.json` registry are rejected until Phase 3/4 lands the installPath-rewrite support)
-- `settings.json` (**not** sanitized — unlike host mode, template `settings.json` is mounted as-is, so don't put secrets in a template you share)
-
-An empty template (`~/.config/vibepod/templates/blank/` with nothing inside) is allowed and means "mount nothing into `/home/vibepod/.claude/`" — useful for a clean Claude home.
-
-`--worktree --template <name>` is rejected in Phase 2. The disposable `--worktree` container naming and the per-template persistent-container naming would conflict; template support for worktree mode will land in a later phase.
+Because bind mounts are fixed at container creation, adding a new asset to `~/.claude/` (a first-ever `specs/`, say) changes the mount set and requires `vibepod run --new` to take effect. VibePod detects this and tells you.
 
 #### When to use which?
 
@@ -187,7 +188,7 @@ VibePod provides 3-layer isolation:
    - `$(pwd)` → `/workspace` (read-write): your project files
    - `~/.claude.json` → container via **temporary copy** (read-write): onboarding state; the host file is never written directly
    - `~/.gitconfig` → `/home/vibepod/.gitconfig` (read-only): git user name and email
-   - `~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/` (read-only, when present): your personal Claude Code instructions, skills, and agents
+   - `~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/`, `~/.claude/specs/` (read-only, when present): your personal Claude Code instructions, skills, agents, and specs. This is an **allowlist** — session and history data (`sessions/`, `projects/`, `history.jsonl`, `backups/`, `file-history/`, `shell-snapshots/`, `todos/`) is never mounted
    - `~/.claude/plugins/` (read-only, when present): your installed Claude Code plugins — mounted at both `/home/vibepod/.claude/plugins` and the host absolute path to resolve `installed_plugins.json` entries
    - `~/.claude/settings.json` via **sanitized copy** (read-only, when present): a per-container copy with `hooks` and `statusLine` stripped, written to `~/.config/vibepod/runtime/<container>/settings.json`
    - `--mount`-specified paths (read-only): additional host paths you explicitly opt in
@@ -232,9 +233,23 @@ curl -fsSL https://raw.githubusercontent.com/ryugou/vibepod/main/install.sh | sh
 cargo install vibepod
 ```
 
-#### Stream output (`--prompt` mode)
+#### Output in `--prompt` mode
 
-When running with `--prompt`, VibePod streams Claude Code's activity in real-time via `--output-format stream-json`:
+By default, `--prompt` runs print a **concise end-of-run summary** rather than the full `stream-json` activity — the raw stream is verbose and, when `vibepod run` is invoked from another Claude Code session, floods that session's context. The complete stream is always saved to the session `logs.txt` regardless.
+
+```
+Summary:
+  Status: success
+  Result: Implementation complete. All checks pass.
+  Changed files (2):
+    src/main.rs
+    README.md
+  Full logs: /path/to/repo/.vibepod/sessions/<id>/logs.txt
+
+Container stopped (container preserved for next run).
+```
+
+Pass `--verbose` to stream Claude Code's per-event activity live instead (the pre-1.7 behavior):
 
 ```
 ────────────────────────────────────────────────────────
@@ -243,12 +258,9 @@ When running with `--prompt`, VibePod streams Claude Code's activity in real-tim
   │  [tool_use] Edit { file_path: "src/main.rs", old_string: "fn main()...", new_string: "fn main()..." }
   │  [tool_use] Bash { command: "cargo check" }
 ────────────────────────────────────────────────────────
-
-Result:
-Implementation complete. All checks pass.
-
-Container stopped (kept for reuse).
 ```
+
+If a `--prompt` run exceeds its `--timeout` (default 30 minutes), VibePod stops the container-side agent, restores the workspace to the session's starting commit, prints the `logs.txt` path, and exits non-zero — a timeout is never reported as success.
 
 #### Language toolchain auto-detection
 
@@ -267,7 +279,7 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 VibePod is heading to **v2.0**, where it will be reorganized into a clear pair:
 
 - **vibepod CLI** — a sandbox primitive that safely runs Claude Code (or other agent runtimes) inside Docker containers. No opinions about how you write code.
-- **vibepod plugin for Claude Code** — a Claude Code plugin that wraps the CLI and provides opinionated templates (e.g., quality coding flow, strict review flow) for autonomous tasks.
+- **vibepod plugin for Claude Code** — a Claude Code plugin that wraps the CLI and provides opinionated workflows for autonomous tasks.
 
 Until v2.0 is released, no intermediate releases will be cut.
 

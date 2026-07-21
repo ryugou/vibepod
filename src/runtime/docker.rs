@@ -106,11 +106,20 @@ impl DockerRuntime {
         Ok(())
     }
 
+    /// Build the vibepod image.
+    ///
+    /// `rebuild` maps to `--pull --no-cache`. It exists because the
+    /// Dockerfile's `curl … install.sh | bash` layer installs "whatever is
+    /// latest right now" but is cached on its literal command text, which
+    /// never changes. Without busting the cache, re-running `vibepod init`
+    /// replays the old layer and reinstalls the same stale Claude Code —
+    /// the user's only recourse was a manual `docker rmi`.
     pub async fn build_image(
         &self,
         dockerfile_content: &str,
         image_name: &str,
         build_args: HashMap<String, String>,
+        rebuild: bool,
     ) -> Result<()> {
         use std::io::Write as IoWrite;
 
@@ -126,6 +135,13 @@ impl DockerRuntime {
             "-t".to_string(),
             image_name.to_string(),
         ];
+
+        if rebuild {
+            // --no-cache alone would still build on a stale cached base
+            // image, so --pull is needed for a genuinely fresh result.
+            args.push("--pull".to_string());
+            args.push("--no-cache".to_string());
+        }
 
         for (k, v) in &build_args {
             args.push("--build-arg".to_string());

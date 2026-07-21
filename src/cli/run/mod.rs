@@ -8,7 +8,6 @@ mod interactive;
 pub mod lock;
 pub mod prepare;
 mod prompt;
-pub mod template;
 
 /// CLI `run` サブコマンドのオプション
 ///
@@ -24,13 +23,110 @@ pub struct RunOptions {
     pub mount: Vec<String>,
     /// `--new` フラグ: 既存コンテナを破棄して新規作成する
     pub new_container: bool,
-    /// `--template <name>` フラグ: vibepod 管理の template を
-    /// `/home/vibepod/.claude/` にマウントする。未指定時は host の
-    /// `~/.claude/` をマウントする（v1.4.3 互換挙動）
-    pub template: Option<String>,
-    /// `--mode` フラグ: `impl`（デフォルト、コード編集）または `review`（読み取り専用レビュー）。
-    /// 現時点では主に実行モードの分岐（permissions.deny の適用や template 選択）に使用する。
-    pub mode: crate::cli::RunMode,
+    /// コンテナ内 Claude Code の更新チェック方針（`--update` / `--no-update`）。
+    pub update_policy: crate::update::UpdatePolicy,
+    /// `--model <name>`: そのまま `claude --model <name>` に渡すモデル名。
+    /// vibepod は値を検証しない（正当性は claude 側が判定する）。`None` の
+    /// ときは何も渡さず claude のデフォルト解決に任せる。
+    pub model: Option<String>,
+    /// `--no-auto-build`: イメージが無いときの自動ビルドを抑止する。
+    pub no_auto_build: bool,
+    /// `--timeout <duration>`: `--prompt` 実行の実時間上限（生文字列）。
+    /// `None` のときは `DEFAULT_OVERALL_TIMEOUT_SECS` を使う。パースは
+    /// `parse_timeout_secs` が担う（`0` で無効化）。
+    pub timeout: Option<String>,
+    /// `--verbose`: `--prompt` 実行で per-event の整形ログを stdout に流す
+    /// （1.7 未満の挙動）。既定は要約のみ。`logs.txt` への保存は常に継続する。
+    pub verbose: bool,
+}
+
+/// `--prompt` セッションの実時間上限のデフォルト（秒）。
+///
+/// 30 分。大きめのタスク・数回のリトライ・一時的な利用上限バックオフを
+/// 吸収できる程度に長く、かつ暴走（無限リトライや長時間バックオフ）で
+/// コンテナが何時間も居座るのを防げる程度に短い、という妥協点。
+/// `--timeout` で上書きでき、`--timeout 0` で無効化できる。
+pub const DEFAULT_OVERALL_TIMEOUT_SECS: u64 = 30 * 60;
+
+/// `--timeout` の値を秒数に解釈する純関数。
+///
+/// 受理する形式:
+/// - 裸の整数（秒）: `"1800"` → 1800。`"0"` は「無効化」を意味する 0。
+/// - サフィックス付き duration: `"30m"` / `"1h30m"` / `"90s"` など
+///   （`config::parse_duration_to_seconds` に委譲）。
+///
+/// 外部状態に依存しないためユニットテストで網羅できる。不正入力は
+/// 運用者が直せるよう、受理形式を添えた明確なエラーを返す。
+pub fn parse_timeout_secs(raw: &str) -> anyhow::Result<u64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        anyhow::bail!("--timeout must not be empty (use seconds like 1800, a duration like 30m, or 0 to disable)");
+    }
+    // 裸の整数は秒として解釈する（"0" を含む）。duration パーサは末尾に
+    // 単位を要求するため、ここで先に整数を処理する。
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+    crate::config::parse_duration_to_seconds(s).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid --timeout '{}': use bare seconds (e.g. 1800), a duration like 30m / 1h30m, or 0 to disable",
+            raw
+        )
+    })
+}
+
+/// `--prompt` 実行後に呼び出し元が読む簡潔な要約を組み立てる純関数。
+///
+/// 生の stream-json を垂れ流す代わりに、終了ステータス・結果本文・変更
+/// ファイル一覧・`logs.txt` のフルパスだけを 1 ブロックにまとめる。表示
+/// 層のロジックを I/O から切り離してユニットテスト可能にするため、必要な
+/// 値はすべて引数で受け取る。
+pub fn render_run_summary(
+    success: bool,
+    reason: &str,
+    result_text: Option<&str>,
+    changed_files: &crate::git::ChangedFiles,
+    logs_path: &str,
+) -> String {
+    let mut out = String::from("Summary:\n");
+    if success {
+        out.push_str("  Status: success\n");
+    } else {
+        out.push_str(&format!("  Status: failed ({})\n", reason));
+    }
+
+    if let Some(text) = result_text {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            out.push_str("  Result: ");
+            out.push_str(trimmed);
+            out.push('\n');
+        }
+    }
+
+    // 「本当に無変更 (none)」と「算出できなかった (unavailable)」を必ず
+    // 区別する。潰すと、算出失敗が「変更なし」に見えて呼び出し元が
+    // 誤判断する（指摘 #2）。
+    match changed_files {
+        crate::git::ChangedFiles::Unavailable => {
+            out.push_str("  Changed files: (could not be computed — see full logs)\n");
+        }
+        crate::git::ChangedFiles::Computed(files) if files.is_empty() => {
+            out.push_str("  Changed files: (none)\n");
+        }
+        crate::git::ChangedFiles::Computed(files) => {
+            out.push_str(&format!("  Changed files ({}):\n", files.len()));
+            for f in files {
+                out.push_str("    ");
+                out.push_str(f);
+                out.push('\n');
+            }
+        }
+    }
+
+    out.push_str("  Full logs: ");
+    out.push_str(logs_path);
+    out
 }
 
 pub(super) struct RunContext {
@@ -49,6 +145,9 @@ pub(super) struct RunContext {
     /// settings.json, etc.) live under this path. Used for cleanup of
     /// disposable containers regardless of which artifacts were created.
     pub(super) runtime_dir: std::path::PathBuf,
+    /// vibepod のグローバル設定ディレクトリ（通常 `~/.config/vibepod`）。
+    /// 更新チェックのタイムスタンプ (`update-check.json`) の保存先として使う。
+    pub(super) config_dir: std::path::PathBuf,
     pub(super) global_config: config::GlobalConfig,
     pub(super) home: std::path::PathBuf,
     pub(super) worktree_branch_name: Option<String>,
@@ -61,15 +160,6 @@ pub(super) struct RunContext {
     /// uniqueness without re-normalizing. `lang_display` is the
     /// separate human-readable form shown in startup logs.
     pub(super) lang_names: Vec<String>,
-    /// Fingerprint of the template `setup_commands` that will run
-    /// at container creation. Empty string when no template was
-    /// selected or the template declared no setup_commands.
-    /// Persisted in the `vibepod.template_setup_hash` label so the
-    /// Phase-4.7 reuse gate can detect when a template's setup
-    /// sequence has changed and force `--new` (setup only runs at
-    /// creation, so we cannot retrofit new commands onto an existing
-    /// container).
-    pub(super) template_setup_hash: String,
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
@@ -81,6 +171,11 @@ pub(super) struct RunContext {
     pub(super) no_network: bool,
     /// ストリーム途絶タイムアウト（秒）。0 = 無効
     pub(super) prompt_idle_timeout: u64,
+    /// `--prompt` 実行の実時間上限（秒）。0 = 無効。`--timeout` 未指定時は
+    /// `DEFAULT_OVERALL_TIMEOUT_SECS`。prepare_context でパース済みの値。
+    pub(super) overall_timeout: u64,
+    /// `--verbose`: per-event の整形ログを stdout に流すか。既定 false（要約のみ）。
+    pub(super) verbose: bool,
 }
 
 /// 環境変数のリストを正規化してハッシュ化する（値の変更も検知するため）。
@@ -135,13 +230,6 @@ pub fn detect_languages(workspace: &std::path::Path) -> Vec<(String, &'static st
     langs
 }
 
-/// Single source of truth for language identifiers vibepod knows how
-/// to install inside its container. `get_lang_install_cmd` matches on
-/// these names, `is_supported_lang` checks membership, and error
-/// messages that enumerate supported values read from this list so
-/// they cannot drift out of sync.
-pub const SUPPORTED_LANGS: &[&str] = &["rust", "node", "python", "go", "java"];
-
 pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
     match lang {
         "rust" => Some("sudo apt-get update && sudo apt-get install -y build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && . $HOME/.cargo/env"),
@@ -151,14 +239,6 @@ pub fn get_lang_install_cmd(lang: &str) -> Option<&'static str> {
         "java" => Some("sudo apt-get update && sudo apt-get install -y default-jdk"),
         _ => None,
     }
-}
-
-/// Return `true` iff `lang` has a known install command. Used by
-/// template metadata parsing to reject `required_langs` values that
-/// cannot actually be installed (a typo like "rsut" or an unsupported
-/// runtime), instead of silently dropping them at install time.
-pub fn is_supported_lang(lang: &str) -> bool {
-    get_lang_install_cmd(lang).is_some()
 }
 
 pub fn validate_slack_channel_id(id: &str) -> bool {
@@ -185,27 +265,10 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
     let claude_dir = home.join(".claude");
     let mut mounts = Vec::new();
 
-    let claude_md = claude_dir.join("CLAUDE.md");
-    if claude_md.is_file() {
+    for (path, entry) in host_claude_stage_entries(&claude_dir) {
         mounts.push((
-            claude_md.to_string_lossy().to_string(),
-            "/home/vibepod/.claude/CLAUDE.md".to_string(),
-        ));
-    }
-
-    let skills_dir = claude_dir.join("skills");
-    if skills_dir.is_dir() {
-        mounts.push((
-            skills_dir.to_string_lossy().to_string(),
-            "/home/vibepod/.claude/skills".to_string(),
-        ));
-    }
-
-    let agents_dir = claude_dir.join("agents");
-    if agents_dir.is_dir() {
-        mounts.push((
-            agents_dir.to_string_lossy().to_string(),
-            "/home/vibepod/.claude/agents".to_string(),
+            path.to_string_lossy().to_string(),
+            format!("/home/vibepod/.claude/{}", entry),
         ));
     }
 
@@ -215,6 +278,72 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
     }
 
     mounts
+}
+
+/// ホストの `~/.claude/` からコンテナへ持ち込んでよい資産の **allowlist**。
+/// `(entry_name, is_dir)` の組で、ここに列挙したものだけがコンテナに渡る。
+///
+/// deny list ではなく allowlist にしているのは意図的である。Claude Code が
+/// 将来 `~/.claude/` 配下に新しい実行履歴ディレクトリを追加しても、
+/// allowlist なら自動的に除外され続ける（deny list は追従漏れで漏洩する）。
+///
+/// **意図的に除外しているもの**:
+/// - `sessions/` `projects/` `history.jsonl` `backups/` `file-history/`
+///   `shell-snapshots/` `todos/` — 実行履歴・セッションデータ。サイズが
+///   大きく、他プロジェクトの会話内容という機微情報を含むため。
+/// - `settings.json` — `prepare_sanitized_settings_mount` が hooks/statusLine を
+///   除去した別経路で扱うため、この allowlist には含めない。
+/// - `plugins/` — コンテナ側 2 箇所へのマウントが必要でファイルコピーでは
+///   表現できないため、`plugins_mount_entries` が別途処理する。
+pub const HOST_CLAUDE_ALLOWLIST: &[(&str, bool)] = &[
+    ("CLAUDE.md", false),
+    ("agents", true),
+    ("skills", true),
+    ("specs", true),
+];
+
+/// `claude_dir`（= `<home>/.claude`）配下で、allowlist に載っていて
+/// かつ実際に存在するエントリを `(絶対パス, エントリ名)` で返す。
+///
+/// 存在しないものは黙ってスキップする（ホスト環境に `specs/` が無いのは
+/// 異常ではなく通常であり、エラーにする理由がない）。
+///
+/// **symlink の扱い**:
+///
+/// - **top-level エントリ自体**（`~/.claude/skills` そのものが symlink 等）は
+///   `is_dir()` / `is_file()` が symlink を追従するため、**意図的に追従を
+///   許容する**。dotfiles 管理でディレクトリごと symlink にする構成は一般的で、
+///   ユーザー自身の明示的な資産配置とみなせるため。追従先の実ディレクトリが
+///   そのまま ro バインドマウントされる。
+/// - そのディレクトリ**配下**の symlink については、返した実パスを docker が
+///   read-only でバインドマウントするだけで、vibepod 側でコピー・追従は
+///   行わない。配下の symlink はマウント境界の中の symlink ファイルとして
+///   そのままコンテナに現れ、コンテナ内で解決される。マウント範囲外
+///   （ホストの `~/.claude/` 外）を指す symlink はコンテナのファイルシステム
+///   名前空間では対象へ到達できず解決不能になるため、外部の巨大ツリーや
+///   秘密がコンテナへ流入することはない。
+pub fn host_claude_stage_entries(
+    claude_dir: &std::path::Path,
+) -> Vec<(std::path::PathBuf, &'static str)> {
+    let mut entries = Vec::new();
+    for (name, is_dir) in HOST_CLAUDE_ALLOWLIST {
+        let path = claude_dir.join(name);
+        // is_dir()/is_file() follow symlinks: a top-level symlinked entry
+        // (a whole ~/.claude/skills symlinked elsewhere) is followed on
+        // purpose. The resolved real path is then bind-mounted read-only.
+        // Symlinks nested inside are left as-is: docker ro-mounts the
+        // directory, and any symlink pointing outside the mounted path
+        // simply cannot resolve inside the container's filesystem namespace.
+        let exists = if *is_dir {
+            path.is_dir()
+        } else {
+            path.is_file()
+        };
+        if exists {
+            entries.push((path, *name));
+        }
+    }
+    entries
 }
 
 /// plugins ディレクトリに対応する 2 重マウントエントリを返す（ファイル存在チェック
@@ -356,33 +485,22 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     // lang: persist the FULL set of languages the container was
     // provisioned with. `ctx.lang_names` is already sorted and
     // deduped (invariant established by `prepare_context`), so this
-    // is a direct join. Using lang_display's first token would lose
-    // template-added langs (e.g. "python (detected) + rust (template)"
-    // → "python") and break the reuse check that verifies every
-    // template-required lang is present.
+    // is a direct join. Storing the whole set (not lang_display's first
+    // token) keeps the reuse check honest when multiple languages are
+    // installed.
     labels.insert("vibepod.lang".to_string(), ctx.lang_names.join(","));
 
-    // Label schema version.
+    // Label schema version. Monotonically increasing: never decrement,
+    // even when features are removed (a smaller value would misidentify
+    // newer containers as older ones). Previous releases used "1" (legacy
+    // single-token `vibepod.lang`), "2" (full comma-joined lang set), and
+    // "3" (added the now-removed `vibepod.template_setup_hash`). Removing
+    // the template machinery advances to "4".
     //
-    // - Missing / "1": pre-Phase-4.6, `vibepod.lang` may be in the
-    //   legacy single-token format.
-    // - "2": Phase 4.6 — `vibepod.lang` stores the full comma-joined
-    //   lang set. Template `required_langs` hard-fail gate is enabled.
-    // - "3": Phase 4.7 — adds `vibepod.template_setup_hash`. Template
-    //   `setup_commands` hash gate is enabled. Containers labeled with
-    //   version < 3 fall back to warnings on setup_commands drift
-    //   because their stored hash is absent and cannot be trusted.
-    labels.insert("vibepod.labels_version".to_string(), "3".to_string());
-
-    // Template setup_commands fingerprint. Empty string when the
-    // container was not created with a template, or the template
-    // declared no setup_commands. Updating a template's setup_commands
-    // mutates this hash; the reuse gate then forces the user to
-    // `--new` because setup_cmd only runs at container creation.
-    labels.insert(
-        "vibepod.template_setup_hash".to_string(),
-        ctx.template_setup_hash.clone(),
-    );
+    // Currently this value is NOT read anywhere — no code branches on it.
+    // It is written and reserved for a future backward-compatibility gate
+    // that may need to distinguish container schema generations.
+    labels.insert("vibepod.labels_version".to_string(), "4".to_string());
 
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(
