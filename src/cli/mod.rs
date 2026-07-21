@@ -43,7 +43,13 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize VibePod (build Docker image)
-    Init {},
+    Init {
+        /// Rebuild the image from scratch, ignoring the Docker layer cache and
+        /// pulling a fresh base image. Use this to pick up a newer Claude Code
+        /// than the cached `install.sh` layer contains.
+        #[arg(long)]
+        rebuild: bool,
+    },
     /// Authenticate for container use (creates long-lived token)
     Login {},
     /// Remove authentication token
@@ -86,6 +92,13 @@ pub enum Commands {
         /// Usage mode: `impl` (default, write code) or `review` (read-only review).
         #[arg(long, value_enum, default_value_t = RunMode::Impl)]
         mode: RunMode,
+        /// Check for a Claude Code update in the container now, ignoring the
+        /// usual once-a-day throttle.
+        #[arg(long, conflicts_with = "no_update")]
+        update: bool,
+        /// Skip the container's Claude Code update check entirely.
+        #[arg(long)]
+        no_update: bool,
     },
     /// List running VibePod containers
     Ps {},

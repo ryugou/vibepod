@@ -299,6 +299,7 @@ fn resolve_template_entry(
 /// - `CLAUDE.md`      → `/home/vibepod/.claude/CLAUDE.md`
 /// - `skills/`        → `/home/vibepod/.claude/skills`
 /// - `agents/`        → `/home/vibepod/.claude/agents`
+/// - `specs/`         → `/home/vibepod/.claude/specs`
 /// - `plugins/`       → `/home/vibepod/.claude/plugins`
 /// - `settings.json`  → `/home/vibepod/.claude/settings.json`
 ///
@@ -346,6 +347,15 @@ pub fn build_template_mounts_from_dir(
         mounts.push((
             canonical.to_string_lossy().to_string(),
             "/home/vibepod/.claude/agents".to_string(),
+        ));
+    }
+
+    // `specs/` は host `~/.claude/specs/` を staging 経由で持ち込むために
+    // v1.7 で追加。template 自身が `specs/` を持つ場合も同じ経路に乗る。
+    if let Some(canonical) = resolve_template_entry(&template_dir, "specs", true)? {
+        mounts.push((
+            canonical.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/specs".to_string(),
         ));
     }
 

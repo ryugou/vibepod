@@ -33,9 +33,15 @@ agents = ["agents/rust-reviewer.md"]
     )
     .unwrap();
 
-    let staging =
-        vibepod::cli::run::prepare::assemble_staging(&config_dir, &runtime_dir, &template_dir)
-            .unwrap();
+    let staging = vibepod::cli::run::prepare::assemble_staging(
+        &config_dir,
+        &runtime_dir,
+        &template_dir,
+        // Empty (non-existent) home: these cases assert template-only
+        // staging behaviour. Host-merge behaviour has dedicated tests.
+        &tmp.path().join("home"),
+    )
+    .unwrap();
 
     // Files from template_dir should be copied as-is
     assert!(staging.join("CLAUDE.md").is_file());
@@ -66,9 +72,15 @@ fn assemble_staging_works_without_ecc_section() {
     fs::write(template_dir.join("CLAUDE.md"), "plain").unwrap();
     // No vibepod-template.toml — skip ecc step entirely
 
-    let staging =
-        vibepod::cli::run::prepare::assemble_staging(&config_dir, &runtime_dir, &template_dir)
-            .unwrap();
+    let staging = vibepod::cli::run::prepare::assemble_staging(
+        &config_dir,
+        &runtime_dir,
+        &template_dir,
+        // Empty (non-existent) home: these cases assert template-only
+        // staging behaviour. Host-merge behaviour has dedicated tests.
+        &tmp.path().join("home"),
+    )
+    .unwrap();
     assert!(staging.join("CLAUDE.md").is_file());
     // No [ecc] section means no skills/agents should be staged.
     assert!(!staging.join("skills").exists());
@@ -96,9 +108,15 @@ skills = ["skills/ghost/SKILL.md"]
     )
     .unwrap();
 
-    let err =
-        vibepod::cli::run::prepare::assemble_staging(&config_dir, &runtime_dir, &template_dir)
-            .unwrap_err();
+    let err = vibepod::cli::run::prepare::assemble_staging(
+        &config_dir,
+        &runtime_dir,
+        &template_dir,
+        // Empty (non-existent) home: these cases assert template-only
+        // staging behaviour. Host-merge behaviour has dedicated tests.
+        &tmp.path().join("home"),
+    )
+    .unwrap_err();
     assert!(
         format!("{err}").contains("skills/ghost"),
         "expected missing-file error, got: {err}"
@@ -120,9 +138,15 @@ fn assemble_staging_rejects_symlink_in_template_dir() {
     // Drop a symlink inside the template dir — should be rejected.
     std::os::unix::fs::symlink("/etc/passwd", template_dir.join("malicious")).unwrap();
 
-    let err =
-        vibepod::cli::run::prepare::assemble_staging(&config_dir, &runtime_dir, &template_dir)
-            .unwrap_err();
+    let err = vibepod::cli::run::prepare::assemble_staging(
+        &config_dir,
+        &runtime_dir,
+        &template_dir,
+        // Empty (non-existent) home: these cases assert template-only
+        // staging behaviour. Host-merge behaviour has dedicated tests.
+        &tmp.path().join("home"),
+    )
+    .unwrap_err();
     assert!(
         format!("{err}").contains("symlink"),
         "expected symlink rejection, got: {err}"

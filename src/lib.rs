@@ -7,3 +7,4 @@ pub mod report;
 pub mod runtime;
 pub mod session;
 pub mod ui;
+pub mod update;

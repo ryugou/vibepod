@@ -22,6 +22,7 @@ fn base_opts() -> RunOptions {
         new_container: false,
         template: None,
         mode: RunMode::Impl,
+        update_policy: vibepod::update::UpdatePolicy::default(),
     }
 }
 

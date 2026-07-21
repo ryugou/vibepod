@@ -31,6 +31,21 @@ vibepod run --prompt "Implement the login page"
 
 Builds the Docker image and creates global configuration. Detects your host UID/GID automatically for seamless file permissions.
 
+| Option | Description |
+|--------|-------------|
+| `--rebuild` | Rebuild from scratch with `docker build --pull --no-cache`. The image's Claude Code install step is cached on its command text, which never changes, so a plain `vibepod init` re-run replays the cached layer and reinstalls the *same* version. Use this when you want a genuinely fresh image |
+
+Day to day you should not need `--rebuild`: `vibepod run` keeps the container's Claude Code current on its own (see below).
+
+#### Keeping Claude Code up to date
+
+The image pins whatever Claude Code version existed when you last built it. To stop containers drifting, `vibepod run` runs `claude update` inside the container before starting the session:
+
+- **Throttled** to once per 24h per container; a freshly created container always checks, since its binary comes straight from the image.
+- **Never fatal.** A failed check warns — with the cause, the manual command, and the opt-out — and the session continues on the installed version.
+- Skipped automatically under `--no-network`.
+- Timestamps live in `~/.config/vibepod/update-check.json`. Force with `--update`, disable with `--no-update`.
+
 ### `vibepod login`
 
 Authenticates for container use. Creates a dedicated OAuth session stored in `~/.config/vibepod/auth/token.json`. This session is separate from your host's Claude credentials and is used when running containers.
@@ -117,7 +132,9 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 | `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
-| `--template <name>` | Mount a **custom** template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/` instead of the host's `~/.claude/`. For official language bundles, use `--lang` instead. Template names may be a single segment or nested slash-separated segments (e.g., `foo` or `foo/bar`); each segment must match `[a-zA-Z0-9_-]+`. Absolute paths and `..` are rejected. Cannot be combined with `--mode review`. See "Templates" below |
+| `--template <name>` | Mount a **custom** template from `~/.config/vibepod/templates/<name>/` into `/home/vibepod/.claude/`, layered on top of your host `~/.claude/` assets. For official language bundles, use `--lang` instead. Template names may be a single segment or nested slash-separated segments (e.g., `foo` or `foo/bar`); each segment must match `[a-zA-Z0-9_-]+`. Absolute paths and `..` are rejected. Cannot be combined with `--mode review`. See "Templates" below |
+| `--update` | Check for a Claude Code update inside the container now, ignoring the once-a-day throttle |
+| `--no-update` | Skip the container's Claude Code update check entirely |
 
 **Container reuse is the default.** VibePod creates one container per project (named `vibepod-{project}-{hash}`) and reuses it across runs. Setup only runs once; subsequent `vibepod run` calls skip setup and connect instantly via `docker exec`. Use `--new` to force a fresh container.
 
@@ -143,13 +160,32 @@ Language bundles pull their agents and skills from a local clone of [everything-
 
 Custom templates can opt into ecc content by adding an `[ecc]` section to their `vibepod-template.toml`, listing the `skills/` and `agents/` paths to pull from the cache.
 
+#### Your host `~/.claude/` always comes along
+
+Every mode — host, `--lang`, and `--template` — carries these host assets into the container (read-only, skipped when absent):
+
+- `~/.claude/CLAUDE.md`
+- `~/.claude/agents/`
+- `~/.claude/skills/`
+- `~/.claude/specs/`
+- `~/.claude/plugins/`
+
+This is an **allowlist**. Session and history data — `sessions/`, `projects/`, `history.jsonl`, `backups/`, `file-history/`, `shell-snapshots/`, `todos/` — is never copied into the container, both because it is large and because it contains other projects' conversations.
+
+**On collision, the template wins.** Host and template assets are merged per file, so a template that ships one skill does not erase your other skills — but where both define the same name, the template's version is used. This ordering is what makes `--mode review` trustworthy: its `permissions.deny` rules must not be shadowable by whatever happens to be in your `~/.claude/`.
+
+`settings.json` is the one asset that never merges. In host mode you get a sanitized copy of yours (`hooks` and `statusLine` stripped); in template mode the template's `settings.json` is used alone and yours is ignored entirely.
+
+Because bind mounts are fixed at container creation, adding a new asset to `~/.claude/` (a first-ever `specs/`, say) changes the mount set and requires `vibepod run --new` to take effect. VibePod detects this and tells you.
+
 #### Templates (Phase 2 preview)
 
-Templates let you mount an alternate `.claude/` configuration into the container in place of your host's `~/.claude/`. A template is a directory under `~/.config/vibepod/templates/<name>/` that can contain any subset of:
+Templates let you layer an alternate `.claude/` configuration over your host's. A template is a directory under `~/.config/vibepod/templates/<name>/` that can contain any subset of:
 
 - `CLAUDE.md`
 - `skills/`
 - `agents/`
+- `specs/`
 - `plugins/` (plain files only in Phase 2 — templates that ship an `installed_plugins.json` registry are rejected until Phase 3/4 lands the installPath-rewrite support)
 - `settings.json` (**not** sanitized — unlike host mode, template `settings.json` is mounted as-is, so don't put secrets in a template you share)
 
@@ -187,7 +223,7 @@ VibePod provides 3-layer isolation:
    - `$(pwd)` → `/workspace` (read-write): your project files
    - `~/.claude.json` → container via **temporary copy** (read-write): onboarding state; the host file is never written directly
    - `~/.gitconfig` → `/home/vibepod/.gitconfig` (read-only): git user name and email
-   - `~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/` (read-only, when present): your personal Claude Code instructions, skills, and agents
+   - `~/.claude/CLAUDE.md`, `~/.claude/skills/`, `~/.claude/agents/`, `~/.claude/specs/` (read-only, when present): your personal Claude Code instructions, skills, agents, and specs. This is an **allowlist** — session and history data (`sessions/`, `projects/`, `history.jsonl`, `backups/`, `file-history/`, `shell-snapshots/`, `todos/`) is never mounted
    - `~/.claude/plugins/` (read-only, when present): your installed Claude Code plugins — mounted at both `/home/vibepod/.claude/plugins` and the host absolute path to resolve `installed_plugins.json` entries
    - `~/.claude/settings.json` via **sanitized copy** (read-only, when present): a per-container copy with `hooks` and `statusLine` stripped, written to `~/.config/vibepod/runtime/<container>/settings.json`
    - `--mount`-specified paths (read-only): additional host paths you explicitly opt in

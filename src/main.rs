@@ -9,8 +9,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init {} => {
-            vibepod::cli::init::execute().await?;
+        Commands::Init { rebuild } => {
+            vibepod::cli::init::execute(rebuild).await?;
         }
         Commands::Login {} => {
             vibepod::cli::login::execute().await?;
@@ -30,7 +30,18 @@ async fn main() -> Result<()> {
             new,
             template,
             mode,
+            update,
+            no_update,
         } => {
+            // clap enforces that --update and --no-update are mutually
+            // exclusive, so at most one of these can be set.
+            let update_policy = if no_update {
+                vibepod::update::UpdatePolicy::Disabled
+            } else if update {
+                vibepod::update::UpdatePolicy::Force
+            } else {
+                vibepod::update::UpdatePolicy::Auto
+            };
             vibepod::cli::run::execute(vibepod::cli::run::RunOptions {
                 resume,
                 prompt,
@@ -43,6 +54,7 @@ async fn main() -> Result<()> {
                 new_container: new,
                 template,
                 mode,
+                update_policy,
             })
             .await?;
         }

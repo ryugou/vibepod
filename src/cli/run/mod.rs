@@ -31,6 +31,8 @@ pub struct RunOptions {
     /// `--mode` フラグ: `impl`（デフォルト、コード編集）または `review`（読み取り専用レビュー）。
     /// 現時点では主に実行モードの分岐（permissions.deny の適用や template 選択）に使用する。
     pub mode: crate::cli::RunMode,
+    /// コンテナ内 Claude Code の更新チェック方針（`--update` / `--no-update`）。
+    pub update_policy: crate::update::UpdatePolicy,
 }
 
 pub(super) struct RunContext {
@@ -49,6 +51,9 @@ pub(super) struct RunContext {
     /// settings.json, etc.) live under this path. Used for cleanup of
     /// disposable containers regardless of which artifacts were created.
     pub(super) runtime_dir: std::path::PathBuf,
+    /// vibepod のグローバル設定ディレクトリ（通常 `~/.config/vibepod`）。
+    /// 更新チェックのタイムスタンプ (`update-check.json`) の保存先として使う。
+    pub(super) config_dir: std::path::PathBuf,
     pub(super) global_config: config::GlobalConfig,
     pub(super) home: std::path::PathBuf,
     pub(super) worktree_branch_name: Option<String>,
@@ -185,27 +190,10 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
     let claude_dir = home.join(".claude");
     let mut mounts = Vec::new();
 
-    let claude_md = claude_dir.join("CLAUDE.md");
-    if claude_md.is_file() {
+    for (path, entry) in host_claude_stage_entries(&claude_dir) {
         mounts.push((
-            claude_md.to_string_lossy().to_string(),
-            "/home/vibepod/.claude/CLAUDE.md".to_string(),
-        ));
-    }
-
-    let skills_dir = claude_dir.join("skills");
-    if skills_dir.is_dir() {
-        mounts.push((
-            skills_dir.to_string_lossy().to_string(),
-            "/home/vibepod/.claude/skills".to_string(),
-        ));
-    }
-
-    let agents_dir = claude_dir.join("agents");
-    if agents_dir.is_dir() {
-        mounts.push((
-            agents_dir.to_string_lossy().to_string(),
-            "/home/vibepod/.claude/agents".to_string(),
+            path.to_string_lossy().to_string(),
+            format!("/home/vibepod/.claude/{}", entry),
         ));
     }
 
@@ -215,6 +203,84 @@ pub fn build_claude_config_mounts(home: &std::path::Path) -> Vec<(String, String
     }
 
     mounts
+}
+
+/// ホストの `~/.claude/` からコンテナへ持ち込んでよい資産の **allowlist**。
+/// `(entry_name, is_dir)` の組で、ここに列挙したものだけがコンテナに渡る。
+///
+/// deny list ではなく allowlist にしているのは意図的である。Claude Code が
+/// 将来 `~/.claude/` 配下に新しい実行履歴ディレクトリを追加しても、
+/// allowlist なら自動的に除外され続ける（deny list は追従漏れで漏洩する）。
+///
+/// **意図的に除外しているもの**:
+/// - `sessions/` `projects/` `history.jsonl` `backups/` `file-history/`
+///   `shell-snapshots/` `todos/` — 実行履歴・セッションデータ。サイズが
+///   大きく、他プロジェクトの会話内容という機微情報を含むため。
+/// - `settings.json` — host mode では `prepare_sanitized_settings_mount` が
+///   hooks/statusLine を除去した別経路で扱う。template mode では
+///   template 側の `permissions.deny`（review モードで `Edit(*)` /
+///   `Write(*)` 等を封じる安全性の根拠）がホスト設定で上書きされては
+///   ならないため、そもそも持ち込まない。
+/// - `plugins/` — コンテナ側 2 箇所へのマウントが必要でファイルコピーでは
+///   表現できないため、`plugins_mount_entries` が別途処理する。
+pub const HOST_CLAUDE_ALLOWLIST: &[(&str, bool)] = &[
+    ("CLAUDE.md", false),
+    ("agents", true),
+    ("skills", true),
+    ("specs", true),
+];
+
+/// `claude_dir`（= `<home>/.claude`）配下で、allowlist に載っていて
+/// かつ実際に存在するエントリを `(絶対パス, エントリ名)` で返す。
+///
+/// 存在しないものは黙ってスキップする（ホスト環境に `specs/` が無いのは
+/// 異常ではなく通常であり、エラーにする理由がない）。
+pub fn host_claude_stage_entries(
+    claude_dir: &std::path::Path,
+) -> Vec<(std::path::PathBuf, &'static str)> {
+    let mut entries = Vec::new();
+    for (name, is_dir) in HOST_CLAUDE_ALLOWLIST {
+        let path = claude_dir.join(name);
+        let exists = if *is_dir {
+            path.is_dir()
+        } else {
+            path.is_file()
+        };
+        if exists {
+            entries.push((path, *name));
+        }
+    }
+    entries
+}
+
+/// template mode で、ホストの `~/.claude/plugins` をマウント集合に合流させる。
+///
+/// **優先順位: template 側が勝つ。** template が `plugins/` を持つ場合、
+/// その mount が既に `/home/vibepod/.claude/plugins` を占有しているので
+/// ホスト側は一切持ち込まない（docker は同一マウント先の重複を拒否するし、
+/// そもそも template が plugin セットを規定する意図で置いている）。
+///
+/// ホスト plugins を staging へ**コピーしない**理由:
+/// `installed_plugins.json` の `installPath` はホスト絶対パスを持つため、
+/// staging 経由で単一マウントすると container 内で解決できず
+/// `validate_template_installed_plugins` が hard fail する。host mode と
+/// 同じ 2 重マウント（`plugins_mount_entries`）でホスト絶対パスを
+/// container に投影するのが唯一整合する方法である。
+pub fn merge_host_plugins_mounts(
+    template_mounts: &mut Vec<(String, String)>,
+    host_plugins: Option<&str>,
+    home: &std::path::Path,
+) {
+    let Some(host_plugins) = host_plugins else {
+        return;
+    };
+    let template_owns_plugins = template_mounts
+        .iter()
+        .any(|(_, container)| container == DEFAULT_PLUGINS_CONTAINER_PATH);
+    if template_owns_plugins {
+        return;
+    }
+    template_mounts.extend(plugins_mount_entries(host_plugins, home));
 }
 
 /// plugins ディレクトリに対応する 2 重マウントエントリを返す（ファイル存在チェック

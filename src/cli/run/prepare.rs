@@ -758,16 +758,34 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // 中途半端なファイルを掴む可能性があるため。
     let (claude_config_mounts, host_settings_exists) =
         if let Some((ref template_name, ref canonical)) = resolved_template {
-            // template mode: vibepod 管理の template 配下のみ。
-            // host の sanitized settings.json はマウントしない
-            let staging = assemble_staging(&config_dir, &runtime_dir, canonical)?;
+            // template mode: staging には host `~/.claude/` の allowlist 資産
+            // (CLAUDE.md / agents / skills / specs) も合流させたうえで、
+            // 同名衝突は template 側が勝つ（詳細は assemble_staging のドキュメント）。
+            //
+            // host の settings.json は staging に入れない。template の
+            // `permissions.deny`（review モードの安全性の根拠）が host 設定で
+            // 上書きされてはならないため、v1.6 までの挙動を維持する。
+            let staging = assemble_staging(&config_dir, &runtime_dir, canonical, &home)?;
 
             // Staging is complete; it's now safe to kick off the background
             // refresh of the ecc-cache. Fire-and-forget; do not await.
             let ecc_cfg = config::load_ecc_config(&config_dir)?;
             crate::ecc::maybe_background_refresh(&config_dir, &ecc_cfg);
 
-            let mounts = super::template::build_template_mounts_from_dir(&staging, template_name)?;
+            let mut mounts =
+                super::template::build_template_mounts_from_dir(&staging, template_name)?;
+
+            // plugins だけは staging コピーではなく bind mount で合流させる
+            // （`installed_plugins.json` の installPath がホスト絶対パスを
+            // 持つため。詳細は merge_host_plugins_mounts のドキュメント）。
+            let host_plugins = home.join(".claude").join("plugins");
+            let host_plugins = if host_plugins.is_dir() {
+                Some(host_plugins.to_string_lossy().to_string())
+            } else {
+                None
+            };
+            super::merge_host_plugins_mounts(&mut mounts, host_plugins.as_deref(), &home);
+
             (mounts, false)
         } else {
             // host mode: v1.4.3 互換挙動
@@ -1069,6 +1087,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         setup_cmd,
         temp_claude_json,
         runtime_dir,
+        config_dir,
         global_config,
         home,
         worktree_branch_name,
@@ -1089,16 +1108,36 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 /// Assemble the staging directory used as the container's
 /// `/home/vibepod/.claude/` mount source.
 ///
-/// Combines, in order:
-///   1. All files from `template_dir` copied as-is into the staging root
+/// Layers are copied in **increasing priority order**, so a later layer
+/// overwrites a same-named file from an earlier one:
+///
+///   1. **Host** `~/.claude/` — the allowlisted entries only
+///      (`HOST_CLAUDE_ALLOWLIST`: CLAUDE.md / agents / skills / specs).
+///      Lowest priority: the host's personal assets ride along, but must
+///      never dictate container behaviour.
+///   2. **Template** — all files from `template_dir` copied as-is
 ///      (CLAUDE.md, settings.json, vibepod-template.toml, plus any
 ///      additional files the template defines).
-///   2. Files selected by `template_dir/vibepod-template.toml`'s `[ecc]`
-///      section, copied from the ecc-cache into staging's
+///   3. **ECC** — files selected by `template_dir/vibepod-template.toml`'s
+///      `[ecc]` section, copied from the ecc-cache into staging's
 ///      `skills/<name>/SKILL.md` and `agents/<name>.md` (the staging
 ///      layout mirrors the template root; the `.claude/` prefix is
 ///      applied at mount time via `build_template_mounts`, not at
 ///      stage time).
+///
+/// **Why the template wins over the host on collision**: a template
+/// defines mode-specific behaviour — most importantly `review` mode,
+/// whose `settings.json` `permissions.deny` blocking `Edit(*)` /
+/// `Write(*)` / `git commit` is the entire safety argument for running
+/// with `--dangerously-skip-permissions` inside the container. If a host
+/// file of the same name could shadow a template file, that guarantee
+/// would silently depend on whatever the user happens to have in
+/// `~/.claude/`. Host assets are therefore additive only: they fill in
+/// names the template does not already define.
+///
+/// Because a bind mount cannot merge two directories, this file-level
+/// merge into a staging dir is the only way to get "template wins per
+/// file" rather than "template wins per whole directory".
 ///
 /// Fails fast if any `[ecc]` file is missing from the cache.
 ///
@@ -1109,6 +1148,7 @@ pub fn assemble_staging(
     config_dir: &std::path::Path,
     runtime_dir: &std::path::Path,
     template_dir: &std::path::Path,
+    home: &std::path::Path,
 ) -> anyhow::Result<std::path::PathBuf> {
     let staging = crate::ecc::staging_dir(runtime_dir);
 
@@ -1119,6 +1159,8 @@ pub fn assemble_staging(
     }
     std::fs::create_dir_all(&staging)
         .map_err(|e| anyhow::anyhow!("failed to create staging {}: {e}", staging.display()))?;
+
+    stage_host_claude_assets(&home.join(".claude"), &staging)?;
 
     copy_dir_contents(template_dir, &staging)?;
 
@@ -1131,6 +1173,92 @@ pub fn assemble_staging(
     }
 
     Ok(staging)
+}
+
+/// Copy the allowlisted entries of the host's `~/.claude/` into `staging`.
+///
+/// Only `HOST_CLAUDE_ALLOWLIST` entries are considered, so session and
+/// history data (`sessions/`, `projects/`, `history.jsonl`, `backups/`,
+/// `file-history/`, `shell-snapshots/`, `todos/`) never reaches the
+/// container. Missing entries are skipped silently — not having
+/// `~/.claude/specs/` is the normal case, not an error.
+fn stage_host_claude_assets(
+    claude_dir: &std::path::Path,
+    staging: &std::path::Path,
+) -> anyhow::Result<()> {
+    for (src, name) in crate::cli::run::host_claude_stage_entries(claude_dir) {
+        let dst = staging.join(name);
+        if src.is_dir() {
+            std::fs::create_dir_all(&dst)
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", dst.display()))?;
+            copy_host_dir_contents(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| {
+                anyhow::anyhow!("failed to copy {} to {}: {e}", src.display(), dst.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively copy host `~/.claude/` contents, **skipping symlinks with a
+/// warning** instead of failing.
+///
+/// This deliberately differs from `copy_dir_contents` (used for templates,
+/// which hard-fails on symlinks). The two sources have different threat
+/// models and different failure costs:
+///
+/// - A template may be third-party content, so a symlink there is a
+///   possible escape attempt and must abort the run.
+/// - `~/.claude/` is the user's own directory, and symlinked skills are a
+///   perfectly normal way for people to manage their assets. Aborting
+///   `vibepod run` because the user symlinked one skill would make the
+///   whole tool unusable for them.
+///
+/// Following the symlink is still not an option — it would silently
+/// materialize whatever it points at (a huge tree, or a secret outside
+/// `~/.claude/`) into a directory we mount into the container. So we skip
+/// and tell the operator exactly which path was dropped and how to fix
+/// it, rather than letting the asset go missing silently.
+fn copy_host_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src)
+        .map_err(|e| anyhow::anyhow!("failed to read_dir {}: {e}", src.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        let target = dst.join(file_name);
+
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| anyhow::anyhow!("failed to stat {}: {e}", path.display()))?;
+
+        if meta.file_type().is_symlink() {
+            eprintln!(
+                "  Warning: skipping symlink in host ~/.claude/: {}\n    \
+                 It will NOT be available inside the container. Replace it with \
+                 a real file or directory to have it included.",
+                path.display()
+            );
+            continue;
+        }
+
+        if meta.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", target.display()))?;
+            copy_host_dir_contents(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to copy {} to {}: {e}",
+                    path.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Recursively copy the contents of `src` into `dst`. Both must exist.

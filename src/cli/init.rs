@@ -6,7 +6,10 @@ use crate::runtime::DockerRuntime;
 use crate::ui::sanitize::sanitize_single_line;
 use crate::ui::{banner, prompts};
 
-pub async fn execute() -> Result<()> {
+/// `rebuild`: pass `--pull --no-cache` to `docker build` so the image is
+/// reconstructed from scratch. Needed to pick up a newer Claude Code, since
+/// the `install.sh` layer is otherwise served from cache forever.
+pub async fn execute(rebuild: bool) -> Result<()> {
     banner::print_banner();
 
     // 1. Check Docker
@@ -21,7 +24,14 @@ pub async fn execute() -> Result<()> {
     // 3. Build image
     let image_name = format!("vibepod-{}:latest", agent);
 
-    println!("\n  Building Docker image: {}...", image_name);
+    if rebuild {
+        println!(
+            "\n  Rebuilding Docker image from scratch: {} (--pull --no-cache)...",
+            image_name
+        );
+    } else {
+        println!("\n  Building Docker image: {}...", image_name);
+    }
 
     let dockerfile = include_str!("../../templates/Dockerfile");
 
@@ -40,13 +50,16 @@ pub async fn execute() -> Result<()> {
     build_args.insert("HOST_GID".to_string(), gid.to_string());
 
     match runtime
-        .build_image(dockerfile, &image_name, build_args)
+        .build_image(dockerfile, &image_name, build_args, rebuild)
         .await
     {
         Ok(_) => {}
         Err(e) => {
             eprintln!("\n  ✗ Build failed: {}", e);
             eprintln!("    Check your network connection and try `vibepod init` again.");
+            if !rebuild {
+                eprintln!("    If the build succeeded but the image is stale, run `vibepod init --rebuild`.");
+            }
             return Err(e);
         }
     }

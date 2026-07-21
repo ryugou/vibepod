@@ -119,11 +119,16 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
 
     let runtime = DockerRuntime::new().await?;
 
-    match ctx.container_status {
+    // 新規作成されたコンテナかどうか（更新チェックの throttle 判定に使う）。
+    // 詳細は interactive.rs の同名変数のコメントを参照。
+    let container_created = match ctx.container_status {
         ContainerStatus::Running => {
             if !runtime.check_setup_marker(&ctx.container_name).await? {
                 runtime.remove_container(&ctx.container_name).await?;
                 create_and_setup(ctx, opts).await?;
+                true
+            } else {
+                false
             }
         }
         ContainerStatus::Stopped => {
@@ -140,12 +145,27 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             if !runtime.check_setup_marker(&ctx.container_name).await? {
                 runtime.remove_container(&ctx.container_name).await?;
                 create_and_setup(ctx, opts).await?;
+                true
+            } else {
+                false
             }
         }
         ContainerStatus::None => {
             create_and_setup(ctx, opts).await?;
+            true
         }
-    }
+    };
+
+    // コンテナ内 Claude Code の更新（失敗しても続行する。詳細は update モジュール）。
+    // Claude の exec 前に済ませることで、この run から新しいバージョンが使われる。
+    crate::update::maybe_update_claude(
+        &ctx.config_dir,
+        &ctx.container_name,
+        opts.update_policy,
+        opts.no_network,
+        container_created,
+    )
+    .await;
 
     ctx.store.add(ctx.deferred_session.clone())?;
 
