@@ -664,6 +664,105 @@ pub fn should_keep_staged_auth(
     staged_mtime > host_mtime
 }
 
+/// 共有 codex ステージ(`<config_dir>/codex/`)への並行アクセスを直列化する
+/// アドバイザリロック(codex レビュー round 7 P1)。
+///
+/// 複数の `vibepod run` が同時に `prepare_codex_mount` を呼ぶと、一方の完全
+/// リコンサイル(`reconcile_codex_stage_dir`)が、他方が書き込み中の
+/// `NamedTempFile`(round 6 で一意名にした allowlist 外の一時ファイル)を
+/// 「allowlist に無いエントリ」として削除してしまうことがある。一意名
+/// (round 6)は symlink 差し替えと固定名の取り合いを防いだが、2 プロセスの
+/// 操作順序そのものは制御しないため、この削除競合(reconcile が他方の
+/// in-flight tmp ファイルを消す)までは防げない。`prepare_codex_mount` の
+/// 本体(リコンサイル開始〜全コピー完了)全体をこのロックで排他区間にする
+/// ことで、2 つの呼び出しが同じステージをインターリーブして操作しない
+/// ことを保証する。
+///
+/// UX は `BuildLock`(`src/cli/init.rs`)と同じパターンに倣う:
+/// `flock(LOCK_EX | LOCK_NB)` を先に試し、競合(`EWOULDBLOCK`)のときだけ
+/// 待機を告知してから `flock(LOCK_EX)` でブロッキング取得する。`BuildLock`
+/// はビルド専用の UX 文言・ファイル名(`build.lock`)を持つ private struct
+/// であり、無理に汎用化すると既存の init 経路の意味論に codex 側の事情
+/// (ファイル名・文言)を持ち込むリスクの方が大きいため、独立実装とする
+/// (spec が許容する選択)。
+///
+/// ロックファイルはステージディレクトリ(`<config_dir>/codex/`)の**外**、
+/// `<config_dir>/codex.lock` に置く。ステージ内に置くと
+/// `reconcile_codex_stage_dir` の完全リコンサイル(allowlist 外を全削除)が
+/// 次回呼び出し時にロックファイル自体を削除対象にしてしまう。
+///
+/// ロックはファイル記述子を閉じる(戻り値の drop)と解放される。
+struct CodexStageLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+/// `config_dir` に対する `CodexStageLock` を取得する。詳細は
+/// `CodexStageLock` のドキュメントを参照。
+fn acquire_codex_stage_lock(config_dir: &std::path::Path) -> anyhow::Result<CodexStageLock> {
+    std::fs::create_dir_all(config_dir).with_context(|| {
+        format!(
+            "Failed to create config dir for codex stage lock: {}",
+            config_dir.display()
+        )
+    })?;
+    let path = config_dir.join("codex.lock");
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("Failed to open codex stage lock file: {}", path.display()))?;
+
+        // まず非ブロッキングで試す。即取れれば(競合なしの通常ケース)何も
+        // 出さない。取れない場合だけ「別プロセスが codex ステージを準備中」
+        // と stderr に告知してからブロッキングで取り直す(BuildLock と同じ
+        // UX パターン)。
+        //
+        // SAFETY: flock は単純なシステムコール。fd は `file` の生存期間に
+        // わたって有効。LOCK_NB は即時に返り、LOCK_EX はブロッキングで排他
+        // ロックを取る。
+        let fd = file.as_raw_fd();
+        let rc_nb = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if rc_nb != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                eprintln!(
+                    "Another process is preparing the codex stage ({}). Waiting for it to finish...",
+                    path.display()
+                );
+                let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+                if rc != 0 {
+                    return Err(std::io::Error::last_os_error()).with_context(|| {
+                        format!(
+                            "Failed to acquire exclusive codex stage lock on {}",
+                            path.display()
+                        )
+                    });
+                }
+            } else {
+                // EWOULDBLOCK 以外の失敗(権限・fd 異常等)はそのまま伝播。
+                return Err(err).with_context(|| {
+                    format!(
+                        "Failed to acquire exclusive codex stage lock on {}",
+                        path.display()
+                    )
+                });
+            }
+        }
+        Ok(CodexStageLock { _file: file })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(CodexStageLock {})
+    }
+}
+
 /// ホストの `~/.codex/auth.json`(と存在すれば `config.toml`)を
 /// `<config_dir>/codex/` にコピーし、そのディレクトリのパスを返す。呼び出し元は
 /// このパスをコンテナへ `/home/vibepod/.codex` として **rw** マウントする(codex が
@@ -698,10 +797,21 @@ pub fn should_keep_staged_auth(
 /// `auth.json` の mtime がホスト側より新しければ、コンテナ内 codex がリフレッシュした
 /// ものとみなしコピーをスキップする(`should_keep_staged_auth` 参照)。`config.toml` は
 /// 認証情報ではなく設定ファイルのため、この特例の対象外であり常にホスト側で上書きする。
+///
+/// 関数本体全体(リコンサイル開始〜全コピー完了)は `CodexStageLock`
+/// (`<config_dir>/codex.lock`)による排他区間内で実行される(codex レビュー
+/// round 7 P1)。複数の `vibepod run` が同時にこの関数を呼んでも、一方の
+/// リコンサイルが他方の in-flight temp file を削除する競合が起きない。
 pub fn prepare_codex_mount(
     home: &std::path::Path,
     config_dir: &std::path::Path,
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
+    // round 7 P1: リコンサイル開始から全コピー完了まで(この関数の残り
+    // 全体、early return を含むすべての return パス)を排他区間にする。
+    // ロックガードは関数を抜けるとき(どの return パスでも)に drop され、
+    // 解放される。
+    let _stage_lock = acquire_codex_stage_lock(config_dir)?;
+
     let host_codex_dir = home.join(".codex");
     let entries = host_codex_stage_entries(&host_codex_dir);
 

@@ -248,6 +248,34 @@ round 5 対応の temp-file 機構自体への指摘2件。対応必須。
   round 5 の完全リコンサイルが copy 実行前に stale な固定名 tmp symlink を掃除することの
   回帰確認(round 6 の copy 機構自体の検証ではない)であることをコメントで明記した
 
+## codex レビュー指摘対応(round 7、2026-07-22)
+
+round 6 対応は解消を確認。新規指摘1件、対応必須。
+
+### P1: 共有ステージの reconcile と copy がトランザクション化されておらず、並行 run が互いの一時ファイルを削除し得る(`src/cli/run/mod.rs:528-535` 付近)
+
+2つの `vibepod run` が同時にステージを準備すると、一方の完全リコンサイル(round 5)が
+他方の書き込み途中の `NamedTempFile`(allowlist 外の名前)を削除し、
+chmod / persist が不定期に `NotFound` で失敗する。一意名(round 6)でもこの競合は防げない。
+
+対応:
+- 既存の `BuildLock`(`src/cli/init.rs` の flock パターン)に倣い、
+  `<config_dir>/codex.lock` に対する flock で `prepare_codex_mount` の
+  **リコンサイル開始から全コピー完了まで**を排他区間にする
+- `LOCK_NB` 先行→`EWOULDBLOCK` 時のみ「別プロセスが codex ステージを準備中、待機」を
+  stderr に1行出してからブロッキング取得(BuildLock と同じ UX)
+- ロックファイル自体はステージディレクトリの**外**(`<config_dir>` 直下)に置き、
+  リコンサイルの削除対象にならないようにする
+- 可能なら BuildLock を共通化(汎用の flock ガードへの軽いリファクタ)してよいが、
+  無理に共通化して既存の init 経路を壊さないこと。判断に迷えば独立実装でよい
+
+### テスト追加(round 7 対応分)
+
+- ロック取得下で reconcile+copy が完走すること(既存テストの回帰確認)
+- 2スレッドから同時に `prepare_codex_mount` を呼んでも両方成功すること
+  (flock はプロセス間機構だがスレッド間でも fd 単位で機能する形で検証するか、
+  難しければロック関数の直列化性質を単体で検証する)
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

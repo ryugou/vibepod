@@ -682,3 +682,134 @@ fn prepare_codex_mount_reconcile_sweeps_stale_fixed_name_tmp_symlink_before_copy
          fixed-name tmp file sharing its directory"
     );
 }
+
+// --- prepare_codex_mount: concurrent stage preparation is serialized by a
+// flock so that neither run's full reconciliation can delete the other's
+// in-flight NamedTempFile (codex review round 7, P1) ---
+
+#[test]
+fn prepare_codex_mount_completes_reconcile_and_copy_under_stage_lock() {
+    // round 7 regression guard: prepare_codex_mount now acquires
+    // <config_dir>/codex.lock around its entire body (reconcile + copy loop).
+    // This confirms the lock is acquired and released cleanly across two
+    // ordinary sequential calls -- if acquisition or release were broken
+    // (e.g. the guard leaked past the function's return, or the lock file
+    // path collided with an allowlisted entry), the second call would hang
+    // or fail rather than complete normally.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first call must stage auth.json + config.toml under the lock");
+    assert!(dir.join("auth.json").is_file());
+    assert!(dir.join("config.toml").is_file());
+
+    // A second call must not hang (lock was released after the first call)
+    // and must reconcile + copy again without error.
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    assert_eq!(second, Some(dir.clone()));
+    assert_eq!(
+        fs::read_to_string(dir.join("auth.json")).unwrap(),
+        r#"{"token":"HOST_AUTH"}"#
+    );
+
+    // The lock file itself must live outside the stage directory, so the
+    // stage's own full reconciliation (round 5) never treats it as a stale,
+    // non-allowlisted entry to sweep.
+    assert!(
+        config_dir.path().join("codex.lock").is_file(),
+        "codex.lock must exist directly under config_dir"
+    );
+    assert!(
+        !dir.join("codex.lock").exists(),
+        "codex.lock must never live inside the codex stage dir itself, or the stage's own \
+         full reconciliation would delete it"
+    );
+}
+
+#[test]
+fn prepare_codex_mount_succeeds_under_concurrent_calls_to_same_stage() {
+    // round 7 P1: two `vibepod run` invocations preparing the same shared
+    // stage at the same time used to race -- one thread's full
+    // reconciliation could delete the other's in-flight NamedTempFile,
+    // making chmod/persist fail intermittently with NotFound.
+    //
+    // A single iteration of this race is weak as a regression guard: manual
+    // measurement (reviewer, round 7 follow-up) with the stage lock
+    // temporarily disabled showed the race only reproduces in ~2-3% of single
+    // runs (50-80 attempts needed one hit), so a lone iteration would pass CI
+    // almost every time even if the lock's scope were accidentally narrowed
+    // back down in a future change. Looping the same two-thread call
+    // `ITERATIONS` times inside one test process turns that ~2-3% per-attempt
+    // chance into a near-certain detection within a single `cargo test` run,
+    // while still finishing in well under a second.
+    //
+    // Both threads in every iteration copy from the *same* host `~/.codex/`
+    // (identical content), which keeps the expected final state deterministic
+    // regardless of which thread's copy physically lands last -- each
+    // iteration only needs the two calls to never error, not to race on
+    // distinguishable content, so it can't be flaky on outcome.
+    const ITERATIONS: usize = 300;
+
+    for iteration in 0..ITERATIONS {
+        // Fresh tempdirs per iteration: reusing the previous iteration's
+        // stage/config dir would let leftover state (e.g. an already-staged
+        // auth.json) mask a broken lock in a later iteration.
+        let home_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        make_host_codex(home_dir.path());
+
+        let home_a = home_dir.path().to_path_buf();
+        let config_a = config_dir.path().to_path_buf();
+        let home_b = home_a.clone();
+        let config_b = config_a.clone();
+
+        let handle_a = std::thread::spawn(move || prepare_codex_mount(&home_a, &config_a));
+        let handle_b = std::thread::spawn(move || prepare_codex_mount(&home_b, &config_b));
+
+        let result_a = handle_a.join().expect("thread A must not panic");
+        let result_b = handle_b.join().expect("thread B must not panic");
+
+        assert!(
+            result_a.is_ok(),
+            "iteration {iteration}: concurrent prepare_codex_mount A must not fail on the \
+             other thread's in-flight temp file being reconciled away: {:?}",
+            result_a.err()
+        );
+        assert!(
+            result_b.is_ok(),
+            "iteration {iteration}: concurrent prepare_codex_mount B must not fail on the \
+             other thread's in-flight temp file being reconciled away: {:?}",
+            result_b.err()
+        );
+
+        let dir_a = result_a
+            .unwrap()
+            .expect("auth.json is present on the host, so Some(dir) is expected");
+        let dir_b = result_b
+            .unwrap()
+            .expect("auth.json is present on the host, so Some(dir) is expected");
+        assert_eq!(dir_a, dir_b, "iteration {iteration}");
+        assert_eq!(
+            dir_a,
+            config_dir.path().join("codex"),
+            "iteration {iteration}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(dir_a.join("auth.json")).unwrap(),
+            r#"{"token":"HOST_AUTH"}"#,
+            "iteration {iteration}: both threads copy the same host auth.json, so the final \
+             staged content must match it regardless of which thread's copy physically lands \
+             last"
+        );
+        assert_eq!(
+            fs::read_to_string(dir_a.join("config.toml")).unwrap(),
+            "model = \"gpt\"\n",
+            "iteration {iteration}: both threads copy the same host config.toml, so the final \
+             staged content must match it regardless of which thread's copy physically lands \
+             last"
+        );
+    }
+}
