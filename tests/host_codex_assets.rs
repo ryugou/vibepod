@@ -13,6 +13,9 @@ use std::time::{Duration, SystemTime};
 
 use vibepod::cli::run::{host_codex_stage_entries, prepare_codex_mount, should_keep_staged_auth};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 /// Set a file's mtime deterministically, without relying on real-time sleeps
 /// (which would make the mtime-ordering tests flaky). Stable since Rust 1.75.
 fn set_mtime(path: &Path, when: SystemTime) {
@@ -452,5 +455,143 @@ fn prepare_codex_mount_survives_disposable_runtime_dir_cleanup() {
         r#"{"token":"CONTAINER_REFRESHED_BEFORE_CLEANUP"}"#,
         "the shared codex stage (and its container-refreshed auth.json) must survive \
          disposable per-container runtime dir cleanup"
+    );
+}
+
+// --- prepare_codex_mount: symlink tampering defenses (codex review round 5, P1-a) ---
+
+#[cfg(unix)]
+#[test]
+fn prepare_codex_mount_replaces_staged_symlink_without_following_it() {
+    // A container with the rw-mounted stage could swap the staged auth.json
+    // for a symlink pointing at an arbitrary host path, hoping the next
+    // `vibepod run` copy follows it and overwrites that host file. This must
+    // never happen: the symlink must be detected (without following) and
+    // removed, then replaced with a fresh copy from the host.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+
+    // A "victim" file outside the stage, standing in for an arbitrary host
+    // path a container might target (e.g. ~/.ssh/authorized_keys).
+    let victim = home_dir.path().join("victim.txt");
+    fs::write(&victim, "VICTIM_UNCHANGED").unwrap();
+
+    fs::remove_file(&staged_auth).unwrap();
+    symlink(&victim, &staged_auth).unwrap();
+    assert!(
+        fs::symlink_metadata(&staged_auth)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "sanity check: staged auth.json must actually be a symlink before the next run"
+    );
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir.clone()));
+    assert!(
+        !fs::symlink_metadata(&staged_auth)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlink must be removed rather than followed, leaving a regular file in its place"
+    );
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"HOST_AUTH"}"#,
+        "staged auth.json must be re-copied from the host after the symlink is removed"
+    );
+    assert_eq!(
+        fs::read_to_string(&victim).unwrap(),
+        "VICTIM_UNCHANGED",
+        "the symlink target (standing in for an arbitrary host file) must never be written to"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_codex_mount_removes_staged_symlink_pointing_nowhere() {
+    // A symlink to a nonexistent path must also be detected via
+    // symlink_metadata (which never follows) and removed cleanly, rather
+    // than e.g. mistakenly treated as "file absent" in a way that bypasses
+    // the tampering-removal path.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage config.toml");
+    let staged_config = dir.join("config.toml");
+
+    fs::remove_file(&staged_config).unwrap();
+    symlink(home_dir.path().join("does-not-exist"), &staged_config).unwrap();
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir));
+    assert!(
+        !fs::symlink_metadata(&staged_config)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "a dangling symlink must be removed and replaced with a regular file"
+    );
+    assert_eq!(
+        fs::read_to_string(&staged_config).unwrap(),
+        "model = \"gpt\"\n"
+    );
+}
+
+// --- prepare_codex_mount: full reconciliation removes non-allowlisted entries
+// (codex review round 5, P1-b) ---
+
+#[test]
+fn prepare_codex_mount_removes_non_allowlisted_files_and_directories_from_stage() {
+    // The stage directory is rw bind-mounted into the container, so a
+    // container process can create arbitrary files/directories there
+    // (history.jsonl, a cache/ dir, ...). Before round 5 the reconcile step
+    // only looked at the allowlist names, so anything else silently
+    // persisted forever. It must now be swept on every `prepare_codex_mount`
+    // call regardless of name.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json + config.toml");
+
+    // Simulate a container writing allowlist-external junk directly into the
+    // shared, rw-mounted stage.
+    fs::write(dir.join("history.jsonl"), "SECRET_HISTORY_FROM_CONTAINER").unwrap();
+    fs::create_dir_all(dir.join("cache")).unwrap();
+    fs::write(dir.join("cache/entry"), "SECRET_CACHE_FROM_CONTAINER").unwrap();
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir.clone()));
+    assert!(
+        !dir.join("history.jsonl").exists(),
+        "non-allowlisted file must be removed by full reconciliation"
+    );
+    assert!(
+        !dir.join("cache").exists(),
+        "non-allowlisted directory must be removed (remove_dir_all) by full reconciliation"
+    );
+
+    // Round 1-4 regression: allowlisted files must survive the sweep.
+    assert!(dir.join("auth.json").is_file());
+    assert!(dir.join("config.toml").is_file());
+    assert_eq!(
+        fs::read_to_string(dir.join("auth.json")).unwrap(),
+        r#"{"token":"HOST_AUTH"}"#
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("config.toml")).unwrap(),
+        "model = \"gpt\"\n"
     );
 }

@@ -480,30 +480,139 @@ pub fn host_codex_stage_entries(
     entries
 }
 
-/// `dir` 配下から、`HOST_CODEX_ALLOWLIST` のうち `keep` に含まれない名前の
-/// ファイルを削除する(存在すれば削除、無ければ何もしない)。
+/// `dir` 配下を実際に列挙し、`keep` に含まれない名前のエントリを
+/// **ファイル・ディレクトリ・symlink 問わずすべて削除**する完全リコンサイル。
 ///
 /// `prepare_codex_mount` の P1(auth 消失時に残置を全消去)・P2(config.toml
 /// のみ消失時に差分だけ消去)双方が使う共通のリコンサイル処理。`dir` 自体が
 /// まだ存在しない場合(初回 run で `create_dir_all` 前に呼ばれるケース)は
 /// 削除対象が無いので何もしない。
 ///
-/// 削除失敗は `unwrap`/`expect` で握りつぶさず、どのパスの削除に失敗したかを
-/// context に含めて呼び出し元へ伝播する。
+/// 以前は `HOST_CODEX_ALLOWLIST` の名前だけをループして keep 外の名前を消す
+/// 実装だったため、allowlist に載っていない名前(`history.jsonl` やコンテナが
+/// 勝手に作った `cache/` 等)を一切見ずに素通りしていた。`.codex` は rw マウント
+/// されているため、コンテナ内プロセスは任意のファイル・ディレクトリをステージに
+/// 作成でき、それが allowlist をすり抜けて他コンテナからも参照可能な形で永続化
+/// してしまう(codex レビュー round 5 P1-b)。`read_dir` で中身を実際に見て
+/// keep 外を漏れなく消すことでこれを防ぐ。
+///
+/// 削除対象がディレクトリ(かつ symlink でない、`DirEntry::file_type()` は
+/// symlink を辿らない)なら `remove_dir_all`、それ以外(ファイルまたは
+/// symlink)なら `remove_file`(symlink はこれで辿らず unlink できる)を使う。
+/// 削除ごとに「ファイル名のみ」を stderr に出す(機微データの無言蓄積を防ぐ
+/// 運用可視性のため。内容は絶対に出さない)。
+///
+/// 削除失敗・列挙失敗は `unwrap`/`expect` で握りつぶさず、どのパスの操作に
+/// 失敗したかを context に含めて呼び出し元へ伝播する。
 fn reconcile_codex_stage_dir(dir: &std::path::Path, keep: &[&str]) -> anyhow::Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
-    for name in HOST_CODEX_ALLOWLIST {
-        if keep.contains(name) {
+    let read_dir = std::fs::read_dir(dir)
+        .with_context(|| format!("Failed to list codex stage dir {}", dir.display()))?;
+
+    for entry in read_dir {
+        let entry = entry
+            .with_context(|| format!("Failed to read a directory entry in {}", dir.display()))?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if keep.contains(&name_str.as_ref()) {
             continue;
         }
-        let path = dir.join(name);
-        if path.is_file() {
+
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("Failed to determine file type of {}", path.display()))?;
+
+        if file_type.is_dir() {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("Failed to remove stale directory {}", path.display()))?;
+        } else {
+            // ファイルまたは symlink。remove_file は symlink 自体を unlink し、
+            // リンク先(ホスト任意パスの可能性がある)には触れない。
             std::fs::remove_file(&path)
                 .with_context(|| format!("Failed to remove stale {}", path.display()))?;
         }
+        eprintln!("removed stale codex stage entry not in allowlist: {name_str}");
     }
+    Ok(())
+}
+
+/// `dst` が symlink かどうかを `symlink_metadata`(リンクを辿らない)で判定し、
+/// symlink であれば**辿らずに `remove_file` で削除**して stderr に警告を出す。
+///
+/// コンテナは rw マウント経由でステージ内の `auth.json` / `config.toml` を
+/// ホスト任意パスへの symlink に差し替えられる。`dst.is_file()` や
+/// `std::fs::metadata` はリンクを辿って `true` / リンク先の情報を返すため、
+/// これらで判定・処理すると mtime 比較やコピー先の解決がホスト任意ファイルを
+/// 対象にしてしまう(コンテナ→ホストの書き込み境界の破れ、codex レビュー
+/// round 5 P1-a)。呼び出し元は、この関数が戻った後は「`dst` は
+/// symlink ではない(存在しないか、通常ファイル)」ものとして扱ってよい。
+///
+/// `dst` が存在しない場合は何もしない(正常系)。symlink 以外の
+/// `symlink_metadata` 失敗(パーミッション等)は握りつぶさず伝播する。
+fn remove_dst_if_symlink(dst: &std::path::Path) -> anyhow::Result<()> {
+    let meta = match std::fs::symlink_metadata(dst) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("Failed to stat {}", dst.display())),
+    };
+
+    if meta.file_type().is_symlink() {
+        std::fs::remove_file(dst)
+            .with_context(|| format!("Failed to remove symlink at {}", dst.display()))?;
+        eprintln!(
+            "staged codex file was a symlink; removed (possible container tampering): {}",
+            dst.display()
+        );
+    }
+    Ok(())
+}
+
+/// ホストの `src` をステージ内 `dst` へコピーする。
+///
+/// コンテナが `dst` を rename 実行までの間に symlink へ差し替えるレース
+/// (TOCTOU)に備え、いきなり `dst` へ書き込むのではなく、同じディレクトリ内の
+/// 一時ファイル(`<name>.tmp`)へ書き込んでから `std::fs::rename` でアトミックに
+/// 置換する(`update.rs::record_check` と同じ temp-file-plus-rename パターン)。
+/// `rename` は symlink を辿らずそのディレクトリエントリ自体を置き換えるため、
+/// 置換時点で `dst` が symlink であっても安全だが、改ざんの可能性を運用者が
+/// 把握できるよう rename 直前に `remove_dst_if_symlink` で検査・警告する。
+///
+/// 一時ファイルへの権限設定(0600)は rename **前**に行う(rename は権限を
+/// 保持するため、rename 後に設定すると一瞬でも緩い権限のファイルが `dst` の
+/// 場所に見える可能性がある)。
+fn copy_codex_asset_atomically(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    let file_name = dst
+        .file_name()
+        .with_context(|| format!("codex stage destination {} has no file name", dst.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let tmp = dst.with_file_name(format!("{file_name}.tmp"));
+
+    std::fs::copy(src, &tmp)
+        .with_context(|| format!("Failed to copy {} to {}", src.display(), tmp.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", tmp.display()))?;
+    }
+
+    // rename 直前にも dst の symlink 検査を行う。rename 自体は symlink を
+    // 辿らず安全に置換できるが、改ざんが起きていたことを運用者に知らせる。
+    remove_dst_if_symlink(dst)?;
+
+    std::fs::rename(&tmp, dst).with_context(|| {
+        format!(
+            "Failed to atomically replace {} with {}",
+            dst.display(),
+            tmp.display()
+        )
+    })?;
+
     Ok(())
 }
 
@@ -613,30 +722,42 @@ pub fn prepare_codex_mount(
     for (src, name) in &entries {
         let dst = codex_stage_dir.join(name);
 
-        if *name == "auth.json" && dst.is_file() {
-            let staged_mtime = std::fs::metadata(&dst)
-                .and_then(|m| m.modified())
-                .with_context(|| format!("Failed to read mtime of {}", dst.display()))?;
-            let host_mtime = std::fs::metadata(src)
-                .and_then(|m| m.modified())
-                .with_context(|| format!("Failed to read mtime of {}", src.display()))?;
+        // P1-a: dst はコンテナの rw マウント経由でホスト任意パスへの symlink に
+        // 差し替えられている可能性がある。以降の mtime 判定・コピーがリンクを
+        // 辿ってホスト任意ファイルに触れないよう、まず symlink なら辿らず削除
+        // する。以後 dst は「存在しないか、通常ファイル」として扱ってよい。
+        remove_dst_if_symlink(&dst)?;
 
-            if should_keep_staged_auth(host_mtime, staged_mtime) {
-                // コンテナ内 codex がトークンリフレッシュ済みの auth.json を、
-                // 古いホストコピーで上書きしない(round 3 P1)。パーミッションは
-                // 初回コピー時に 0600 済みなのでそのまま維持する。
-                continue;
+        if *name == "auth.json" {
+            let staged_meta = match std::fs::symlink_metadata(&dst) {
+                Ok(meta) => Some(meta),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    return Err(e).with_context(|| format!("Failed to stat {}", dst.display()))
+                }
+            };
+
+            if let Some(meta) = staged_meta {
+                // dst が symlink でないと分かった上での symlink_metadata なので、
+                // 通常ファイルの mtime としてそのまま使える(symlink_metadata と
+                // metadata は非 symlink に対して同じ mtime を返す)。
+                let staged_mtime = meta
+                    .modified()
+                    .with_context(|| format!("Failed to read mtime of {}", dst.display()))?;
+                let host_mtime = std::fs::metadata(src)
+                    .and_then(|m| m.modified())
+                    .with_context(|| format!("Failed to read mtime of {}", src.display()))?;
+
+                if should_keep_staged_auth(host_mtime, staged_mtime) {
+                    // コンテナ内 codex がトークンリフレッシュ済みの auth.json を、
+                    // 古いホストコピーで上書きしない(round 3 P1)。パーミッションは
+                    // 初回コピー時に 0600 済みなのでそのまま維持する。
+                    continue;
+                }
             }
         }
 
-        std::fs::copy(src, &dst)
-            .with_context(|| format!("Failed to copy {} to {}", src.display(), dst.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("Failed to set permissions on {}", dst.display()))?;
-        }
+        copy_codex_asset_atomically(src, &dst)?;
     }
 
     Ok(Some(codex_stage_dir))
