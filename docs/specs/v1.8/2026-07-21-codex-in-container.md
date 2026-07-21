@@ -397,6 +397,76 @@ round 9 対応は解消を確認。round 10 で「`.codex` 全体の rw 共有�
 - disposable cleanup 後: ステージは消えるが store は残る
 - auth store がコンテナのマウント引数のどこにも現れないこと(分離の検証)
 
+## codex レビュー指摘対応(round 11、2026-07-22)
+
+round 10 対応は解消を確認。新規指摘1件、対応必須。
+
+### P1: コンテナ稼働中の auth.json を store に同期しており、並行書き込みで壊れた内容を永続化し得る(`src/cli/run/interactive.rs:151` 付近)
+
+run 後同期がコンテナ実行中に走る経路では、並行する `docker exec` やバックグラウンドの
+codex が同じ inode に書き込み中の téar された内容を読み、auth store に永続化してしまう。
+store は全コンテナに配布されるため、壊れた認証が伝播する。
+
+対応:
+- **コンテナが停止した後に同期できる経路(prompt 実行の停止処理後、disposable の削除前)では、
+  必ず停止完了後に同期する**よう順序を保証する
+- **コンテナを停止しない経路(interactive の再利用コンテナ等)では、スナップショットを
+  一時領域に読み取り、`serde_json` で完全な JSON としてパースできた場合のみ store に反映**する。
+  パース不能(=書き込み途中の可能性)なら store に触れず、
+  「stage auth.json was not valid JSON; skipped store sync (possibly mid-write)」を stderr に出して
+  スキップする(次回 run で再試行される)
+- 検証済みスナップショットの反映は既存の tamper 防御・keep-newest・アトミック置換をすべて維持
+
+### テスト追加(round 11 対応分)
+
+- 不正な(途中で切れた)JSON をステージに置いて同期 → store が変更されず、警告が出る
+- 正常な JSON → 従来どおり keep-newest で store に反映される
+- 停止後同期の順序が保証される経路のテスト(可能な範囲で。プロセス順序の検証が難しければ
+  同期関数が「停止済みフラグ」を要求する設計にして型/引数で順序を強制し、それをテストする)
+
+### 対応結果(round 11、実装記録)
+
+`ContainerLiveness { Stopped, Running }`(`Clone + Copy`)を新設し、run 後同期の
+呼び出し時点でコンテナが停止/削除済みか稼働継続中かを型で明示する設計にした。
+`sync_codex_stage_to_store` / `sync_codex_stage_after_run` /
+`sync_codex_stage_auth_via_fd`(unix)/ `#[cfg(not(unix))]` パスのすべてに
+`liveness: ContainerLiveness` を引数として伝播させ、「停止済みフラグ」を型/引数で
+要求する形にした。これにより、プロセス順序という観測しづらい前提に頼らず、
+呼び出し側がどちらの経路かを明示的に選ぶことを強制できる。
+
+呼び出し順序を修正し、P1 の核心である「稼働中のコンテナが書き込み中の auth.json を
+store に取り込む」経路を塞いだ。従来 cleanup 分岐の**前**に一度だけ呼んでいた
+`sync_codex_stage_after_run(ctx)` を削除し、`interactive.rs` / `prompt.rs` の各分岐
+内に移動した。disposable(`docker rm -f`)・非 disposable の停止保持
+(`docker stop -t 10`)の経路では、`.output()` によるコマンド完了(=停止/削除確定)を
+待った**後**に `ContainerLiveness::Stopped` で同期する。disposable ではさらにその
+同期の後で `remove_dir_all(&ctx.runtime_dir)` を行い、同期元のステージが先に消えない
+順序を保証した。停止を待てない再利用コンテナ(interactive で元から Running、prompt で
+非 disposable かつ元から Running)経路では `ContainerLiveness::Running` を渡す。
+prompt 側は元々この分岐に後処理コマンドが無く同期も漏れていたため、明示的な
+`else` 分岐を追加して Running 経路の同期を必ず通すようにした。
+
+`Running` 経路の JSON 完全性検証を追加した。`sync_codex_stage_auth_via_fd` では、
+既存の TOCTOU 対策(`O_NOFOLLOW` 付き fd 経由の読み取り)で得た `contents` を、store へ
+書き込む temp ファイル作成の**前**に `serde_json::from_slice::<serde_json::Value>` で
+パースし、失敗したら store に一切触れず
+`stage auth.json was not valid JSON; skipped store sync (possibly mid-write)` を
+stderr に出して `return Ok(())` する。`#[cfg(not(unix))]` パスでも `should_copy`
+判定の後・コピーの前に同じ検証・警告・スキップを行い、unix 実装と挙動を揃えた。
+`Stopped` では停止確定後で torn write が起こり得ないため検証せず、従来どおり
+keep-newest・tamper 防御・アトミック置換・0600 強制をそのまま通す(JSON 検証は
+「反映するか否か」の追加ゲートに過ぎず、既存の反映ロジックは変更していない)。
+
+テストは、既存の run 後同期テスト(`sync_codex_stage_to_store` を呼ぶ 7 箇所)を
+すべて `ContainerLiveness::Stopped` を渡す形に追随させたうえで、round 11 用に
+4 本を追加した: (a1) 不正な(途中で切れた)JSON を `Running` で同期 → store の内容・
+mtime が保たれる、(a2) 同じく `Running` で store が空 → store に auth.json が
+作られない、(b) 正常な JSON を `Running` で同期 → 従来どおり keep-newest で store に
+反映され 0600 に正規化される、(c) 同一の不正 JSON バイト列を `Stopped` で同期 →
+検証をスキップしてそのまま store にコピーされる。(c) が `Stopped`/`Running` で
+挙動が切り替わること、すなわち liveness 引数が停止後同期の順序保証を型で担保して
+いることをテストで固定する。
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

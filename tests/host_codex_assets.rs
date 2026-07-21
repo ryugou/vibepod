@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime};
 
 use vibepod::cli::run::{
     host_codex_stage_entries, prepare_codex_mount, should_keep_staged_auth,
-    sync_codex_stage_to_store,
+    sync_codex_stage_to_store, ContainerLiveness,
 };
 use vibepod::runtime::ContainerConfig;
 
@@ -524,8 +524,12 @@ fn prepare_codex_mount_stage_is_disposed_but_auth_store_survives_runtime_dir_cle
 
     // Simulate the run-after sync that both `interactive.rs` and `prompt.rs`
     // call before their cleanup branch removes `runtime_dir`.
-    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
-        .expect("sync_codex_stage_to_store must succeed before disposable cleanup");
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Stopped,
+    )
+    .expect("sync_codex_stage_to_store must succeed before disposable cleanup");
 
     let store_auth = config_dir.path().join("codex-auth").join("auth.json");
     assert_eq!(
@@ -1407,8 +1411,12 @@ fn sync_codex_stage_to_store_promotes_newer_stage_auth_to_store() {
     fs::write(&staged_auth, r#"{"token":"CONTAINER_REFRESHED"}"#).unwrap();
     set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
 
-    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
-        .expect("sync_codex_stage_to_store must succeed when promoting a newer stage auth.json");
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Stopped,
+    )
+    .expect("sync_codex_stage_to_store must succeed when promoting a newer stage auth.json");
 
     assert_eq!(
         fs::read_to_string(&store_auth).unwrap(),
@@ -1448,8 +1456,12 @@ fn sync_codex_stage_to_store_skips_when_stage_auth_is_older_than_store() {
     fs::write(&store_auth, r#"{"token":"STORE_ALREADY_NEWER"}"#).unwrap();
     set_mtime(&store_auth, t0 + Duration::from_secs(3_600));
 
-    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
-        .expect("sync_codex_stage_to_store must succeed even when it skips the copy");
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Stopped,
+    )
+    .expect("sync_codex_stage_to_store must succeed even when it skips the copy");
 
     assert_eq!(
         fs::read_to_string(&store_auth).unwrap(),
@@ -1480,8 +1492,12 @@ fn sync_codex_stage_to_store_skips_when_stage_auth_mtime_equals_store() {
     fs::write(&store_auth, r#"{"token":"STORE_TIE"}"#).unwrap();
     set_mtime(&store_auth, t0);
 
-    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
-        .expect("sync_codex_stage_to_store must succeed on an mtime tie");
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Stopped,
+    )
+    .expect("sync_codex_stage_to_store must succeed on an mtime tie");
 
     assert_eq!(
         fs::read_to_string(&store_auth).unwrap(),
@@ -1518,7 +1534,12 @@ fn sync_codex_stage_to_store_rejects_symlink_staged_auth() {
     fs::remove_file(&staged_auth).unwrap();
     symlink(&victim, &staged_auth).unwrap();
 
-    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path()).expect(
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Stopped,
+    )
+    .expect(
         "sync_codex_stage_to_store must not error on a tampered stage; it must reject and \
          continue rather than fail the whole run's cleanup",
     );
@@ -1574,8 +1595,12 @@ fn sync_codex_stage_to_store_rejects_directory_staged_auth() {
     fs::create_dir_all(&staged_auth).unwrap();
     fs::write(staged_auth.join("junk"), "SECRET_JUNK_INSIDE_TAMPERED_DIR").unwrap();
 
-    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path())
-        .expect("sync_codex_stage_to_store must not error on a tampered stage");
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Stopped,
+    )
+    .expect("sync_codex_stage_to_store must not error on a tampered stage");
 
     assert!(
         !staged_auth.exists(),
@@ -1632,7 +1657,12 @@ fn sync_codex_stage_to_store_ingests_and_normalizes_permissions_of_a_loosely_per
     set_mtime(&staged_auth, t0 + Duration::from_secs(60));
     fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o644)).unwrap();
 
-    sync_codex_stage_to_store(runtime_dir.path(), config_dir.path()).unwrap();
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Stopped,
+    )
+    .unwrap();
 
     assert_eq!(
         fs::read_to_string(&store_auth).unwrap(),
@@ -1645,5 +1675,183 @@ fn sync_codex_stage_to_store_ingests_and_normalizes_permissions_of_a_loosely_per
         "the store's copy must always end up 0600 regardless of the stage's permission bits, \
          got {:o}",
         mode
+    );
+}
+
+// --- sync_codex_stage_to_store: run-after JSON-integrity gate on the
+// still-running path (codex review round 11 P1) ---
+//
+// When the container keeps running (interactive's reused container), the
+// rw-mounted stage auth.json can be observed mid-write. A torn/partial write is
+// not valid JSON; ingesting it would persist a corrupted token into the store,
+// which is distributed to every container. `ContainerLiveness::Running` must
+// gate the ingest on a successful `serde_json` parse and leave the store
+// untouched on failure. `ContainerLiveness::Stopped` (the container already
+// stopped/removed, so no concurrent write is possible) deliberately skips that
+// gate — the liveness argument is the type-level enforcement of the ordering
+// guarantee, which these tests exercise directly.
+
+#[test]
+fn sync_codex_stage_to_store_skips_invalid_json_stage_when_running_and_keeps_store() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    // The store already holds a valid auth.json (from prepare_codex_mount's
+    // host -> store hop). Pin its mtime so we can assert it is not rewritten.
+    let store_content_before = fs::read_to_string(&store_auth).unwrap();
+    let t0 = SystemTime::now();
+    set_mtime(&store_auth, t0);
+    let store_mtime_before = fs::metadata(&store_auth).unwrap().modified().unwrap();
+
+    // The container is still writing a token refresh: the stage auth.json is a
+    // strictly newer *but truncated* (mid-write) JSON object that would
+    // normally be promoted by keep-newest.
+    fs::write(&staged_auth, r#"{"token":"CONTAINER_REFRE"#).unwrap();
+    set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
+
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Running,
+    )
+    .expect("sync must not fail the run's cleanup just because the snapshot was mid-write");
+
+    assert_eq!(
+        fs::read_to_string(&store_auth).unwrap(),
+        store_content_before,
+        "a mid-write (invalid JSON) stage auth.json must never overwrite the store when Running"
+    );
+    let store_mtime_after = fs::metadata(&store_auth).unwrap().modified().unwrap();
+    assert_eq!(
+        store_mtime_before, store_mtime_after,
+        "the store's auth.json must not even be rewritten (mtime unchanged) on a skipped sync"
+    );
+}
+
+#[test]
+fn sync_codex_stage_to_store_skips_invalid_json_stage_when_running_and_leaves_empty_store() {
+    // Same integrity gate, but the store is empty (no prior valid auth). A
+    // mid-write stage must not cause a bogus store auth.json to be created.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    // Empty the store so `should_copy` is unconditionally true; the only thing
+    // that can then stop the ingest is the JSON-integrity gate itself.
+    fs::remove_file(&store_auth).unwrap();
+
+    fs::write(&staged_auth, r#"{"token":"CONTAINER_REFRE"#).unwrap();
+    set_mtime(&staged_auth, SystemTime::now());
+
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Running,
+    )
+    .expect("sync must not fail on a mid-write snapshot even with an empty store");
+
+    assert!(
+        !store_auth.exists(),
+        "a mid-write (invalid JSON) stage must not create a store auth.json out of nothing"
+    );
+}
+
+#[test]
+fn sync_codex_stage_to_store_promotes_valid_json_stage_when_running() {
+    // Valid JSON passes the Running integrity gate, so the normal keep-newest
+    // promotion still happens (a strictly newer stage wins) — the gate only
+    // rejects torn writes, it does not change behavior for well-formed tokens.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&store_auth, t0);
+    fs::write(&staged_auth, r#"{"token":"CONTAINER_REFRESHED_VALID"}"#).unwrap();
+    set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
+
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Running,
+    )
+    .expect("a well-formed, newer stage auth.json must sync successfully when Running");
+
+    assert_eq!(
+        fs::read_to_string(&store_auth).unwrap(),
+        r#"{"token":"CONTAINER_REFRESHED_VALID"}"#,
+        "a valid, newer stage auth.json must be promoted into the store even on the Running path"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&store_auth).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the promoted auth.json in the store must be 0600, got {:o}",
+            mode
+        );
+    }
+}
+
+#[test]
+fn sync_codex_stage_to_store_copies_invalid_json_stage_when_stopped() {
+    // The liveness argument is what switches behavior. `Stopped` means the
+    // container has already stopped/removed (docker stop/rm -f returned), so no
+    // torn write is possible and the JSON-integrity gate is deliberately
+    // skipped: the very same invalid-JSON bytes that `Running` rejects are
+    // copied through verbatim under `Stopped`. This is the type-level proof
+    // that the liveness argument enforces the ordering guarantee (stop-then-
+    // sync) rather than relying on unobservable process timing.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+
+    let dir = prepare_codex_mount(home_dir.path(), config_dir.path(), runtime_dir.path())
+        .unwrap()
+        .expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    let store_auth = config_dir.path().join("codex-auth").join("auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&store_auth, t0);
+    // Byte-for-byte the same truncated payload the Running tests reject.
+    fs::write(&staged_auth, r#"{"token":"NOT_VALID_JSON_BUT_STOPPED"#).unwrap();
+    set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
+
+    sync_codex_stage_to_store(
+        runtime_dir.path(),
+        config_dir.path(),
+        ContainerLiveness::Stopped,
+    )
+    .expect("Stopped sync must succeed and copy without a JSON-integrity check");
+
+    assert_eq!(
+        fs::read_to_string(&store_auth).unwrap(),
+        r#"{"token":"NOT_VALID_JSON_BUT_STOPPED"#,
+        "under Stopped the integrity gate is skipped, so a newer stage is copied verbatim"
     );
 }

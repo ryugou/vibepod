@@ -4,7 +4,9 @@ use std::process::Command;
 use crate::runtime::{format_stream_event, ContainerStatus, DockerRuntime, StreamEvent};
 use libc;
 
-use super::{build_container_config, sync_codex_stage_after_run, RunContext, RunOptions};
+use super::{
+    build_container_config, sync_codex_stage_after_run, ContainerLiveness, RunContext, RunOptions,
+};
 
 /// コンテナを作成してセットアップを実行する（初回フロー）。
 /// セットアップ失敗時はコンテナを自動削除してエラーを返す。
@@ -469,24 +471,37 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         }
     }
 
-    sync_codex_stage_after_run(ctx);
-
-    // コンテナの後処理
+    // codex ステージ→store の同期は、コンテナの停止/削除が確定した後に行う
+    // (round 11 P1)。停止/削除する経路では `.output()` 完了を待ってから
+    // `Stopped` で同期し、稼働継続する経路(非 disposable かつ元から Running)
+    // だけ `Running` で同期して JSON 完全性検証に委ねる。
     if ctx.is_disposable {
         Command::new("docker")
             .args(["rm", "-f", &ctx.container_name])
             .output()
             .ok();
-        // 使い捨てコンテナは runtime ディレクトリを丸ごと削除
-        // （temp .claude.json と sanitized settings.json をまとめて掃除）。
+        // rm -f の .output() 完了後＝コンテナ削除済みで並行書き込みが起こり得
+        // ないため Stopped で同期し、その後で runtime ディレクトリを丸ごと削除
+        // する（temp .claude.json と sanitized settings.json、およびステージを
+        // まとめて掃除。ステージを含むため同期より前に消すと書き戻せなくなる）。
         // ctx.runtime_dir は prepare.rs で必ず作成されるため、temp_claude_json
         // や sanitized settings.json の存在に関係なく確実に cleanup できる。
+        sync_codex_stage_after_run(ctx, ContainerLiveness::Stopped);
         std::fs::remove_dir_all(&ctx.runtime_dir).ok();
     } else if ctx.container_status != ContainerStatus::Running {
         Command::new("docker")
             .args(["stop", "-t", "10", &ctx.container_name])
             .output()
             .ok();
+        // stop -t 10 の .output() 完了後＝停止確定後に Stopped で同期する。
+        sync_codex_stage_after_run(ctx, ContainerLiveness::Stopped);
+    } else {
+        // 非 disposable かつ元から Running: このコンテナは停止しないため、稼働中の
+        // ステージを読むことになる。後処理コマンドは無いが、Running 経路の同期は
+        // 必要なので明示的に呼ぶ(漏らすとリフレッシュされたトークンが store に
+        // 永続化されない)。Running のため store 反映前に JSON 完全性が検証される
+        // (round 11 P1)。
+        sync_codex_stage_after_run(ctx, ContainerLiveness::Running);
     }
 
     // ロック解放（コンテナ後処理が完了してから解放し、

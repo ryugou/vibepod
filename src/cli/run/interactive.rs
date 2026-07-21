@@ -3,7 +3,9 @@ use std::process::Command;
 
 use crate::runtime::{ContainerStatus, DockerRuntime};
 
-use super::{build_container_config, sync_codex_stage_after_run, RunContext, RunOptions};
+use super::{
+    build_container_config, sync_codex_stage_after_run, ContainerLiveness, RunContext, RunOptions,
+};
 
 /// コンテナを作成してセットアップを実行する（初回フロー）。
 /// セットアップ失敗時はコンテナを自動削除してエラーを返す。
@@ -154,31 +156,44 @@ pub(super) async fn run_interactive(opts: &RunOptions, ctx: &RunContext) -> Resu
     // Claude の終了コードは無視（ユーザーが終了した場合など）
     let _ = status;
 
-    sync_codex_stage_after_run(ctx);
-
-    // コンテナの後処理
+    // codex ステージ→store の同期は、コンテナの停止/削除が確定した後に行う
+    // (round 11 P1)。停止/削除する経路では `.output()` 完了を待ってから
+    // `Stopped` で同期し、稼働継続する経路(再利用コンテナ)だけ `Running` で
+    // 同期して JSON 完全性検証に委ねる。同期呼び出しを分岐前に一度だけ行うと、
+    // 再利用コンテナがまだ生きている時点で torn な auth.json を store に取り込む
+    // 恐れがあるため、分岐ごとに順序を分けている。
     if ctx.is_disposable {
-        // 使い捨てコンテナ（--worktree）: 削除
+        // 使い捨てコンテナ（--worktree）: 削除。rm -f の .output() 完了後は
+        // コンテナが削除済み＝ステージへの並行書き込みが起こり得ないため、
+        // 停止確定後に Stopped で同期する。
         Command::new("docker")
             .args(["rm", "-f", &ctx.container_name])
             .output()
             .ok();
-        // 使い捨てコンテナのみ runtime ディレクトリを丸ごと削除する
-        // （temp .claude.json と sanitized settings.json をまとめて掃除）。
+        sync_codex_stage_after_run(ctx, ContainerLiveness::Stopped);
+        // 同期でステージ→store の書き戻しが済んだ後に runtime ディレクトリを
+        // 丸ごと削除する（temp .claude.json と sanitized settings.json をまとめて
+        // 掃除。ステージも含まれるため、同期より前に消すと書き戻せなくなる）。
         // ctx.runtime_dir は prepare.rs で必ず作成されるため、temp_claude_json
         // や sanitized settings.json の存在に関係なく確実に cleanup できる。
         // 永続コンテナは次回起動時に bind mount が必要なため削除しない。
         std::fs::remove_dir_all(&ctx.runtime_dir).ok();
         println!("  Container stopped and removed.");
     } else if ctx.container_status == ContainerStatus::Running {
-        // 元から実行中だったコンテナ: 停止しない（並行 exec の他セッションが残る可能性）
+        // 元から実行中だったコンテナ: 停止しない（並行 exec の他セッションが残る
+        // 可能性）。コンテナが稼働継続＝ステージが書き込み中の可能性があるため、
+        // Running で同期して store 反映前に JSON 完全性を検証させる(round 11 P1)。
+        sync_codex_stage_after_run(ctx, ContainerLiveness::Running);
         println!("  Disconnected from container (still running).");
     } else {
-        // 停止中または新規作成したコンテナ: 停止して保持
+        // 停止中または新規作成したコンテナ: 停止して保持。stop -t 10 の
+        // .output() 完了後はコンテナが停止済み＝torn write が起こり得ないため、
+        // 停止確定後に Stopped で同期する。
         Command::new("docker")
             .args(["stop", "-t", "10", &ctx.container_name])
             .output()
             .ok();
+        sync_codex_stage_after_run(ctx, ContainerLiveness::Stopped);
         println!("  Container stopped (container preserved for next run).");
     }
 
