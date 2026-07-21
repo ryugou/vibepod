@@ -5,6 +5,24 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-07-21
+
+### Added
+- Host `~/.claude/` (`CLAUDE.md`, `agents/`, `skills/`, `specs/`, `plugins/`) is now mounted read-only into every `vibepod run` container via an allowlist, regardless of mode; `--lang`/`--template` runs previously lost the user's CLAUDE.md, agents, and skills, and `~/.claude/specs/` was never mounted at all
+- Claude Code inside the container self-updates automatically, throttled to once per 24 hours; `--update` forces an immediate check and `--no-update` disables checking entirely
+- `vibepod init --rebuild` forces a clean image rebuild (`docker build --pull --no-cache`) to pick up a fresh `install.sh` layer
+- `vibepod run` auto-builds the Docker image on demand when it is missing (a few minutes), instead of erroring; concurrent runs are serialized by a build lock. Use `--no-auto-build` to opt out and fail fast instead
+- `--model <name>` passes `--model <name>` straight through to Claude Code inside the container (validated by Claude Code itself, not VibePod)
+- `--timeout <dur>` sets a wall-clock limit for `--prompt` sessions (seconds or `30m`/`1h30m` duration syntax, `0` disables it), defaulting to 30 minutes; on timeout the container-side agent is stopped and, when the workspace was clean at session start, it is reset to the starting commit (pre-existing uncommitted changes are preserved, not discarded)
+- `--prompt` sessions print a concise end-of-run summary (files changed, duration, exit status) by default; `--verbose` restores the pre-1.7 behavior of streaming Claude Code's per-event activity to stdout
+
+### Changed
+- Non-interactive runs (`--prompt` / `--resume`) now always pass `--dangerously-skip-permissions` to Claude Code; the sandbox boundary is the Docker container itself, not Claude Code's own permission prompts
+
+### Removed
+- **BREAKING:** the template mechanism — `--template`, the `vibepod template` subcommand (`status`/`update`), the ecc cache, and all bundled `templates-data/` — has been dropped. `~/.config/vibepod/templates/` is no longer read by any command
+- **BREAKING:** `--mode impl|review` on `vibepod run` has been dropped along with the review-mode bundle
+
 ## [1.6.1] - 2026-04-18
 
 ### Fixed
