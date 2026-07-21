@@ -655,6 +655,10 @@ fn staged_asset_matches_host(src: &std::path::Path, dst: &std::path::Path) -> bo
 /// 無駄な mtime 更新を避けられるほか、`should_keep_staged_auth` の
 /// 「同値はステージ優先」判定(P2-1)は実際に値が変わった場合にのみ意味を
 /// 持つため、内容が同じなら mtime を動かさない方が判定全体の安定性も上がる。
+/// この早期リターンはパーミッションを検査しないため、コンテナがこの経路で
+/// `dst` の権限だけ緩めていた場合の修復は呼び出し元
+/// (`prepare_codex_mount` 内の `enforce_staged_permissions`)に委ねる
+/// (round 9 P1)。
 fn copy_codex_asset_atomically(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
     if staged_asset_matches_host(src, dst) {
         return Ok(());
@@ -963,8 +967,10 @@ pub fn prepare_codex_mount(
 
                 if should_keep_staged_auth(host_mtime, staged_mtime) {
                     // コンテナ内 codex がトークンリフレッシュ済みの auth.json を、
-                    // 古いホストコピーで上書きしない(round 3 P1)。パーミッションは
-                    // 初回コピー時に 0600 済みなのでそのまま維持する。
+                    // 古いホストコピーで上書きしない(round 3 P1)。コンテナが
+                    // この経路でパーミッションだけ緩めていた場合の修復は、この
+                    // ループを抜けた後の `enforce_staged_permissions` に集約する
+                    // (round 9 P1)。
                     continue;
                 }
             }
@@ -973,7 +979,133 @@ pub fn prepare_codex_mount(
         copy_codex_asset_atomically(src, &dst)?;
     }
 
+    enforce_staged_permissions(&codex_stage_dir, &entries)?;
+
     Ok(Some(codex_stage_dir))
+}
+
+/// ステージ内の allowlist 対象ファイル(`entries` に列挙された名前、通常
+/// `auth.json` と、存在すれば `config.toml`)がすべて 0600 であることを
+/// 保証する(codex レビュー round 9 P1)。
+///
+/// `prepare_codex_mount` のループには、ステージ済みファイルの中身・
+/// パーミッションを意図的に変更せず次へ進む経路が2つある:
+///
+/// - keep-newer 経路: `should_keep_staged_auth` が true を返し `continue`
+///   する(コンテナがリフレッシュした auth.json をホストコピーで上書きしない)
+/// - コピー省略経路: `copy_codex_asset_atomically` 内の
+///   `staged_asset_matches_host` が true を返し、コピー・chmod・rename を
+///   一切行わず早期 return する(内容が既にホストと同一)
+///
+/// コンテナは rw マウント経由でステージ済みファイルのパーミッションだけを
+/// 緩める(例: `chmod 0644 auth.json`)ことができる。この chmod は上記2経路
+/// のどちらが判定されるかに影響しない(mtime も内容も変えないため)ので、
+/// 一度緩められた権限は当該ファイルが実際にコピーし直されるまで検出も修復も
+/// されず、同一ホスト上の別ユーザーがトークンを読める状態が恒久的に残って
+/// しまう。
+///
+/// これを塞ぐため、コピー実施済み・keep 済み・skip 済みのいずれの経路を
+/// 通ったファイルにも、`prepare_codex_mount` の成功 return 直前で一律に
+/// 0600 を再設定する。chmod は冪等なので、既に 0600 のファイルに対して
+/// 実行しても無害であり、mtime 変更等の副作用も無い。
+///
+/// `symlink_metadata` + `set_permissions(path, ..)` の check-then-act では
+/// TOCTOU レースが残る(codex レビュー round 9 P1 差し戻し、指摘必須対応):
+/// `codex_stage_dir` はコンテナが rw マウント経由で同時に書き換えられる
+/// 共有ディレクトリであり、まさにこの関数が守ろうとしている脅威モデル
+/// そのものである。`std::fs::set_permissions` は Unix では `chmod(path, ..)`
+/// を呼ぶため symlink を辿ってしまう(`lchmod` 相当は std に無い)。したがって
+/// `symlink_metadata` で「通常ファイルだ」と確認した直後、`set_permissions`
+/// が実際に path を解決するまでの一瞬にコンテナが `dst` を任意ホストパスへの
+/// symlink に差し替えると、chmod がそのリンクを辿ってホスト側の任意ファイルの
+/// パーミッションを書き換える(confused deputy)。
+///
+/// これを避けるため、`O_NOFOLLOW` で `dst` を開いて得た fd に対して
+/// `File::set_permissions`(内部で `fchmod(fd, ..)` を呼ぶ、path 解決を伴わない)
+/// で権限を変更する。open 自体が「symlink なら ELOOP で失敗する」という形で
+/// symlink 検出込みでアトミックに行われるため、`copy_codex_asset_atomically`
+/// の `persist`(rename ベースで symlink を辿らない)や
+/// `remove_dst_if_not_regular_file`(`remove_file`/`remove_dir_all` で symlink
+/// を辿らない)と同じく、この関数も symlink 追従を構造的に排除する。
+///
+/// FIFO 等の特殊ファイルを `O_NOFOLLOW` だけで開くと、読み手が付くまで open
+/// 自体がブロックしてしまう可能性があるため `O_NONBLOCK` も併用する(通常
+/// ファイルに対しては no-op)。
+///
+/// ループ内で各エントリは既に `remove_dst_if_not_regular_file` を通過済み
+/// (=存在しないか通常ファイル)のはずだが、この関数自体は「open した時点で
+/// 通常ファイルか」を独立に確認する(二重防御。かつ `remove_dst_if_not_regular_file`
+/// 通過からこの関数の呼び出しまでの間にも同じ TOCTOU の窓があり得るため、
+/// ここでの再確認そのものが本質的な防御になる)。
+fn enforce_staged_permissions(
+    codex_stage_dir: &std::path::Path,
+    entries: &[(std::path::PathBuf, &'static str)],
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::PermissionsExt;
+        for (_, name) in entries {
+            let dst = codex_stage_dir.join(name);
+
+            let file = match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&dst)
+            {
+                Ok(file) => file,
+                // 今回の run では扱われなかった(entries には出るが host 側に
+                // 実体が無かった)か、この関数に来るまでの間に何らかの理由で
+                // 消えた。対象外として静かにスキップしてよい。
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                // symlink だった場合の open(2) の挙動(ELOOP)。
+                // `remove_dst_if_not_regular_file` 通過後からこの open までの
+                // 間にコンテナが symlink へ差し替えた可能性がある。辿らず
+                // 検出できた時点でこの防御の目的は達成しているため chmod は
+                // 行わず、運用者が調査できるよう stderr に記録するに留める。
+                Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+                    eprintln!(
+                        "staged codex file was replaced with a symlink just before permission \
+                         enforcement (possible concurrent container tampering); skipped chmod \
+                         to avoid following it: {}",
+                        dst.display()
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("Failed to open {} for chmod", dst.display()))
+                }
+            };
+
+            let file_type = file
+                .metadata()
+                .with_context(|| {
+                    format!(
+                        "Failed to stat opened fd for {} before chmod",
+                        dst.display()
+                    )
+                })?
+                .file_type();
+            // O_NOFOLLOW は symlink を弾くが、ディレクトリ等の他の非通常
+            // ファイルはそのまま開けてしまう。通常ファイルでなければ
+            // `remove_dst_if_not_regular_file` と同じ方針で chmod せず対象外
+            // とする。
+            if !file_type.is_file() {
+                continue;
+            }
+
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .with_context(|| {
+                    format!("Failed to enforce 0600 permissions on {}", dst.display())
+                })?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (codex_stage_dir, entries);
+    }
+    Ok(())
 }
 
 pub(super) fn build_container_config(

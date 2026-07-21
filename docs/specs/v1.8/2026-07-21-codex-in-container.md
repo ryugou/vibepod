@@ -310,6 +310,46 @@ symlink は削除するが、コンテナが `auth.json` をディレクトリ�
 - ステージとホストの mtime が同値 → ステージが保持される
 - ステージとホストの内容が同一 → コピーが省略される(mtime が変わらないことで検証)
 
+## codex レビュー指摘対応(round 9、2026-07-22)
+
+round 8 対応は解消を確認。新規指摘1件、対応必須。
+
+### P1: keep/skip 経路でコンテナが緩めた権限が修復されない(`src/cli/run/mod.rs:964-968` 付近)
+
+コンテナが共有 rw マウント上の `auth.json` を 0644 等に chmod した場合、
+mtime がホスト以上だとコピーが省略されるため権限が直らず、
+同一ホストの別ユーザーがトークンを読める状態が永続化する(files 0600 の保証に反する)。
+
+対応: ステージのファイルを**保持する経路(keep-newer)・コピー省略する経路(内容同一)の
+どちらでも、通常ファイルに対して明示的に 0600 を再設定**する。`prepare_codex_mount` の
+成功 return 前に「ステージ内の allowlist ファイル全てが 0600 であること」を保証する形に
+集約してよい(chmod は冪等)。
+
+### テスト追加(round 9 対応分)
+
+- ステージの auth.json を 0644 にして、mtime がホストより新しい状態で呼ぶ → 保持されつつ 0600 に戻る
+- 内容同一でコピー省略される状態で 0644 にして呼ぶ → 0600 に戻る
+
+### 対応結果(round 9、実装記録)
+
+`enforce_staged_permissions` を新設し、`prepare_codex_mount` の成功 return
+直前に allowlist ファイル(`entries`)全件へ一括適用する形で対応した。
+
+初回実装は `symlink_metadata`(チェック)→ `std::fs::set_permissions(path, ..)`
+(chmod、Unix では `chmod(path, ..)` で symlink を辿る)という check-then-act
+だったため、reviewer の一次レビューで Critical 指摘(TOCTOU: チェック後・chmod
+前にコンテナが `dst` を任意ホストパスへの symlink に差し替えると、その任意
+ファイルの権限を書き換えてしまう confused deputy)を受け、FAIL となった。
+
+差し戻し対応として、`OpenOptions::new().custom_flags(O_NOFOLLOW | O_NONBLOCK)`
+で `dst` を開いて得た fd に対し `File::set_permissions`(内部で `fchmod(fd, ..)`
+呼び出し、path 解決を伴わない)で 0600 を設定する方式に変更した。open 自体が
+symlink なら `ELOOP` で失敗するため、チェックと act が同一 fd を介して不可分
+になり TOCTOU の窓が構造的に消える。`ELOOP`(symlink 検出)はコピー動作を行わず
+stderr に警告してスキップし、それ以外の open/stat/chmod 失敗は `with_context`
+で anyhow エラーとして伝播する(握りつぶし禁止に従う)。この修正で reviewer
+再レビューは PASS。
+
 ## 差し戻し条件
 
 - musl バイナリが Debian bookworm-slim で動作しない等、前提が崩れた場合

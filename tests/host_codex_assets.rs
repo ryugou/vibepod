@@ -975,3 +975,117 @@ fn prepare_codex_mount_skips_copy_when_staged_auth_content_matches_host() {
          untouched rather than bumped by a fresh persist"
     );
 }
+
+// --- prepare_codex_mount: staged permissions are repaired even when the
+// content is kept or the copy is skipped (codex review round 9, P1) ---
+
+#[cfg(unix)]
+#[test]
+fn prepare_codex_mount_restores_0600_on_kept_staged_auth_with_loosened_permissions() {
+    // round 9 P1: the keep-newer branch (`should_keep_staged_auth` returning
+    // true, so the loop `continue`s past the staged auth.json without
+    // touching it) intentionally preserves content and mtime -- but it must
+    // not also preserve a *loosened* permission bit. If a container reached
+    // through the shared rw mount and `chmod 644`'d the staged auth.json (a
+    // token readable by any other host user is exactly the leak this
+    // invariant guards against), the next `vibepod run` must still repair the
+    // mode to 0600 even though it takes the "keep, don't overwrite" path for
+    // the content itself.
+    use std::os::unix::fs::PermissionsExt;
+
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+
+    // Simulate an in-container refresh (newer mtime, new content) that also
+    // leaves the file world/group-readable -- e.g. the container process ran
+    // under a different umask than the 0600 vibepod sets on its own copies.
+    fs::write(
+        &staged_auth,
+        r#"{"token":"CONTAINER_REFRESHED_WITH_LOOSE_PERMS"}"#,
+    )
+    .unwrap();
+    set_mtime(&staged_auth, t0 + Duration::from_secs(60));
+    fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir));
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"CONTAINER_REFRESHED_WITH_LOOSE_PERMS"}"#,
+        "the keep-newer branch must still preserve the container-refreshed content"
+    );
+    let mode = fs::metadata(&staged_auth).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "the keep-newer branch must repair a loosened permission bit back to 0600, got {:o}",
+        mode
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_codex_mount_restores_0600_when_copy_is_skipped_for_matching_content() {
+    // round 9 P1: `copy_codex_asset_atomically`'s content-equality short
+    // circuit (`staged_asset_matches_host` returning true, round 8 P2-2)
+    // skips copy/chmod/rename entirely when the staged file already matches
+    // the host byte-for-byte. That short circuit predates any container
+    // access to the stage, so it never re-applies 0600 on its own. If the
+    // container had already loosened the staged file's mode before this run
+    // (content still identical, so the skip still fires), the loosened mode
+    // must not survive -- `prepare_codex_mount`'s end-of-function permission
+    // sweep has to catch what this early return does not.
+    use std::os::unix::fs::PermissionsExt;
+
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let first = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+
+    // Content is already identical to the host (copied verbatim by the first
+    // call above). Pin the staged mtime strictly older than the host's so
+    // `should_keep_staged_auth` takes the "host wins" branch, which forces
+    // the content-equality check inside `copy_codex_asset_atomically` to be
+    // what actually decides to skip the copy.
+    let staged_mtime = t0 - Duration::from_secs(60);
+    set_mtime(&staged_auth, staged_mtime);
+    fs::set_permissions(&staged_auth, fs::Permissions::from_mode(0o644)).unwrap();
+    let mtime_before = fs::metadata(&staged_auth).unwrap().modified().unwrap();
+
+    let second = prepare_codex_mount(home_dir.path(), config_dir.path()).unwrap();
+
+    assert_eq!(second, Some(dir));
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"HOST_AUTH"}"#,
+        "content must remain the (already-matching) host value"
+    );
+    let mtime_after = fs::metadata(&staged_auth).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_after, mtime_before,
+        "the permission repair must not go through the copy machinery -- mtime must stay \
+         untouched, proving the fix was a plain chmod rather than a re-copy/persist"
+    );
+    let mode = fs::metadata(&staged_auth).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "the content-equality skip path must still have its permission repaired to 0600, got {:o}",
+        mode
+    );
+}
