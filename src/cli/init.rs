@@ -100,16 +100,43 @@ impl BuildLock {
                 .truncate(false)
                 .open(&path)
                 .with_context(|| format!("Failed to open build lock file: {}", path.display()))?;
-            // SAFETY: flock は単純なシステムコール。fd は `file` の生存期間
-            // にわたって有効で、LOCK_EX はブロッキングで排他ロックを取る。
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!(
-                        "Failed to acquire exclusive build lock on {}",
-                        path.display()
-                    )
-                });
+            // まず非ブロッキングで試す。即取れれば（競合なしの通常ケース）
+            // 何も表示しない。取れない場合だけ「別セッションがビルド中で
+            // 待機している」旨を出してからブロッキングで取り直す。こうしないと
+            // ロック取得後に出る "Building it now..." までの数分間、待機側の
+            // 画面がフリーズして見え、Ctrl+C 連打を誘発する（指摘 #3）。
+            //
+            // SAFETY: flock は単純なシステムコール。fd は `file` の生存期間に
+            // わたって有効。LOCK_NB は即時返り、LOCK_EX はブロッキングで
+            // 排他ロックを取る。
+            let fd = file.as_raw_fd();
+            let rc_nb = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if rc_nb != 0 {
+                let err = std::io::Error::last_os_error();
+                // EWOULDBLOCK: 別プロセスが保持中。待機に入ることを告知する。
+                if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                    println!(
+                        "  Another session is building the Docker image. \
+                         Waiting for it to finish (this can take a few minutes)..."
+                    );
+                    let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+                    if rc != 0 {
+                        return Err(std::io::Error::last_os_error()).with_context(|| {
+                            format!(
+                                "Failed to acquire exclusive build lock on {}",
+                                path.display()
+                            )
+                        });
+                    }
+                } else {
+                    // EWOULDBLOCK 以外の失敗（権限・fd 異常等）はそのまま伝播。
+                    return Err(err).with_context(|| {
+                        format!(
+                            "Failed to acquire exclusive build lock on {}",
+                            path.display()
+                        )
+                    });
+                }
             }
             Ok(Self { _file: file })
         }
