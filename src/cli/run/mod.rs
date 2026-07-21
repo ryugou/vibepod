@@ -308,17 +308,20 @@ pub const HOST_CLAUDE_ALLOWLIST: &[(&str, bool)] = &[
 /// 存在しないものは黙ってスキップする（ホスト環境に `specs/` が無いのは
 /// 異常ではなく通常であり、エラーにする理由がない）。
 ///
-/// **symlink の扱いは 2 段構え**（配下のコピーを行う `copy_host_dir_contents`
-/// と対になる方針）:
+/// **symlink の扱い**:
 ///
 /// - **top-level エントリ自体**（`~/.claude/skills` そのものが symlink 等）は
 ///   `is_dir()` / `is_file()` が symlink を追従するため、**意図的に追従を
 ///   許容する**。dotfiles 管理でディレクトリごと symlink にする構成は一般的で、
-///   ユーザー自身の明示的な資産配置とみなせるため。
-/// - 一方、そのディレクトリ**配下**の symlink は `copy_host_dir_contents` が
-///   skip する。配下の symlink は「ユーザーが `~/.claude/` の外を指す個別
-///   ファイル」であり得て、無条件に追従すると外部の巨大ツリーや秘密を
-///   コンテナへ materialize してしまうため。
+///   ユーザー自身の明示的な資産配置とみなせるため。追従先の実ディレクトリが
+///   そのまま ro バインドマウントされる。
+/// - そのディレクトリ**配下**の symlink については、返した実パスを docker が
+///   read-only でバインドマウントするだけで、vibepod 側でコピー・追従は
+///   行わない。配下の symlink はマウント境界の中の symlink ファイルとして
+///   そのままコンテナに現れ、コンテナ内で解決される。マウント範囲外
+///   （ホストの `~/.claude/` 外）を指す symlink はコンテナのファイルシステム
+///   名前空間では対象へ到達できず解決不能になるため、外部の巨大ツリーや
+///   秘密がコンテナへ流入することはない。
 pub fn host_claude_stage_entries(
     claude_dir: &std::path::Path,
 ) -> Vec<(std::path::PathBuf, &'static str)> {
@@ -327,8 +330,10 @@ pub fn host_claude_stage_entries(
         let path = claude_dir.join(name);
         // is_dir()/is_file() follow symlinks: a top-level symlinked entry
         // (a whole ~/.claude/skills symlinked elsewhere) is followed on
-        // purpose. Nested symlinks are handled separately (and skipped) in
-        // copy_host_dir_contents.
+        // purpose. The resolved real path is then bind-mounted read-only.
+        // Symlinks nested inside are left as-is: docker ro-mounts the
+        // directory, and any symlink pointing outside the mounted path
+        // simply cannot resolve inside the container's filesystem namespace.
         let exists = if *is_dir {
             path.is_dir()
         } else {
@@ -485,11 +490,17 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     // installed.
     labels.insert("vibepod.lang".to_string(), ctx.lang_names.join(","));
 
-    // Label schema version.
+    // Label schema version. Monotonically increasing: never decrement,
+    // even when features are removed (a smaller value would misidentify
+    // newer containers as older ones). Previous releases used "1" (legacy
+    // single-token `vibepod.lang`), "2" (full comma-joined lang set), and
+    // "3" (added the now-removed `vibepod.template_setup_hash`). Removing
+    // the template machinery advances to "4".
     //
-    // - Missing / "1": legacy `vibepod.lang` single-token format.
-    // - "2"+: `vibepod.lang` stores the full comma-joined lang set.
-    labels.insert("vibepod.labels_version".to_string(), "2".to_string());
+    // Currently this value is NOT read anywhere — no code branches on it.
+    // It is written and reserved for a future backward-compatibility gate
+    // that may need to distinguish container schema generations.
+    labels.insert("vibepod.labels_version".to_string(), "4".to_string());
 
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(
