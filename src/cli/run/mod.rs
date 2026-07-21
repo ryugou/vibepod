@@ -504,6 +504,26 @@ fn reconcile_codex_stage_dir(dir: &std::path::Path, keep: &[&str]) -> anyhow::Re
     Ok(())
 }
 
+/// ステージ済み `auth.json` を保持すべきか(= ホスト側のコピーで上書きしない)を
+/// 判定する純関数。
+///
+/// コンテナ内 codex はステージ先(rw マウント経由)の `auth.json` をトークン
+/// リフレッシュ時に書き換える。次回 `vibepod run` がこれを無条件にホスト側の
+/// (リフレッシュ前の)`auth.json` で上書きすると、ローテーションされたリフレッシュ
+/// トークンが失われ、以後コンテナ内 codex が認証不能になる(codex レビュー round 3
+/// P1)。
+///
+/// ステージ済みファイルの mtime がホスト側より **厳密に新しい** 場合のみ「コンテナが
+/// 更新した」とみなして保持する(= コピーしない)。mtime が同じ、またはホスト側の
+/// mtime が新しい(= ユーザーが再ログインした等)場合は、従来どおりホスト側優先で
+/// 上書きする。ホストへの書き戻しは行わない(「ホスト原本に触れない」原則のため)。
+pub fn should_keep_staged_auth(
+    host_mtime: std::time::SystemTime,
+    staged_mtime: std::time::SystemTime,
+) -> bool {
+    staged_mtime > host_mtime
+}
+
 /// ホストの `~/.codex/auth.json`(と存在すれば `config.toml`)を
 /// `<config_dir>/runtime/<container_name>/codex/` にコピーし、そのディレクトリの
 /// パスを返す。呼び出し元はこのパスをコンテナへ `/home/vibepod/.codex` として
@@ -517,6 +537,11 @@ fn reconcile_codex_stage_dir(dir: &std::path::Path, keep: &[&str]) -> anyhow::Re
 /// `config.toml` のみ無く `auth.json` はある場合は、警告なしで auth.json だけ
 /// コピーして続行する(`config.toml` 省略は codex のデフォルト設定を使う正常な
 /// 運用パターンのため)。
+///
+/// **`auth.json` は「新しい方を保持」する**(codex レビュー round 3 P1): ステージ済み
+/// `auth.json` の mtime がホスト側より新しければ、コンテナ内 codex がリフレッシュした
+/// ものとみなしコピーをスキップする(`should_keep_staged_auth` 参照)。`config.toml` は
+/// 認証情報ではなく設定ファイルのため、この特例の対象外であり常にホスト側で上書きする。
 pub fn prepare_codex_mount(
     home: &std::path::Path,
     config_dir: &std::path::Path,
@@ -575,6 +600,23 @@ pub fn prepare_codex_mount(
 
     for (src, name) in &entries {
         let dst = runtime_codex_dir.join(name);
+
+        if *name == "auth.json" && dst.is_file() {
+            let staged_mtime = std::fs::metadata(&dst)
+                .and_then(|m| m.modified())
+                .with_context(|| format!("Failed to read mtime of {}", dst.display()))?;
+            let host_mtime = std::fs::metadata(src)
+                .and_then(|m| m.modified())
+                .with_context(|| format!("Failed to read mtime of {}", src.display()))?;
+
+            if should_keep_staged_auth(host_mtime, staged_mtime) {
+                // コンテナ内 codex がトークンリフレッシュ済みの auth.json を、
+                // 古いホストコピーで上書きしない(round 3 P1)。パーミッションは
+                // 初回コピー時に 0600 済みなのでそのまま維持する。
+                continue;
+            }
+        }
+
         std::fs::copy(src, &dst)
             .with_context(|| format!("Failed to copy {} to {}", src.display(), dst.display()))?;
         #[cfg(unix)]

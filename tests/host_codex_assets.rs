@@ -9,8 +9,21 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
-use vibepod::cli::run::{host_codex_stage_entries, prepare_codex_mount};
+use vibepod::cli::run::{host_codex_stage_entries, prepare_codex_mount, should_keep_staged_auth};
+
+/// Set a file's mtime deterministically, without relying on real-time sleeps
+/// (which would make the mtime-ordering tests flaky). Stable since Rust 1.75.
+fn set_mtime(path: &Path, when: SystemTime) {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("failed to open {} for mtime write: {e}", path.display()));
+    let times = fs::FileTimes::new().set_modified(when);
+    file.set_times(times)
+        .unwrap_or_else(|e| panic!("failed to set mtime on {}: {e}", path.display()));
+}
 
 /// Build a host `~/.codex/` containing both allowlisted assets and the
 /// history/cache data that must be left behind.
@@ -251,5 +264,202 @@ fn prepare_codex_mount_reconciles_config_toml_removal_and_refreshes_auth() {
     assert!(
         second_dir.is_dir(),
         "the staging directory itself must survive reconciliation"
+    );
+}
+
+// --- should_keep_staged_auth (pure mtime comparison, codex review round 3) ---
+
+#[test]
+fn should_keep_staged_auth_true_when_staged_is_newer() {
+    let host = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let staged = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+    assert!(should_keep_staged_auth(host, staged));
+}
+
+#[test]
+fn should_keep_staged_auth_false_when_host_is_newer() {
+    let host = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+    let staged = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    assert!(!should_keep_staged_auth(host, staged));
+}
+
+#[test]
+fn should_keep_staged_auth_false_when_mtimes_are_equal() {
+    // Equal mtimes must fall through to "host wins" (overwrite), matching the
+    // pre-round-3 behavior when no reliable ordering can be established.
+    let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    assert!(!should_keep_staged_auth(t, t));
+}
+
+// --- prepare_codex_mount: keep-newer-auth (codex review round 3, P1) ---
+
+#[test]
+fn prepare_codex_mount_keeps_staged_auth_when_newer_than_host() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let first = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-keep-newer-staged-auth",
+    )
+    .unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+
+    // Simulate the in-container codex rotating its refresh token: the staged
+    // (rw-mounted) auth.json is rewritten and now carries a newer mtime than
+    // the host's original, untouched copy.
+    fs::write(&staged_auth, r#"{"token":"CONTAINER_REFRESHED"}"#).unwrap();
+    set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
+
+    let second = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-keep-newer-staged-auth",
+    )
+    .unwrap();
+
+    assert_eq!(second, Some(dir));
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"CONTAINER_REFRESHED"}"#,
+        "the container's rotated auth.json must survive a subsequent `vibepod run`, \
+         not be clobbered by the stale host copy"
+    );
+}
+
+#[test]
+fn prepare_codex_mount_overwrites_staged_auth_when_host_is_newer() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let first = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-host-newer-auth",
+    )
+    .unwrap();
+    let dir = first.expect("first run should stage auth.json");
+    let staged_auth = dir.join("auth.json");
+    set_mtime(&staged_auth, t0);
+
+    // User re-authenticates on the host (e.g. `codex login`): the host copy
+    // is rewritten with a strictly newer mtime than the staged copy.
+    fs::write(&host_auth, r#"{"token":"HOST_RELOGIN"}"#).unwrap();
+    set_mtime(&host_auth, t0 + Duration::from_secs(3_600));
+
+    let second = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-host-newer-auth",
+    )
+    .unwrap();
+
+    assert_eq!(second, Some(dir));
+    assert_eq!(
+        fs::read_to_string(&staged_auth).unwrap(),
+        r#"{"token":"HOST_RELOGIN"}"#,
+        "a newer host auth.json (e.g. after re-login) must still overwrite the staged copy"
+    );
+}
+
+#[test]
+fn prepare_codex_mount_always_overwrites_config_toml_even_if_staged_is_newer() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_config = home_dir.path().join(".codex/config.toml");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_config, t0);
+
+    let first = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-config-toml-no-keep-newer",
+    )
+    .unwrap();
+    let dir = first.expect("first run should stage config.toml");
+    let staged_config = dir.join("config.toml");
+
+    // Give the staged config.toml a much newer mtime than the host's, mirroring
+    // the auth.json "keep newer" scenario above. Unlike auth.json, config.toml
+    // is not a credential the container mutates, so it must always lose to the
+    // host copy regardless of mtime ordering.
+    fs::write(&staged_config, "STAGED_ONLY_SHOULD_NOT_SURVIVE\n").unwrap();
+    set_mtime(&staged_config, t0 + Duration::from_secs(3_600));
+
+    fs::write(&host_config, "model = \"host-updated\"\n").unwrap();
+    set_mtime(&host_config, t0 + Duration::from_secs(60));
+
+    let second = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-config-toml-no-keep-newer",
+    )
+    .unwrap();
+
+    assert_eq!(second, Some(dir));
+    assert_eq!(
+        fs::read_to_string(&staged_config).unwrap(),
+        "model = \"host-updated\"\n",
+        "config.toml has no keep-newer exemption: the host copy must always win"
+    );
+}
+
+#[test]
+fn prepare_codex_mount_auth_removal_ignores_staged_mtime() {
+    // Regression guard (round 1 semantics): even if the staged auth.json looks
+    // "newer" than the host's last-known auth.json, deleting the host file is
+    // an explicit revocation and must always win over any mtime comparison.
+    let home_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    make_host_codex(home_dir.path());
+    let host_auth = home_dir.path().join(".codex/auth.json");
+
+    let t0 = SystemTime::now();
+    set_mtime(&host_auth, t0);
+
+    let first = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-auth-removal-ignores-mtime",
+    )
+    .unwrap();
+    let dir = first.expect("first run should stage auth.json + config.toml");
+    let staged_auth = dir.join("auth.json");
+    set_mtime(&staged_auth, t0 + Duration::from_secs(3_600));
+
+    fs::remove_file(&host_auth).unwrap();
+
+    let second = prepare_codex_mount(
+        home_dir.path(),
+        config_dir.path(),
+        "vibepod-test-auth-removal-ignores-mtime",
+    )
+    .unwrap();
+
+    assert!(
+        second.is_none(),
+        "host auth.json removal must return None regardless of staged mtime"
+    );
+    assert!(
+        !staged_auth.exists(),
+        "staged auth.json must be deleted on host revocation regardless of its mtime"
+    );
+    assert!(
+        !dir.join("config.toml").exists(),
+        "staged config.toml must be deleted alongside auth.json on host revocation"
     );
 }
