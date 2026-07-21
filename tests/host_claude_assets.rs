@@ -15,8 +15,9 @@ use std::fs;
 use std::path::Path;
 
 use vibepod::cli::run::{
-    build_claude_config_mounts, host_claude_stage_entries, merge_host_plugins_mounts,
-    prepare::assemble_staging,
+    build_claude_config_mounts, host_claude_stage_entries, merge_claude_md,
+    merge_host_plugins_mounts,
+    prepare::{assemble_staging, should_reassemble_staging},
 };
 
 /// Build a host `~/.claude/` containing both allowlisted assets and the
@@ -360,4 +361,127 @@ fn absent_host_plugins_add_nothing() {
     merge_host_plugins_mounts(&mut mounts, None, home);
 
     assert_eq!(mounts.len(), 1);
+}
+
+// --- merge_claude_md: the four presence combinations ---
+//
+// Every official bundle ships a CLAUDE.md, so a plain per-file overwrite
+// would always drop the host's. These pin the concatenation contract:
+// template first (precedence preserved), host second, both preserved.
+
+#[test]
+fn merge_claude_md_both_absent_yields_none() {
+    // Nothing to write — assemble_staging leaves no CLAUDE.md at all.
+    assert_eq!(merge_claude_md(None, None, "rust/impl"), None);
+}
+
+#[test]
+fn merge_claude_md_template_only_returns_template_verbatim() {
+    // Custom template with a CLAUDE.md, host has none: template stands alone.
+    assert_eq!(
+        merge_claude_md(Some("TEMPLATE RULES"), None, "rust/impl"),
+        Some("TEMPLATE RULES".to_string())
+    );
+}
+
+#[test]
+fn merge_claude_md_host_only_returns_host_verbatim() {
+    // Custom template without a CLAUDE.md, host has one: host stands alone,
+    // no separator header is introduced.
+    let merged = merge_claude_md(None, Some("HOST RULES"), "blank");
+    assert_eq!(merged, Some("HOST RULES".to_string()));
+}
+
+#[test]
+fn merge_claude_md_both_present_concatenates_template_before_host() {
+    // The load-bearing case: both survive, template body precedes host body,
+    // and the separator names each section's provenance.
+    let merged =
+        merge_claude_md(Some("TEMPLATE RULES"), Some("HOST RULES"), "rust/review").unwrap();
+
+    let t = merged
+        .find("TEMPLATE RULES")
+        .expect("template body present");
+    let h = merged.find("HOST RULES").expect("host body present");
+    assert!(t < h, "template must come before host:\n{merged}");
+    assert!(
+        merged.contains("template 'rust/review'"),
+        "separator must name the template:\n{merged}"
+    );
+    assert!(
+        merged.contains("host ~/.claude/CLAUDE.md"),
+        "separator must name the host source:\n{merged}"
+    );
+}
+
+// (End-to-end staging coverage for the merge already lives in
+// `template_claude_md_is_merged_above_host_claude_md`; the four cases above
+// pin the pure function itself.)
+
+// --- should_reassemble_staging ---
+//
+// Reassembly wipes and rebuilds the staging dir, which is the bind-mount
+// SOURCE for a persistent container's ~/.claude/. These pin when that wipe
+// is safe.
+
+#[test]
+fn reassemble_when_reusing_a_running_container_is_skipped() {
+    // Wiping live staging under a Running container we are about to reuse
+    // would momentarily empty its mount — so skip.
+    assert!(!should_reassemble_staging(true, true));
+}
+
+#[test]
+fn reassemble_for_a_non_running_container_proceeds() {
+    // Stopped / new container: safe (and necessary) to rebuild.
+    assert!(should_reassemble_staging(false, true));
+}
+
+#[test]
+fn reassemble_always_runs_when_no_staging_exists_yet() {
+    // Nothing to reuse; downstream mount-building needs the dir to exist.
+    // True regardless of the running-reuse flag.
+    assert!(should_reassemble_staging(true, false));
+    assert!(should_reassemble_staging(false, false));
+}
+
+// --- top-level symlink policy ---
+
+#[test]
+#[cfg(unix)]
+fn top_level_symlinked_skills_dir_is_followed_into_staging() {
+    // Two-tier symlink policy: a whole ~/.claude/skills symlinked elsewhere
+    // (a common dotfiles setup, an explicit user placement) is FOLLOWED,
+    // unlike a symlink nested inside it. This fixes that top-level behaviour
+    // so it cannot silently regress to the nested-skip rule.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(home.join(".claude/CLAUDE.md"), "R").unwrap();
+
+    // Real skills dir living outside ~/.claude, linked in as the whole dir.
+    let real_skills = tmp.path().join("dotfiles/skills");
+    fs::create_dir_all(real_skills.join("linked-skill")).unwrap();
+    fs::write(real_skills.join("linked-skill/SKILL.md"), "LINKED").unwrap();
+    std::os::unix::fs::symlink(&real_skills, home.join(".claude/skills")).unwrap();
+
+    // host_claude_stage_entries follows the top-level symlink (is_dir()).
+    let names: Vec<&str> = host_claude_stage_entries(&home.join(".claude"))
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(
+        names.contains(&"skills"),
+        "top-level symlinked skills dir should be seen: {names:?}"
+    );
+
+    // ...and its contents materialize in staging.
+    let (_tmp, staging) = stage(&home, |t| {
+        fs::write(t.join("CLAUDE.md"), "T").unwrap();
+    });
+    assert_eq!(
+        fs::read_to_string(staging.join("skills/linked-skill/SKILL.md")).unwrap(),
+        "LINKED",
+        "contents of a top-level symlinked skills dir must be followed into staging"
+    );
 }
