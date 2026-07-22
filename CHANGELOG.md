@@ -5,6 +5,15 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-07-22
+
+### Added
+- The container image now bundles the `codex` CLI (musl static binary, no node/npm required) so in-container `codex` review can run; the version is pinned via the `CODEX_VERSION` build arg (default `0.145.0`) and its SHA256 checksum is verified before extraction, failing the build on a mismatch or an unrecognized version/arch pin. `--build-arg CODEX_VERSION=latest` remains as an explicit escape hatch that skips checksum verification
+- Only the host's `~/.codex/auth.json` and `config.toml` (never `history.jsonl`, `goals_*.sqlite`, or `cache/`) are injected into the container. A per-container rw-mounted "shown" stage (disposed with the runtime dir on cleanup) is kept fully separate from a host-only "persisted" auth store that is never mounted into any container; syncing between host, store, and stage keeps the newer `auth.json` (preserving in-container token refresh), reconciles and rejects symlinked or non-regular entries, enforces `0600` permissions on staged files, serializes concurrent `vibepod run` invocations with a flock, and gates the post-run write-back on both a full JSON parse of the refreshed `auth.json` and a confirmed docker command exit status
+
+### Security
+- Hardened the container-to-host boundary for the injected codex credentials: the shown stage and the persisted auth store are fully separated, symlinked or non-regular files are rejected both on host read and stage write, staged files are forced to `0600`, concurrent runs are serialized via flock, and the post-run sync back to the store is gated on both JSON-validity of the refreshed auth data and the triggering docker command's exit status — closing TOCTOU paths a tampered container could otherwise use to corrupt or exfiltrate host-side auth
+
 ## [1.7.0] - 2026-07-21
 
 ### Added
