@@ -537,7 +537,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // 構成差分の警告が出なくなる。この判定はホストの生 `~/.codex/` を見て
     // いるだけなので、round 10 で auth store / per-container ステージの
     // 2 段構成に変わった後もそのまま通用する。
-    let host_codex_auth_exists = super::host_codex_stage_entries(&home.join(".codex"))
+    let host_codex_dir = home.join(".codex");
+    let host_codex_auth_exists = super::host_codex_stage_entries(&host_codex_dir)
+        .with_context(|| {
+            format!(
+                "Failed to enumerate host codex directory {}",
+                host_codex_dir.display()
+            )
+        })?
         .iter()
         .any(|(_, name)| *name == "auth.json");
 

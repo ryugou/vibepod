@@ -511,13 +511,40 @@ pub const HOST_CODEX_ALLOWLIST: &[&str] = &["auth.json", "config.toml"];
 /// この関数は host 側 `~/.codex` と store_dir の両方の列挙に使われる。
 /// 両方に同じ symlink 拒否が効くのは意図通り(store 内が symlink に
 /// 差し替えられていてもリンク先を流さないため)。
+///
+/// **NotFound 以外の stat エラーは wipe を誘発させるため fail-fast する
+/// (Copilot レビュー指摘、PR #56)**: 以前はここで `eprintln!` するだけで
+/// NotFound と同じ「エントリなし」として扱っていたため、呼び出し元
+/// `prepare_codex_mount` の `has_auth` 判定が「権限エラーで stat 失敗」を
+/// 「auth.json が存在しない」と誤認し、P1 分岐(auth store・ステージの
+/// 全消去)を誤発動させ得た。実際には存在するが読めなかっただけの
+/// `auth.json` に対して、過去 run で保存済みの有効なトークンを消してしまう
+/// のは許容できない。NotFound(本当に未認証、通常運用)だけを黙ってスキップし、
+/// それ以外は run 準備自体を失敗させて運用者に原因(権限等)を伝える。
 pub fn host_codex_stage_entries(
     codex_dir: &std::path::Path,
-) -> Vec<(std::path::PathBuf, &'static str)> {
+) -> anyhow::Result<Vec<(std::path::PathBuf, &'static str)>> {
+    // `std::fs::symlink_metadata` を値のまま渡すと具体的なライフタイムに
+    // 単相化され、`classify_codex_stage_entries` が要求する
+    // `Fn(&Path) -> ...`(任意のライフタイムで呼べること)を満たせず HRTB
+    // エラーになる。クロージャで包んで再ジェネリック化する。
+    classify_codex_stage_entries(codex_dir, |path| std::fs::symlink_metadata(path))
+}
+
+/// `host_codex_stage_entries` の本体。stat 関数を注入できる形にして、
+/// NotFound 以外の stat エラー(権限エラー等)が wipe を誘発しないことを
+/// テストで固定できるようにする。
+fn classify_codex_stage_entries<F>(
+    codex_dir: &std::path::Path,
+    stat: F,
+) -> anyhow::Result<Vec<(std::path::PathBuf, &'static str)>>
+where
+    F: Fn(&std::path::Path) -> std::io::Result<std::fs::Metadata>,
+{
     let mut entries = Vec::new();
     for name in HOST_CODEX_ALLOWLIST {
         let path = codex_dir.join(name);
-        match std::fs::symlink_metadata(&path) {
+        match stat(&path) {
             Ok(metadata) => {
                 let file_type = metadata.file_type();
                 if file_type.is_file() {
@@ -535,13 +562,14 @@ pub fn host_codex_stage_entries(
                 // config.toml が無いホストは通常運用。警告不要で黙ってスキップ。
             }
             Err(e) => {
-                // パーミッション等 NotFound 以外の失敗は握りつぶさず、
-                // 運用者が原因調査できるよう stderr に警告してスキップする。
-                eprintln!("warning: failed to stat {}: {e}; skipped", path.display());
+                // パーミッション等 NotFound 以外の失敗は「存在しない」ではない
+                // ため黙ってスキップせず、どのパスの stat に失敗したかを含めて
+                // 呼び出し元へ伝播する(呼び出し元が wipe を誤発動させないため)。
+                return Err(e).with_context(|| format!("Failed to stat {}", path.display()));
             }
         }
     }
-    entries
+    Ok(entries)
 }
 
 /// `dir` 配下を実際に列挙し、`keep` に含まれない名前のエントリを
@@ -1087,7 +1115,12 @@ pub fn prepare_codex_mount(
     let _stage_lock = acquire_codex_stage_lock(config_dir)?;
 
     let host_codex_dir = home.join(".codex");
-    let host_entries = host_codex_stage_entries(&host_codex_dir);
+    let host_entries = host_codex_stage_entries(&host_codex_dir).with_context(|| {
+        format!(
+            "Failed to enumerate host codex directory {}",
+            host_codex_dir.display()
+        )
+    })?;
 
     let store_dir = config_dir.join("codex-auth");
     let stage_dir = runtime_dir.join("codex");
@@ -1127,7 +1160,12 @@ pub fn prepare_codex_mount(
 
     // Hop 2: store -> stage. 直前の hop で store には必ず auth.json が入って
     // いるので、store 側の実体を再列挙してそのままステージへ反映する。
-    let store_entries = host_codex_stage_entries(&store_dir);
+    let store_entries = host_codex_stage_entries(&store_dir).with_context(|| {
+        format!(
+            "Failed to enumerate codex auth store {}",
+            store_dir.display()
+        )
+    })?;
     sync_codex_entries_into(&store_entries, &stage_dir, CODEX_STAGE_LOCATION_LABEL)
         .with_context(|| format!("Failed to sync codex stage {}", stage_dir.display()))?;
 
@@ -1930,7 +1968,8 @@ mod tests {
         std::os::unix::fs::symlink(&target, &auth_path)
             .expect("failed to create auth.json symlink");
 
-        let entries = host_codex_stage_entries(codex_dir.path());
+        let entries = host_codex_stage_entries(codex_dir.path())
+            .expect("stat of a plain tempdir must not fail");
 
         assert!(
             !entries.iter().any(|(_, name)| *name == "auth.json"),
@@ -1952,7 +1991,8 @@ mod tests {
         std::os::unix::fs::symlink(&target, &config_path)
             .expect("failed to create config.toml symlink");
 
-        let entries = host_codex_stage_entries(codex_dir.path());
+        let entries = host_codex_stage_entries(codex_dir.path())
+            .expect("stat of a plain tempdir must not fail");
 
         assert!(
             !entries.iter().any(|(_, name)| *name == "config.toml"),
@@ -1970,7 +2010,8 @@ mod tests {
         std::fs::write(codex_dir.path().join("config.toml"), "model = \"real\"")
             .expect("failed to write config.toml");
 
-        let entries = host_codex_stage_entries(codex_dir.path());
+        let entries = host_codex_stage_entries(codex_dir.path())
+            .expect("stat of a plain tempdir must not fail");
 
         assert!(
             entries
@@ -1992,11 +2033,67 @@ mod tests {
         // 運用)場合、エントリは空になる(NotFound は警告不要で黙ってスキップ)。
         let codex_dir = tempfile::tempdir().expect("failed to create codex_dir tempdir");
 
-        let entries = host_codex_stage_entries(codex_dir.path());
+        let entries = host_codex_stage_entries(codex_dir.path())
+            .expect("stat of a plain tempdir must not fail");
 
         assert!(
             entries.is_empty(),
             "an empty .codex dir must yield no stage entries, got: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn classify_codex_stage_entries_skips_not_found_stat_errors() {
+        // 回帰確認: NotFound の stat エラーは(注入した stat 関数経由でも)
+        // 従来どおり黙ってスキップされ、Ok の空/部分エントリになること。
+        // `host_codex_stage_entries_skips_missing_files_silently` は実ファイル
+        // システム経由の同じ挙動を確認しているが、こちらは pure 関数に対して
+        // NotFound を直接注入し、分岐そのものを固定する。
+        let codex_dir = std::path::PathBuf::from("/nonexistent/.codex");
+
+        let entries = classify_codex_stage_entries(&codex_dir, |_path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file",
+            ))
+        });
+
+        assert_eq!(
+            entries.expect("NotFound must not produce an Err").len(),
+            0,
+            "NotFound stat errors must be skipped silently, not treated as a failure"
+        );
+    }
+
+    #[test]
+    fn classify_codex_stage_entries_propagates_non_not_found_stat_errors() {
+        // Copilot レビュー指摘(PR #56)の回帰確認: NotFound 以外の stat エラー
+        // (権限エラー等)を「存在しない」として黙ってスキップすると、
+        // 呼び出し元 `prepare_codex_mount` の has_auth 判定が誤って false になり、
+        // auth store の wipe(P1 分岐)を誤発動させる。stat が
+        // PermissionDenied で失敗した場合は Err で伝播し、エラーメッセージに
+        // 対象パスが含まれることを固定する。
+        let codex_dir = std::path::PathBuf::from("/no/access/.codex");
+
+        let result = classify_codex_stage_entries(&codex_dir, |_path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
+        });
+
+        let err = result
+            .expect_err("a non-NotFound stat error must propagate as Err, not be silently skipped");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("auth.json") || message.contains("config.toml"),
+            "error message must name the path whose stat failed so operators can diagnose \
+             the permission issue, got: {message}"
+        );
+        assert!(
+            message.contains("permission denied"),
+            "error message must retain the underlying io::Error via anyhow context chaining, \
+             got: {message}"
         );
     }
 }

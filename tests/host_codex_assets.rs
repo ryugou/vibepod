@@ -71,6 +71,7 @@ fn stage_entries_selects_only_allowlisted_files() {
     make_host_codex(&home);
 
     let names: Vec<&str> = host_codex_stage_entries(&home.join(".codex"))
+        .unwrap()
         .into_iter()
         .map(|(_, name)| name)
         .collect();
@@ -88,6 +89,7 @@ fn stage_entries_skips_absent_files_without_error() {
     fs::write(codex.join("auth.json"), r#"{"token":"only-auth"}"#).unwrap();
 
     let names: Vec<&str> = host_codex_stage_entries(&codex)
+        .unwrap()
         .into_iter()
         .map(|(_, name)| name)
         .collect();
