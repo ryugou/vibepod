@@ -25,6 +25,13 @@ pub struct ContainerConfig {
     pub container_name: String,
     pub workspace_path: String,
     pub claude_json: Option<String>,
+    /// `~/.codex/` の allowlist(auth.json / config.toml)をコピーした
+    /// per-container ディレクトリの絶対パス。`/home/vibepod/.codex` に
+    /// **read-write** でマウントする(codex がトークンリフレッシュ時に
+    /// auth.json を書き換えるため。`claude_json` と同じ理由・同じ copy-then-mount
+    /// パターン)。`None` の場合はマウントしない(ホストに `~/.codex/auth.json`
+    /// が無いケース)。
+    pub codex_dir: Option<String>,
     pub gitconfig: Option<String>,
     /// ユーザー環境変数（認証トークンを除く）
     pub env_vars: Vec<String>,
@@ -57,6 +64,11 @@ impl ContainerConfig {
         if let Some(ref claude_json) = self.claude_json {
             args.push("-v".to_string());
             args.push(format!("{}:/home/vibepod/.claude.json", claude_json));
+        }
+
+        if let Some(ref codex_dir) = self.codex_dir {
+            args.push("-v".to_string());
+            args.push(format!("{}:/home/vibepod/.codex", codex_dir));
         }
 
         if self.network_disabled {

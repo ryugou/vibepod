@@ -531,6 +531,22 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // below, so they are computed once here and reused.
     let claude_config_mounts = super::build_claude_config_mounts(&home);
     let host_settings_exists = home.join(".claude").join("settings.json").is_file();
+    // auth.json の有無判定は prepare_codex_mount 内の has_auth 判定と完全に
+    // 同じ基準にする(config.toml の有無は問わない)。基準がずれると、実際には
+    // bind mount されない codex を「ある」と誤ってラベルに含めてしまい、
+    // 構成差分の警告が出なくなる。この判定はホストの生 `~/.codex/` を見て
+    // いるだけなので、round 10 で auth store / per-container ステージの
+    // 2 段構成に変わった後もそのまま通用する。
+    let host_codex_dir = home.join(".codex");
+    let host_codex_auth_exists = super::host_codex_stage_entries(&host_codex_dir)
+        .with_context(|| {
+            format!(
+                "Failed to enumerate host codex directory {}",
+                host_codex_dir.display()
+            )
+        })?
+        .iter()
+        .any(|(_, name)| *name == "auth.json");
 
     if let Some(stored_labels) = stored_labels_opt {
         let mut mounts_parts: Vec<String> = Vec::new();
@@ -550,7 +566,6 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         if host_settings_exists {
             mounts_parts.push(super::SANITIZED_SETTINGS_LABEL_MARKER.to_string());
         }
-        mounts_parts.sort();
 
         // Encode the FULL sorted lang_names set so reuse re-provisions
         // whenever any language is added or removed.
@@ -566,7 +581,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
         let mut current_labels = std::collections::HashMap::new();
 
-        current_labels.insert("vibepod.mounts".to_string(), mounts_parts.join("|"));
+        current_labels.insert(
+            "vibepod.mounts".to_string(),
+            super::build_mounts_label(mounts_parts, host_codex_auth_exists),
+        );
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
@@ -619,6 +637,15 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         None
     };
 
+    // codex CLI 認証(~/.codex/auth.json + config.toml)を、host-only の
+    // auth store(`<config_dir>/codex-auth/`)経由で per-container ステージ
+    // (`<runtime_dir>/codex/`)へコピーする。ステージは disposable 実行の
+    // 終了時に runtime_dir ごと削除される想定の使い捨て領域であり、それで
+    // 問題ない — 認証情報の永続化は auth store 側が担う(round 10)。
+    // auth.json が無ければ None(codex レビューはこのコンテナでは使えないが、
+    // vibepod 自体は継続動作する)。
+    let codex_dir = super::prepare_codex_mount(&home, &config_dir, &runtime_dir)?;
+
     // Parse --mount arguments
     let mut extra_mounts = Vec::new();
     for arg in &opts.mount {
@@ -658,6 +685,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         exec_env_vars,
         setup_cmd,
         temp_claude_json,
+        codex_dir,
         runtime_dir,
         config_dir,
         global_config,
