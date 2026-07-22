@@ -5,7 +5,7 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.8.0] - 2026-07-22
+## [1.7.1] - 2026-07-22
 
 ### Added
 - The container image now bundles the `codex` CLI (musl static binary, no node/npm required) so in-container `codex` review can run; the version is pinned via the `CODEX_VERSION` build arg (default `0.145.0`) and its SHA256 checksum is verified before extraction, failing the build on a mismatch or an unrecognized version/arch pin. `--build-arg CODEX_VERSION=latest` remains as an explicit escape hatch that skips checksum verification
