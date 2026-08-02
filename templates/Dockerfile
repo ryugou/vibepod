@@ -95,10 +95,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libstdc++-12-dev unzip \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Swift toolchain(アーキ別 SHA256 検証必須。codex CLI と同様に latest
-# エスケープハッチは設けない)。SWIFT_VERSION はホスト Xcode の Swift
-# バージョンと一致させること。更新は ARG と下記 SHA256 テーブルの両方を
-# bump してから `vibepod init --rebuild` で行う(README 参照)。
+# Swift toolchain(アーキ別 SHA256 検証必須。codex CLI と同じバージョン pin
+# + SHA256 テーブル方式を採用するが、codex と異なり latest エスケープハッチ
+# は設けない)。SWIFT_VERSION はホスト Xcode の Swift バージョンと一致させる
+# こと。更新は ARG と下記 SHA256 テーブルの両方を bump してから
+# `vibepod init --rebuild` で行う(README 参照)。
 ARG SWIFT_VERSION=6.3.3
 
 # pin されたバージョンごとの SHA256(アーキ別)。SWIFT_VERSION を bump する際は
