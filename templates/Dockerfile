@@ -1,4 +1,6 @@
-FROM debian:bookworm-slim
+ARG VIBEPOD_PROFILE=default
+
+FROM debian:bookworm-slim AS base
 
 ARG HOST_UID=501
 ARG HOST_GID=20
@@ -78,3 +80,86 @@ USER vibepod
 WORKDIR /workspace
 
 CMD ["claude"]
+
+FROM base AS profile-default
+
+FROM base AS profile-swift
+USER root
+
+# Swift 実行時依存パッケージ(公式 swiftlang/swift-docker 6.3/debian/12 と同一 +
+# zip 展開用の unzip)。base で git 等は導入済みだが、apt-get install は冪等
+# なのでこのパッケージリストをそのまま実行する。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  binutils libicu-dev libcurl4-openssl-dev libedit-dev libsqlite3-dev \
+  libncurses-dev libpython3-dev libxml2-dev pkg-config uuid-dev tzdata git gcc \
+  libstdc++-12-dev unzip \
+  && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Swift toolchain(アーキ別 SHA256 検証必須。codex CLI と同様に latest
+# エスケープハッチは設けない)。SWIFT_VERSION はホスト Xcode の Swift
+# バージョンと一致させること。更新は ARG と下記 SHA256 テーブルの両方を
+# bump してから `vibepod init --rebuild` で行う(README 参照)。
+ARG SWIFT_VERSION=6.3.3
+
+# pin されたバージョンごとの SHA256(アーキ別)。SWIFT_VERSION を bump する際は
+# 対応する行をこのテーブルに追加すること。未知の組み合わせはビルド失敗として
+# 扱う(latest エスケープハッチは無し)。
+#   swift-${SWIFT_VERSION}-RELEASE-debian12-aarch64.tar.gz (arm64) の SHA256:
+#     ecba8ef87b54a5048d466af500f3169c939a6b8a2cb7c600f76b5184457f293a
+#   swift-${SWIFT_VERSION}-RELEASE-debian12.tar.gz (amd64) の SHA256:
+#     19e0c78cad5418ad48bfa87aa20c53ac9ac9996d1695d04dd94f7c7ea4eb133f
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      arm64) suffix="-aarch64" ;; \
+      amd64) suffix="" ;; \
+      *) echo "swift: unsupported architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    case "${SWIFT_VERSION}:${arch}" in \
+      "6.3.3:arm64") expected_sha256="ecba8ef87b54a5048d466af500f3169c939a6b8a2cb7c600f76b5184457f293a" ;; \
+      "6.3.3:amd64") expected_sha256="19e0c78cad5418ad48bfa87aa20c53ac9ac9996d1695d04dd94f7c7ea4eb133f" ;; \
+      *) echo "swift: no known SHA256 for SWIFT_VERSION=${SWIFT_VERSION} (arch ${arch}); bump the checksum table in this Dockerfile" >&2; exit 1 ;; \
+    esac; \
+    asset="swift-${SWIFT_VERSION}-RELEASE-debian12${suffix}.tar.gz"; \
+    url="https://download.swift.org/swift-${SWIFT_VERSION}-release/debian12${suffix}/swift-${SWIFT_VERSION}-RELEASE/swift-${SWIFT_VERSION}-RELEASE-debian12${suffix}.tar.gz"; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "$url" -o "${tmp_dir}/${asset}"; \
+    echo "${expected_sha256}  ${tmp_dir}/${asset}" | sha256sum -c -; \
+    mkdir -p /opt/swift; \
+    tar -xzf "${tmp_dir}/${asset}" -C /opt/swift --strip-components=1; \
+    rm -rf "${tmp_dir}"
+ENV PATH=/opt/swift/usr/bin:$PATH
+
+# SwiftLint(アーキ別 SHA256 検証必須。latest エスケープハッチは無し)。
+ARG SWIFTLINT_VERSION=0.65.0
+
+#   swiftlint_linux_arm64.zip の SHA256:
+#     12d3b84bc5b69ae13a99a5a5c79904f9ce25867f099f6368d0037854f9ee6c26
+#   swiftlint_linux_amd64.zip の SHA256:
+#     79306a34e5c7cc55a220cd108cbb861dcad5f10138dcdf261e2624ae8b0a486b
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      arm64) swiftlint_arch=arm64 ;; \
+      amd64) swiftlint_arch=amd64 ;; \
+      *) echo "swiftlint: unsupported architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    case "${SWIFTLINT_VERSION}:${swiftlint_arch}" in \
+      "0.65.0:arm64") expected_sha256="12d3b84bc5b69ae13a99a5a5c79904f9ce25867f099f6368d0037854f9ee6c26" ;; \
+      "0.65.0:amd64") expected_sha256="79306a34e5c7cc55a220cd108cbb861dcad5f10138dcdf261e2624ae8b0a486b" ;; \
+      *) echo "swiftlint: no known SHA256 for SWIFTLINT_VERSION=${SWIFTLINT_VERSION} (arch ${swiftlint_arch}); bump the checksum table in this Dockerfile" >&2; exit 1 ;; \
+    esac; \
+    asset="swiftlint_linux_${swiftlint_arch}.zip"; \
+    url="https://github.com/realm/SwiftLint/releases/download/${SWIFTLINT_VERSION}/swiftlint_linux_${swiftlint_arch}.zip"; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "$url" -o "${tmp_dir}/${asset}"; \
+    echo "${expected_sha256}  ${tmp_dir}/${asset}" | sha256sum -c -; \
+    unzip -q "${tmp_dir}/${asset}" -d "${tmp_dir}"; \
+    install -m 0755 "${tmp_dir}/swiftlint" /usr/local/bin/swiftlint; \
+    rm -rf "${tmp_dir}"
+
+RUN swift --version && swiftlint version
+
+USER vibepod
+
+FROM profile-${VIBEPOD_PROFILE}
