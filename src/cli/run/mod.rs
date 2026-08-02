@@ -161,6 +161,18 @@ pub fn render_run_summary(
     out
 }
 
+/// タイムアウト種別（idle / overall）の日本語ラベルを一箇所で定義する。
+/// `render_timeout_message` と、タイムアウト時に `prompt.rs` が最終的に返す
+/// `anyhow::bail!` のエラー理由の両方がこれを参照することで、表示文言が
+/// 食い違う（片方だけ更新し忘れる）事故を防ぐ。
+pub fn timeout_kind_label(overall_timed_out: bool) -> &'static str {
+    if overall_timed_out {
+        "実時間上限"
+    } else {
+        "ストリーム無出力"
+    }
+}
+
 /// タイムアウト時に stderr へ出す打ち切りメッセージを組み立てる純関数。
 ///
 /// 要件2（設計書 第3節: タイムアウト時の workspace 保全）: タイムアウト時は
@@ -177,10 +189,11 @@ pub fn render_timeout_message(
     overall_timeout_secs: u64,
     log_path: Option<&std::path::Path>,
 ) -> String {
-    let (limit_secs, kind_label) = if overall_timed_out {
-        (overall_timeout_secs, "実時間が")
+    let kind_label = timeout_kind_label(overall_timed_out);
+    let limit_secs = if overall_timed_out {
+        overall_timeout_secs
     } else {
-        (idle_timeout_secs, "ストリーム無出力が")
+        idle_timeout_secs
     };
     let timeout_display = if limit_secs >= 60 {
         format!("{} 分", limit_secs / 60)
@@ -189,7 +202,7 @@ pub fn render_timeout_message(
     };
 
     let mut out = format!(
-        "⚠ {}{} を超えたため、セッションを中断しました。\n",
+        "⚠ {}が{} を超えたため、セッションを中断しました。\n",
         kind_label, timeout_display
     );
     if let Some(p) = log_path {

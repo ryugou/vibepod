@@ -516,11 +516,7 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "N/A".to_string());
-        let reason = if overall_timed_out {
-            "実時間上限"
-        } else {
-            "ストリーム無出力"
-        };
+        let reason = super::timeout_kind_label(overall_timed_out);
         anyhow::bail!(
             "セッションをタイムアウトで打ち切りました（{}）。ログ: {}",
             reason,
