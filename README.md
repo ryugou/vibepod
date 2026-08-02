@@ -123,6 +123,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 |--------|-------------|
 | *(none)* | **Interactive mode** — opens a Claude Code session inside the container |
 | `--prompt "..."` | Fire-and-forget mode — agent runs autonomously and exits when done |
+| `--prompt-file <path>` | Same as `--prompt`, but reads the prompt from a file. The content is passed through unmodified, bypassing host shell interpretation of special characters (`<`, `{`, backticks, `$`, ...). Mutually exclusive with `--prompt` |
 | `--resume` | Continue from the previous session (fire-and-forget) |
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
@@ -135,7 +136,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-update` | Skip the container's Claude Code update check entirely |
 | `--model <name>` | Pass `--model <name>` straight through to Claude Code inside the container. Not validated by VibePod — Claude Code decides if it is valid. Works in both interactive and `--prompt` mode. Omit to use Claude Code's own default |
 | `--no-auto-build` | Do not build the Docker image on demand when it is missing. By default `vibepod run` auto-builds it; pass this to fail fast and be told to run `vibepod init` instead |
-| `--timeout <dur>` | Wall-clock limit for a `--prompt` session. Accepts bare seconds (`1800`) or a duration (`30m`, `1h30m`); `0` disables it. Defaults to **30 minutes**. On timeout the container-side agent is stopped, the workspace is restored, and the run exits non-zero |
+| `--timeout <dur>` | Wall-clock limit for a `--prompt` session. Accepts bare seconds (`1800`) or a duration (`30m`, `1h30m`); `0` disables it. Defaults to **30 minutes**. On timeout the container-side agent is stopped and the run exits non-zero; workspace changes (commits and uncommitted edits alike) are left in place, not reset — use `vibepod restore` to revert them manually |
 | `--verbose` | Stream Claude Code's per-event activity to stdout during `--prompt` (pre-1.7 behavior). By default only a concise end-of-run summary is printed |
 
 **Image auto-build.** The first `vibepod run` in an environment where the image is missing builds it automatically (a few minutes) instead of erroring, so you can call `vibepod run` from another session without running `vibepod init` first. Concurrent runs are serialized by a build lock so the image is built once. Use `--no-auto-build` to opt out.
@@ -330,7 +331,7 @@ Pass `--verbose` to stream Claude Code's per-event activity live instead (the pr
 ────────────────────────────────────────────────────────
 ```
 
-If a `--prompt` run exceeds its `--timeout` (default 30 minutes), VibePod stops the container-side agent, restores the workspace to the session's starting commit, prints the `logs.txt` path, and exits non-zero — a timeout is never reported as success.
+If a `--prompt` run exceeds its `--timeout` (default 30 minutes), VibePod stops the container-side agent, prints the `logs.txt` path, and exits non-zero — a timeout is never reported as success. The workspace is **not** reset: any commits and uncommitted edits the agent made are left in place so you can inspect them with `git status` / `git log`. Run `vibepod restore` if you want to revert to the session's starting commit.
 
 #### Language toolchain auto-detection
 

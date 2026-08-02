@@ -41,6 +41,12 @@ pub enum ContainerLiveness {
 pub struct RunOptions {
     pub resume: bool,
     pub prompt: Option<String>,
+    /// `--prompt-file <path>`: プロンプトをファイルから読み込む。`--prompt` と
+    /// clap レベルで排他（`conflicts_with = "prompt"`）。`execute()` の冒頭で
+    /// `resolve_prompt_file` により読み込まれ、無加工のまま `prompt` へ格納
+    /// される。以降の全経路は `--prompt` と完全に同一のため、この field を
+    /// 直接参照するコードは `execute()` 以外に存在しない。
+    pub prompt_file: Option<String>,
     pub no_network: bool,
     pub env_vars: Vec<String>,
     pub env_file: Option<String>,
@@ -152,6 +158,48 @@ pub fn render_run_summary(
 
     out.push_str("  Full logs: ");
     out.push_str(logs_path);
+    out
+}
+
+/// タイムアウト時に stderr へ出す打ち切りメッセージを組み立てる純関数。
+///
+/// 要件2（設計書 第3節: タイムアウト時の workspace 保全）: タイムアウト時は
+/// workspace の git 状態を一切変更しないため、この関数は git コマンドを一度も
+/// 呼ばない。中断理由（idle=ストリーム無出力 / overall=実時間上限）・上限値・
+/// ログパスのみから、エージェントの変更（コミット・未コミットとも）が
+/// workspace にそのまま残っている旨と、確認手順（`git status` / `git log`）・
+/// 開始時点へ戻す手順（`vibepod restore`）を示すメッセージを組み立てる。
+/// 表示層のロジックを I/O から切り離してユニットテスト可能にするため、必要な
+/// 値はすべて引数で受け取る（`render_run_summary` と同じパターン）。
+pub fn render_timeout_message(
+    overall_timed_out: bool,
+    idle_timeout_secs: u64,
+    overall_timeout_secs: u64,
+    log_path: Option<&std::path::Path>,
+) -> String {
+    let (limit_secs, kind_label) = if overall_timed_out {
+        (overall_timeout_secs, "実時間が")
+    } else {
+        (idle_timeout_secs, "ストリーム無出力が")
+    };
+    let timeout_display = if limit_secs >= 60 {
+        format!("{} 分", limit_secs / 60)
+    } else {
+        format!("{} 秒", limit_secs)
+    };
+
+    let mut out = format!(
+        "⚠ {}{} を超えたため、セッションを中断しました。\n",
+        kind_label, timeout_display
+    );
+    if let Some(p) = log_path {
+        out.push_str(&format!("  ログ: {}\n", p.display()));
+    }
+    out.push_str(
+        "  エージェントによる変更（コミット・未コミットとも）は workspace にそのまま残っています。\n",
+    );
+    out.push_str("  確認するには: `git status` / `git log`\n");
+    out.push_str("  開始時点へ戻すには: `vibepod restore`");
     out
 }
 
@@ -1729,7 +1777,37 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     labels
 }
 
+/// `--prompt-file <path>` の内容を読み込み、検証する純関数。
+///
+/// 要件3（設計書 第4節）: ホストシェルの解釈を経由せずプロンプトを渡すための
+/// 経路。内容は**無加工**（trim せず）で返す — 山括弧・波括弧・バッククォート・
+/// `$` を含むファイルでも、そのまま `claude -p` へ渡る `opts.prompt` になる
+/// 必要があるため。
+///
+/// エラーは運用者がすぐ直せるよう、常にパスを含める:
+/// - ファイルが読めない場合（存在しない・権限がない等）
+/// - 内容が空、または空白のみの場合（`claude -p ""` を渡すのは無意味なため
+///   起動前に弾く）
+pub fn resolve_prompt_file(path: &str) -> Result<String> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read prompt file: {}", path))?;
+    if content.trim().is_empty() {
+        anyhow::bail!("Prompt file is empty or whitespace-only: {}", path);
+    }
+    Ok(content)
+}
+
 pub async fn execute(opts: RunOptions) -> Result<()> {
+    // clap の `conflicts_with = "prompt"` により `--prompt` と `--prompt-file`
+    // の同時指定は既に弾かれているため、ここで両方 Some になるケースは無い。
+    // 読み込み内容は無加工で opts.prompt へ代入することで、以降の全経路
+    // （ロック・タイムアウト・`claude -p` への受け渡し・ログ・サマリ）を
+    // `--prompt` と完全に同一にする。
+    let mut opts = opts;
+    if let Some(ref path) = opts.prompt_file {
+        opts.prompt = Some(resolve_prompt_file(path)?);
+    }
+
     let interactive = !opts.resume && opts.prompt.is_none();
 
     let Some(ctx) = prepare::prepare_context(&opts).await? else {
