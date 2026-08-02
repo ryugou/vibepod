@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 
-use crate::config;
 use crate::runtime::{ContainerConfig, ContainerStatus};
 use crate::session::SessionStore;
 
@@ -247,7 +246,18 @@ pub(super) struct RunContext {
     /// vibepod のグローバル設定ディレクトリ（通常 `~/.config/vibepod`）。
     /// 更新チェックのタイムスタンプ (`update-check.json`) の保存先として使う。
     pub(super) config_dir: std::path::PathBuf,
-    pub(super) global_config: config::GlobalConfig,
+    /// コンテナ作成・`ensure_image_available` に実際に使うイメージ名。
+    /// `profile` が `Some` のときは `image_for_profile(&global_config.image,
+    /// profile)`（`global_config` は `prepare_context` 内のローカル変数）で
+    /// 導出した profile 付きイメージ名、`None` のときは
+    /// `global_config.image` と同じ値。コンテナ作成側（`build_container_config`
+    /// の呼び出し側）はこのフィールドを使う — `global_config.image` を直接
+    /// 使うと profile が無視される。
+    pub(super) effective_image: String,
+    /// `.vibepod/config.toml` の `[run] profile`（プロジェクト優先でマージ済み、
+    /// `prepare_context` で検証済み）。`None` は profile 未指定。ラベル
+    /// （`vibepod.profile`）の生成に使う。
+    pub(super) profile: Option<String>,
     pub(super) home: std::path::PathBuf,
     pub(super) worktree_branch_name: Option<String>,
     pub(super) worktree_dir_name: Option<String>,
@@ -1764,17 +1774,26 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     // installed.
     labels.insert("vibepod.lang".to_string(), ctx.lang_names.join(","));
 
+    // profile: 未指定は空文字列で保存する（prepare.rs の 9b 比較ロジックと
+    // 同じ表現に揃える）。値が変わった場合の再作成促しは他ラベルと同一の
+    // warn_config_changes 経路に乗る。
+    labels.insert(
+        "vibepod.profile".to_string(),
+        ctx.profile.clone().unwrap_or_default(),
+    );
+
     // Label schema version. Monotonically increasing: never decrement,
     // even when features are removed (a smaller value would misidentify
     // newer containers as older ones). Previous releases used "1" (legacy
-    // single-token `vibepod.lang`), "2" (full comma-joined lang set), and
-    // "3" (added the now-removed `vibepod.template_setup_hash`). Removing
-    // the template machinery advances to "4".
+    // single-token `vibepod.lang`), "2" (full comma-joined lang set), "3"
+    // (added the now-removed `vibepod.template_setup_hash`), and "4"
+    // (removed the template machinery). Adding `vibepod.profile` advances
+    // to "5".
     //
     // Currently this value is NOT read anywhere — no code branches on it.
     // It is written and reserved for a future backward-compatibility gate
     // that may need to distinguish container schema generations.
-    labels.insert("vibepod.labels_version".to_string(), "4".to_string());
+    labels.insert("vibepod.labels_version".to_string(), "5".to_string());
 
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(

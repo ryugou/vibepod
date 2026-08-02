@@ -12,7 +12,7 @@ use super::{
 /// セットアップ失敗時はコンテナを自動削除してエラーを返す。
 async fn create_and_setup(ctx: &RunContext, opts: &RunOptions) -> Result<()> {
     let container_config =
-        build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
+        build_container_config(ctx, ctx.effective_image.clone(), opts.no_network);
     let create_args = container_config.to_create_args();
 
     let output = Command::new("docker")

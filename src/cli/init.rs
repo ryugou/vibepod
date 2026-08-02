@@ -22,20 +22,41 @@ fn host_uid_gid() -> (u32, u32) {
     }
 }
 
+/// `docker build` に渡すビルド引数を組み立てる純関数。
+///
+/// docker を呼ばずに済むよう `build_image_for` から切り出している
+/// （ユニットテストで `VIBEPOD_PROFILE` の組み立てを直接検証するため）。
+/// `profile` が `None`（未指定）のときは Dockerfile 側の
+/// `ARG VIBEPOD_PROFILE=default` と対応する `"default"` を渡す。
+fn build_args_for(uid: u32, gid: u32, profile: Option<&str>) -> HashMap<String, String> {
+    let mut build_args = HashMap::new();
+    build_args.insert("HOST_UID".to_string(), uid.to_string());
+    build_args.insert("HOST_GID".to_string(), gid.to_string());
+    build_args.insert(
+        "VIBEPOD_PROFILE".to_string(),
+        profile.unwrap_or("default").to_string(),
+    );
+    build_args
+}
+
 /// 埋め込み Dockerfile とホストの UID/GID を使って vibepod イメージを
 /// ビルドする共通処理。`vibepod init` と `vibepod run` の自動ビルドの
 /// 両方から呼ばれ、ビルド引数の組み立てを 1 箇所に集約する。
+///
+/// `profile`: `Some("swift")` のように渡すと `VIBEPOD_PROFILE` ビルド引数に
+/// そのまま反映される。`None` は `"default"` として渡す。呼び出し側で
+/// イメージ名（`image_name`）と profile の対応を取る責務を持つ
+/// （このミスマッチはビルドを壊さないが、意図しないバリアントを作る）。
 pub async fn build_image_for(
     runtime: &DockerRuntime,
     image_name: &str,
     rebuild: bool,
+    profile: Option<&str>,
 ) -> Result<()> {
     let dockerfile = include_str!("../../templates/Dockerfile");
     let (uid, gid) = host_uid_gid();
 
-    let mut build_args = HashMap::new();
-    build_args.insert("HOST_UID".to_string(), uid.to_string());
-    build_args.insert("HOST_GID".to_string(), gid.to_string());
+    let build_args = build_args_for(uid, gid, profile);
 
     runtime
         .build_image(dockerfile, image_name, build_args, rebuild)
@@ -63,6 +84,17 @@ pub fn auto_build_decision(image_exists: bool, no_auto_build: bool) -> AutoBuild
     } else {
         AutoBuildDecision::Build
     }
+}
+
+/// `init --rebuild` 時に swift バリアントイメージも再ビルドするかどうかの
+/// 純粋な判定。docker を呼ばずに済むよう `execute` から切り出している
+/// （`auto_build_decision` と同じパターン）。
+///
+/// 引数無し `vibepod init`（`rebuild = false`）では、swift イメージが
+/// 過去に作られていても再ビルドしない — 未使用の profile を勝手に
+/// ビルドし始めない現行仕様（設計書 2.5）を守るための不変条件。
+pub fn swift_rebuild_decision(rebuild: bool, swift_image_exists: bool) -> bool {
+    rebuild && swift_image_exists
 }
 
 /// 自動ビルドの同時実行を直列化するためのアドバイザリロック。
@@ -154,11 +186,16 @@ impl BuildLock {
 /// - 無く自動ビルド許可なら、ビルドロックを取って（二重ビルド防止）、待機後の
 ///   再チェックを挟んでからビルドする。進行中であることと失敗時の対処を
 ///   明示する。
+///
+/// `profile`: `image_name` が profile 付きイメージ（`image_for_profile` で
+/// 導出したもの）のときに、対応する `VIBEPOD_PROFILE` ビルド引数を渡すため
+/// の値。`image_name` と整合しない値を渡さないのは呼び出し側の責務。
 pub async fn ensure_image_available(
     runtime: &DockerRuntime,
     image_name: &str,
     config_dir: &Path,
     no_auto_build: bool,
+    profile: Option<&str>,
 ) -> Result<()> {
     let exists = runtime.image_exists(image_name).await?;
     match auto_build_decision(exists, no_auto_build) {
@@ -191,7 +228,7 @@ pub async fn ensure_image_available(
             );
             println!();
 
-            build_image_for(runtime, image_name, false)
+            build_image_for(runtime, image_name, false, profile)
                 .await
                 .with_context(|| {
                     format!(
@@ -235,7 +272,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
         println!("\n  Building Docker image: {}...", image_name);
     }
 
-    match build_image_for(&runtime, &image_name, rebuild).await {
+    match build_image_for(&runtime, &image_name, rebuild, None).await {
         Ok(_) => {}
         Err(e) => {
             eprintln!("\n  ✗ Build failed: {}", e);
@@ -243,6 +280,49 @@ pub async fn execute(rebuild: bool) -> Result<()> {
             if !rebuild {
                 eprintln!("    If the build succeeded but the image is stale, run `vibepod init --rebuild`.");
             }
+            return Err(e);
+        }
+    }
+
+    // 3b. `--rebuild` のときだけ、既に docker 上にある swift バリアントイメージも
+    //     同じ引数（rebuild=true, profile="swift"）で再ビルドする。存在しない
+    //     場合は何もしない（未使用の profile を勝手にビルドし始めない）。
+    //     `vibepod init`（rebuild なし）では default イメージのみをビルドする
+    //     現行仕様を変えない（`swift_rebuild_decision` が守る不変条件）。
+    //
+    //     `image_exists` の確認自体は付随処理として扱う: default イメージの
+    //     ビルドは既にここまでで成功しているため、確認が docker daemon 不調・
+    //     権限エラー等（`Err`。イメージ未存在は `Ok(false)`）で失敗しても
+    //     致命的にはしない。ここで異常終了すると、後段のコンテナ削除・
+    //     `save_global_config` に到達できず、真因が伝わらないまま
+    //     `~/.config/vibepod/config.toml` が更新されず後続の `vibepod run` が
+    //     「Config not found」で失敗する — ユーザーからは無関係に見える。
+    let swift_image_name = config::image_for_profile(&image_name, "swift");
+    let swift_image_exists = if rebuild {
+        match runtime.image_exists(&swift_image_name).await {
+            Ok(exists) => exists,
+            Err(e) => {
+                eprintln!(
+                    "  Warning: could not check whether the swift variant image '{}' exists: {}. \
+                     Skipping the swift variant rebuild check (the default image was already \
+                     rebuilt successfully). Run `vibepod init --rebuild` again to retry.",
+                    swift_image_name, e
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if swift_rebuild_decision(rebuild, swift_image_exists) {
+        println!(
+            "\n  Rebuilding Docker image from scratch: {} (--pull --no-cache)...",
+            swift_image_name
+        );
+        if let Err(e) = build_image_for(&runtime, &swift_image_name, true, Some("swift")).await {
+            eprintln!("\n  ✗ Build failed: {}", e);
+            eprintln!("    Check your network connection and try `vibepod init --rebuild` again.");
             return Err(e);
         }
     }
@@ -302,4 +382,32 @@ pub async fn execute(rebuild: bool) -> Result<()> {
     println!("\n  Done! Run `vibepod run` in any git repo to start.\n");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // テスト計画 第5節 項目4: `build_image_for` 相当のビルド引数組み立てに
+    // `VIBEPOD_PROFILE` が含まれることの検証。docker を実際に呼ばずに済むよう
+    // `build_image_for` から切り出した純関数 `build_args_for` を直接検証する。
+
+    #[test]
+    fn build_args_include_host_uid_and_gid() {
+        let args = build_args_for(1000, 1000, None);
+        assert_eq!(args.get("HOST_UID"), Some(&"1000".to_string()));
+        assert_eq!(args.get("HOST_GID"), Some(&"1000".to_string()));
+    }
+
+    #[test]
+    fn build_args_default_profile_when_none() {
+        let args = build_args_for(1000, 1000, None);
+        assert_eq!(args.get("VIBEPOD_PROFILE"), Some(&"default".to_string()));
+    }
+
+    #[test]
+    fn build_args_swift_profile_when_specified() {
+        let args = build_args_for(1000, 1000, Some("swift"));
+        assert_eq!(args.get("VIBEPOD_PROFILE"), Some(&"swift".to_string()));
+    }
 }
