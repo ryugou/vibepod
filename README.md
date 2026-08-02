@@ -345,6 +345,25 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 | `pyproject.toml` / `requirements.txt` | Python |
 | `pom.xml` / `build.gradle` | Java |
 
+#### Swift profile
+
+Set `profile = "swift"` in the `[run]` section of `.vibepod/config.toml` to use an image variant with the Swift toolchain and SwiftLint pre-installed:
+
+```toml
+[run]
+profile = "swift"
+```
+
+This is configuration-file-only — there is no `--profile` CLI flag. `"swift"` is the only valid value; any other value makes `vibepod run` fail at startup. Like the default image, the swift-profile image is auto-built on the first `vibepod run` that needs it (see "Image auto-build" above).
+
+**Version and updates.** The image pins Swift 6.3.3 and SwiftLint 0.65.0. To upgrade, bump the corresponding `ARG` versions in `templates/Dockerfile`, add the new release's SHA256 checksums to the tables there, then rebuild with `vibepod init --rebuild` (the same pin-then-rebuild pattern used for the `codex` CLI — see above). Keep your host's SwiftLint version aligned with the container's (0.65.0): a mismatch changes which lint rules fire, so lint results won't agree between host and container.
+
+**Constraints.** Only Foundation-only, pure SwiftPM packages build and run on Linux. Apple frameworks (UIKit, Vision, Core Image, StoreKit, etc.), `xcodebuild`, and the simulators are not available. Linux's corelibs-foundation differs from Darwin's Foundation in behavior details, so a green run inside the container does not substitute for verification on macOS (host or CI).
+
+**Cache.** SwiftPM's caches (`~/.swiftpm`, `~/.cache/org.swift.swiftpm`, and the module cache) live under the container's home directory, so — like other language toolchains — they persist across `vibepod run` invocations in the default (non-disposable) container. `--worktree` runs use a disposable container and do not retain the cache. The only build artifact left in your workspace is SwiftPM's own `.build/`.
+
+**Network.** Package resolution needs outbound HTTPS. The default container already allows this, so no extra configuration is required — but combining `--no-network` with `profile = "swift"` will cause package resolution to fail.
+
 ## Roadmap
 
 VibePod is heading to **v2.0**, where it will be reorganized into a clear pair:
