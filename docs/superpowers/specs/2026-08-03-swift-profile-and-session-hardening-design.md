@@ -45,7 +45,12 @@ profile 指定時のイメージ名は、グローバル設定 `image` の名前
 
 ```dockerfile
 ARG VIBEPOD_PROFILE=default
-FROM debian:bookworm-slim AS base
+
+# distro エイリアス（2.3.1 参照）
+FROM debian:bookworm-slim AS distro-default
+FROM debian:trixie-slim AS distro-swift
+
+FROM distro-${VIBEPOD_PROFILE} AS base
 # （現行の全内容: apt, gh, vibepod ユーザー, claude, codex, USER vibepod, WORKDIR, CMD）
 
 FROM base AS profile-default
@@ -58,15 +63,28 @@ USER vibepod
 FROM profile-${VIBEPOD_PROFILE}
 ```
 
-- `base` ステージの命令列は現行 Dockerfile と同一に保ち、default イメージのレイヤーキャッシュ・サイズを変えない。
+- `base` ステージの命令列自体は現行 Dockerfile と同一に保ち、default イメージのレイヤー内容・サイズを変えない（ベースディストリのみ 2.3.1 の理由で profile ごとに切り替える）。
 - `build_image_for()`（`src/cli/init.rs`）へ profile 引数を追加し、build args に `VIBEPOD_PROFILE` を渡す。
+
+#### 2.3.1 ベースディストリの決定（bookworm / trixie）
+
+実装当初は `base` を一律 `debian:bookworm-slim` とする設計だったが、実ビルド検証で Critical 欠陥が判明したため、profile ごとに distro を切り替える方式に変更した。
+
+- **事実**: SwiftLint 0.65.0 公式 Linux バイナリ（`swiftlint_linux_*.zip`）は `GLIBC_2.38` / `GLIBCXX_3.4.32` を要求する。`debian:bookworm-slim` は glibc 2.36・GCC12 系 libstdc++（`GLIBCXX` ≤ 3.4.30）までしか持たず、Dockerfile 末尾のスモークチェック `RUN swift --version && swiftlint version` が必ずリンクエラーで失敗する（実測済み）。
+- **決定**: `profile = "swift"` のときのみベースを `debian:trixie-slim`（glibc 2.41）に変更する。`profile` 未指定（default）は `debian:bookworm-slim` のまま変更しない — 非 Swift プロジェクトのイメージ・起動時間に影響を与えない要件（1章 要件1）を満たすため。
+- **Swift toolchain tarball**: swift.org は本設計時点（2026-08）で Debian 13(trixie) 向けネイティブ tarball を配布していない（`swift-${SWIFT_VERSION}-RELEASE-debian13*.tar.gz` は 404）。そのため 2.4 の Swift toolchain は引き続き debian12 向け tarball を使う。glibc は後方互換があるため trixie 上でも動作するが、この「動作する」は以下の範囲でのみ実測確認済みであり、それ以上を保証するものではない: `swift --version` 成功、Foundation-only フィクスチャの `swift test` 完走、`swiftlint lint --strict` のホスト同一判定。
+- **既知の制約（未検証範囲）**: debian12 版 Swift toolchain の `lldb` は `libpython3.11.so.1.0` に SONAME 固定でリンクしており、trixie は python3.13 のみで `libpython3.11` パッケージ自体が存在しないため、コンテナ内で `lldb` / `swift repl` は dynamic linker エラーで起動しない。`swift build` / `swift test` / `swiftc` / `swiftlint` には影響しない（README の Constraints にも記載）。
+- **教訓（次回 SWIFT_VERSION / distro bump 時の判断材料）**: 「glibc 後方互換だから動く」は可搬性の必要条件であって十分条件ではない。`lldb` のように distro 固有パッケージ（`libpython3.<minor>`）への versioned SONAME 依存を持つバイナリは、glibc が後方互換でも別の壁で壊れる。distro を跨いだ動作確認は「起動する」だけでなく「pin しているバイナリが依存する共有ライブラリの SONAME が対象 distro に存在するか」まで機能単位で確認すること。
+- **副作用**: trixie には `libstdc++-12-dev` パッケージが存在しない（gcc-12 系リポジトリが無い）ため、2.4 の実行時依存パッケージリストは `libstdc++-14-dev` に読み替える。apt install の成功を実測済み。
+- **実装**: `ARG VIBEPOD_PROFILE` の値（`default` / `swift`）をそのまま distro エイリアスのステージ名サフィックスに使う（`FROM distro-${VIBEPOD_PROFILE} AS base`）。
 
 ### 2.4 Swift レイヤーの内容
 
 すべて codex CLI と同じ「バージョン pin + アーキ別 SHA256 テーブル + ダウンロード後検証」方式とする。`latest` エスケープハッチは設けない。更新はバージョン ARG の bump と SHA256 テーブルへの追記の後、`vibepod init --rebuild`（手順を README に記載）。
 
-1. 実行時依存パッケージ（公式 swiftlang/swift-docker `6.3/debian/12` と同一 + zip 展開用 unzip）:
-   `binutils libicu-dev libcurl4-openssl-dev libedit-dev libsqlite3-dev libncurses-dev libpython3-dev libxml2-dev pkg-config uuid-dev tzdata git gcc libstdc++-12-dev unzip`
+1. 実行時依存パッケージ（公式 swiftlang/swift-docker `6.3/debian/12` と同一 + zip 展開用 unzip。
+   ただし trixie には `libstdc++-12-dev` が存在しないため `libstdc++-14-dev` に読み替え — 2.3.1 参照）:
+   `binutils libicu-dev libcurl4-openssl-dev libedit-dev libsqlite3-dev libncurses-dev libpython3-dev libxml2-dev pkg-config uuid-dev tzdata git gcc libstdc++-14-dev unzip`
 2. Swift toolchain（`ARG SWIFT_VERSION=6.3.3`。ホスト Xcode 26.6 / Swift 6.3.3 とバージョン一致）:
    - URL: `https://download.swift.org/swift-${SWIFT_VERSION}-release/debian12${suffix}/swift-${SWIFT_VERSION}-RELEASE/swift-${SWIFT_VERSION}-RELEASE-debian12${suffix}.tar.gz`
      - `suffix`: amd64 → 空、arm64 → `-aarch64`

@@ -1,6 +1,16 @@
 ARG VIBEPOD_PROFILE=default
 
-FROM debian:bookworm-slim AS base
+# distro エイリアス: profile ごとにベースディストリを切り替える。default は
+# 非 Swift プロジェクトへ影響を与えないため bookworm のまま。swift は
+# trixie — SwiftLint 0.65.0 公式バイナリが要求する GLIBC_2.38/GLIBCXX_3.4.32
+# を bookworm が満たさないため。Swift toolchain 本体は debian13 tarball が
+# 無いため引き続き debian12 向けを使う。既知の制約: lldb / swift repl は
+# libpython3.11 非搭載のため動作しない。実測範囲・判断根拠の正本は spec
+# 2.3.1（docs/superpowers/specs/2026-08-03-swift-profile-and-session-hardening-design.md）。
+FROM debian:bookworm-slim AS distro-default
+FROM debian:trixie-slim AS distro-swift
+
+FROM distro-${VIBEPOD_PROFILE} AS base
 
 ARG HOST_UID=501
 ARG HOST_GID=20
@@ -86,13 +96,15 @@ FROM base AS profile-default
 FROM base AS profile-swift
 USER root
 
-# Swift 実行時依存パッケージ(公式 swiftlang/swift-docker 6.3/debian/12 と同一 +
-# zip 展開用の unzip)。base で git 等は導入済みだが、apt-get install は冪等
-# なのでこのパッケージリストをそのまま実行する。
+# Swift 実行時依存パッケージ(公式 swiftlang/swift-docker 6.3/debian/12 と同一。
+# ただし trixie には gcc-12 系(libstdc++-12-dev)が存在しないため、
+# libstdc++-14-dev に読み替えている + zip 展開用の unzip)。base で git 等は
+# 導入済みだが、apt-get install は冪等なのでこのパッケージリストをそのまま
+# 実行する。
 RUN apt-get update && apt-get install -y --no-install-recommends \
   binutils libicu-dev libcurl4-openssl-dev libedit-dev libsqlite3-dev \
   libncurses-dev libpython3-dev libxml2-dev pkg-config uuid-dev tzdata git gcc \
-  libstdc++-12-dev unzip \
+  libstdc++-14-dev unzip \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Swift toolchain(アーキ別 SHA256 検証必須。codex CLI と同じバージョン pin
