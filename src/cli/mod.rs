@@ -43,6 +43,13 @@ pub enum Commands {
         /// Initial prompt for the agent (fire-and-forget mode)
         #[arg(long)]
         prompt: Option<String>,
+        /// Read the initial prompt from a file instead of the command line
+        /// (fire-and-forget mode). The file content is passed through
+        /// unmodified (not trimmed), bypassing host shell interpretation of
+        /// special characters (`<`, `{`, backticks, `$`, ...). Mutually
+        /// exclusive with `--prompt`.
+        #[arg(long, conflicts_with = "prompt")]
+        prompt_file: Option<String>,
         /// Disable network access in the container
         #[arg(long)]
         no_network: bool,
@@ -86,7 +93,10 @@ pub enum Commands {
         /// Wall-clock limit for a `--prompt` session. Accepts bare seconds
         /// (e.g. `1800`) or a duration (`30m`, `1h30m`). `0` disables the
         /// limit. Defaults to 30 minutes when omitted. On timeout the
-        /// container is cleaned up and the run exits non-zero.
+        /// container-side agent is stopped and the run exits non-zero;
+        /// workspace changes made by the agent (commits and uncommitted
+        /// edits alike) are left in place, not reset. Use `vibepod restore`
+        /// to revert them manually.
         #[arg(long)]
         timeout: Option<String>,
         /// Stream Claude Code's per-event activity to stdout during a

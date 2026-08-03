@@ -28,6 +28,25 @@ fn test_parse_run_with_prompt() {
 }
 
 #[test]
+fn test_parse_run_with_prompt_file() {
+    let cli = Cli::parse_from(["vibepod", "run", "--prompt-file", "prompt.txt"]);
+    if let vibepod::cli::Commands::Run { prompt_file, .. } = cli.command {
+        assert_eq!(prompt_file, Some("prompt.txt".to_string()));
+    } else {
+        panic!("Expected Run command");
+    }
+}
+
+#[test]
+fn test_prompt_and_prompt_file_are_mutually_exclusive() {
+    let result = Cli::try_parse_from(["vibepod", "run", "--prompt", "x", "--prompt-file", "y"]);
+    assert!(
+        result.is_err(),
+        "--prompt and --prompt-file must be mutually exclusive at the clap level"
+    );
+}
+
+#[test]
 fn test_parse_run_with_env() {
     let cli = Cli::parse_from([
         "vibepod",

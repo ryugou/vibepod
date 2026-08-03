@@ -12,7 +12,7 @@ use super::{
 /// セットアップ失敗時はコンテナを自動削除してエラーを返す。
 async fn create_and_setup(ctx: &RunContext, opts: &RunOptions) -> Result<()> {
     let container_config =
-        build_container_config(ctx, ctx.global_config.image.clone(), opts.no_network);
+        build_container_config(ctx, ctx.effective_image.clone(), opts.no_network);
     let create_args = container_config.to_create_args();
 
     let output = Command::new("docker")
@@ -225,10 +225,6 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     let reader = tokio::io::BufReader::new(stdout);
     let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
 
-    // タイムアウトリセット用: セッション開始前のダーティ状態を記録
-    let was_dirty_before =
-        crate::git::has_uncommitted_changes(std::path::Path::new(&ctx.effective_workspace));
-
     // ストリーム途絶監視用の共有状態
     let last_event_at = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let idle_timeout_secs = ctx.prompt_idle_timeout;
@@ -407,68 +403,22 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         println!("{}", separator);
     }
 
-    // タイムアウト時の自動リセット
+    // タイムアウト時は workspace を一切変更しない（要件2: 設計書 第3節）。
+    // エージェントのコミット・未コミット変更・未追跡ファイルはそのまま残し、
+    // セッションも restored 扱いにしない（`vibepod restore` による手動復元の
+    // 対象として残す）。ここでは中断理由・上限値・ログパスから組み立てた
+    // stderr メッセージを出すのみで、git コマンドは一切呼ばない。
     if was_timed_out {
-        let workspace_path = std::path::Path::new(&ctx.effective_workspace);
-        // uncommitted changes だけでなく、コミットが進んでいるかも確認
-        // （エージェントが commit した後にタイムアウトするケース）
-        let current_head = crate::git::get_head_hash(workspace_path).unwrap_or_default();
-        let head_advanced = current_head != ctx.deferred_session.head_before;
-
-        if head_advanced && was_dirty_before {
-            // コミットは進んでいるが開始前から dirty: --mixed で HEAD だけ戻し、
-            // working tree はそのまま保持（ユーザーの事前変更を消さない）
-            std::process::Command::new("git")
-                .args(["reset", "--mixed", &ctx.deferred_session.head_before])
-                .current_dir(workspace_path)
-                .output()
-                .ok();
-        } else if head_advanced {
-            // コミットが進んでいて開始前はクリーン: --hard で完全復元
-            crate::git::reset_hard(workspace_path, &ctx.deferred_session.head_before)?;
-            crate::git::clean_fd(workspace_path)?;
-        } else if !was_dirty_before {
-            // HEAD は同じだが開始前クリーン: uncommitted changes を --hard で消す
-            crate::git::reset_hard(workspace_path, &ctx.deferred_session.head_before)?;
-            crate::git::clean_fd(workspace_path)?;
-        }
-        // was_dirty_before && !head_advanced: 開始前から dirty で HEAD 変更なし
-        // → ユーザーの変更とエージェントの変更が混在。リセットしない（警告���み）
-        ctx.store.mark_restored(&ctx.deferred_session.id)?;
-
-        // idle（ストリーム無出力）と overall（実時間上限）で理由と秒数を出し分ける。
-        let (limit_secs, kind_label) = if overall_timed_out {
-            (overall_timeout_secs, "実時間が")
-        } else {
-            (idle_timeout_secs, "ストリーム無出力が")
-        };
-        let timeout_display = if limit_secs >= 60 {
-            format!("{} 分", limit_secs / 60)
-        } else {
-            format!("{} 秒", limit_secs)
-        };
         eprintln!();
         eprintln!(
-            "⚠ {}{} を超えたため、セッションを中断しました。",
-            kind_label, timeout_display
+            "{}",
+            super::render_timeout_message(
+                overall_timed_out,
+                idle_timeout_secs,
+                overall_timeout_secs,
+                log_path.as_deref(),
+            )
         );
-        if let Some(ref p) = log_path {
-            eprintln!("  ログ: {}", p.display());
-        }
-        if head_advanced || !was_dirty_before {
-            eprintln!(
-                "  作業ディレクトリを {} にリセットしました。",
-                &ctx.deferred_session.head_before[..8.min(ctx.deferred_session.head_before.len())]
-            );
-        }
-        if was_dirty_before {
-            eprintln!(
-                "  注意: セッション開始前に未コミットの変更がありました。エージェントの変更と混在している可能性があります。"
-            );
-            eprintln!(
-                "  未追跡ファイルが残っている可能性があります。`git status` で確認してください。"
-            );
-        }
     }
 
     // codex ステージ→store の同期は liveness に関わらず JSON 完全性検証付きで
@@ -559,18 +509,14 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
 
     // タイムアウトは「中途半端な成功」にしない: 後始末を終えたうえで非ゼロ終了
     // させ、呼び出し元（別 Claude セッション等）が失敗として扱えるようにする。
-    // 詳細なリセット情報は上で stderr に出力済み。ここでは簡潔な理由と logs.txt
-    // のパスを添えて返す。
+    // workspace 保全に関する詳細な案内は上で stderr に出力済み。ここでは簡潔な
+    // 理由と logs.txt のパスを添えて返す。
     if was_timed_out {
         let logs_hint = log_path
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "N/A".to_string());
-        let reason = if overall_timed_out {
-            "実時間上限"
-        } else {
-            "ストリーム無出力"
-        };
+        let reason = super::timeout_kind_label(overall_timed_out);
         anyhow::bail!(
             "セッションをタイムアウトで打ち切りました（{}）。ログ: {}",
             reason,

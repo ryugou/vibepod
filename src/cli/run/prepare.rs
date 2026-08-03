@@ -99,6 +99,7 @@ fn warn_config_changes(
 
     for key in &[
         "vibepod.lang",
+        "vibepod.profile",
         "vibepod.network",
         "vibepod.mounts",
         "vibepod.env_hash",
@@ -168,6 +169,24 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // コンテナ名ハッシュの元になるため、パス表記の違いで異なるコンテナが作られないよう正規化する
     let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
     let cwd_str = cwd_canonical.to_string_lossy().to_string();
+
+    // Load vibepod project config and validate `profile` before any
+    // repository-mutating side effect (in particular `--worktree`'s
+    // `git worktree add` + branch creation below). Both calls depend only
+    // on `cwd`, which is already resolved above. Validating here — rather
+    // than after worktree creation — keeps the existing fail-fast contract
+    // (same as the `--timeout` check above, which runs before any Docker
+    // work): an invalid `profile` in `.vibepod/config.toml` must abort
+    // before we create a worktree/branch, otherwise a `git worktree add`
+    // failure path leaves an orphaned worktree directory and branch behind
+    // that require manual `git worktree remove` + `git branch -D` cleanup.
+    let config_dir = config::default_config_dir()?;
+    let vibepod_config = config::VibepodConfig::load(&cwd, &config_dir)?;
+
+    // Profile: 設定ファイル専用（CLI フラグなし）。無効値は起動前に fail-fast
+    // させ、有効な選択肢をメッセージに含める（設計書 2.1）。
+    let effective_profile = vibepod_config.profile();
+    config::validate_profile(&effective_profile)?;
 
     if opts.worktree && opts.prompt.is_none() {
         bail!("--worktree requires --prompt");
@@ -304,9 +323,18 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         (cwd_str.clone(), None, None)
     };
 
-    // Load vibepod project config
-    let config_dir = config::default_config_dir()?;
-    let vibepod_config = config::VibepodConfig::load(&cwd, &config_dir)?;
+    // profile 未指定かつ workspace 直下に Package.swift があるプロジェクトへ、
+    // profile 設定を促す 1 行の注意を出す。実行は継続する（設計書 2.5 手順4）。
+    if effective_profile.is_none()
+        && std::path::Path::new(&effective_workspace)
+            .join("Package.swift")
+            .is_file()
+    {
+        eprintln!(
+            "Note: Detected Package.swift but no `profile` is set. Add `profile = \"swift\"` \
+             under [run] in .vibepod/config.toml to use the Swift toolchain image."
+        );
+    }
 
     // Language detection: `--lang` > project/global config `lang` > cwd
     // auto-detect. The selected languages drive the in-container setup
@@ -353,6 +381,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // 2. Load global config (config_dir already loaded at the top).
     let global_config = config::load_global_config(&config_dir)?;
 
+    // profile 未指定時は現行どおり global_config.image をそのまま使う
+    // （設計書 2.5 手順2）。
+    let effective_image = match effective_profile.as_deref() {
+        Some(profile) => config::image_for_profile(&global_config.image, profile),
+        None => global_config.image.clone(),
+    };
+
     // 3. Check Docker & image
     let runtime = DockerRuntime::new()
         .await
@@ -363,9 +398,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // 二重ビルドはビルドロックで直列化する（ensure_image_available 内）。
     crate::cli::init::ensure_image_available(
         &runtime,
-        &global_config.image,
+        &effective_image,
         &config_dir,
         opts.no_auto_build,
+        effective_profile.as_deref(),
     )
     .await?;
 
@@ -587,6 +623,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         );
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
+        current_labels.insert(
+            "vibepod.profile".to_string(),
+            effective_profile.clone().unwrap_or_default(),
+        );
         current_labels.insert("vibepod.env_hash".to_string(), current_env_hash);
 
         warn_config_changes(&stored_labels, &current_labels)?;
@@ -688,7 +728,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         codex_dir,
         runtime_dir,
         config_dir,
-        global_config,
+        effective_image,
+        profile: effective_profile,
         home,
         worktree_branch_name,
         worktree_dir_name,

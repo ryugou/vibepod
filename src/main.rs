@@ -21,6 +21,7 @@ async fn main() -> Result<()> {
         Commands::Run {
             resume,
             prompt,
+            prompt_file,
             no_network,
             env,
             env_file,
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
             vibepod::cli::run::execute(vibepod::cli::run::RunOptions {
                 resume,
                 prompt,
+                prompt_file,
                 no_network,
                 env_vars: env,
                 env_file,

@@ -10,6 +10,7 @@ fn base_opts() -> RunOptions {
     RunOptions {
         resume: false,
         prompt: Some("do the thing".to_string()),
+        prompt_file: None,
         no_network: false,
         env_vars: vec![],
         env_file: None,

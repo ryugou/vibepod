@@ -19,8 +19,9 @@
 //! They intentionally avoid pinning to the exact shell formatting so minor
 //! rewording/reflow of the `RUN` block doesn't make this test brittle.
 
-use std::fs;
-use std::path::PathBuf;
+mod common;
+
+use common::read_dockerfile;
 
 /// SHA256 for `codex-aarch64-unknown-linux-musl.tar.gz` at `rust-v0.145.0`,
 /// verified out-of-band (round C2) via `gh release view` + a real download.
@@ -29,11 +30,6 @@ const AARCH64_SHA256: &str = "d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb225
 /// SHA256 for `codex-x86_64-unknown-linux-musl.tar.gz` at `rust-v0.145.0`,
 /// verified out-of-band (round C2) via `gh release view` + a real download.
 const X86_64_SHA256: &str = "bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a";
-
-fn read_dockerfile() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/Dockerfile");
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
-}
 
 #[test]
 fn codex_version_defaults_to_a_pinned_release() {

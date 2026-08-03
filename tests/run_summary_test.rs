@@ -1,6 +1,8 @@
 //! `--timeout` パースと `--prompt` 実行後の要約レンダリング（純関数）の検証。
 
-use vibepod::cli::run::{parse_timeout_secs, render_run_summary, DEFAULT_OVERALL_TIMEOUT_SECS};
+use vibepod::cli::run::{
+    parse_timeout_secs, render_run_summary, render_timeout_message, DEFAULT_OVERALL_TIMEOUT_SECS,
+};
 use vibepod::git::ChangedFiles;
 
 /// Shorthand: a successfully-computed changed-file list.
@@ -157,4 +159,94 @@ fn summary_always_includes_logs_path() {
         "got: {}",
         out
     );
+}
+
+// --- render_timeout_message ---
+//
+// 要件2（設計書 第3節）: タイムアウト時は workspace を一切変更しない。この
+// 関数は純関数であり git コマンドを一切呼ばないため、呼び出すだけで
+// 「git 操作を行わない」ことを構造的に保証できる。ここでは組み立てられる
+// 文言が期待する内容（git status / git log / vibepod restore への言及）を
+// 含むことを検証する。
+
+#[test]
+fn timeout_message_mentions_recovery_steps_not_reset() {
+    let out = render_timeout_message(
+        false,
+        900,
+        1800,
+        Some(std::path::Path::new("/tmp/logs.txt")),
+    );
+    assert!(
+        out.contains("git status"),
+        "must tell the operator how to inspect the workspace: {}",
+        out
+    );
+    assert!(
+        out.contains("git log"),
+        "must tell the operator how to inspect commits: {}",
+        out
+    );
+    assert!(
+        out.contains("vibepod restore"),
+        "must point to the manual recovery command: {}",
+        out
+    );
+    assert!(
+        !out.contains("reset"),
+        "must not claim an automatic reset happened: {}",
+        out
+    );
+}
+
+#[test]
+fn timeout_message_idle_uses_idle_limit() {
+    let out = render_timeout_message(false, 300, 1800, None);
+    assert!(
+        out.contains("ストリーム無出力"),
+        "idle timeout should be labeled as such: {}",
+        out
+    );
+    assert!(
+        out.contains("5 分"),
+        "300s idle limit should read as 5 分: {}",
+        out
+    );
+}
+
+#[test]
+fn timeout_message_overall_uses_overall_limit() {
+    let out = render_timeout_message(true, 300, 1800, None);
+    assert!(
+        out.contains("実時間"),
+        "overall timeout should be labeled as such: {}",
+        out
+    );
+    assert!(
+        out.contains("30 分"),
+        "1800s overall limit should read as 30 分: {}",
+        out
+    );
+}
+
+#[test]
+fn timeout_message_includes_log_path_when_present() {
+    let out = render_timeout_message(true, 300, 60, Some(std::path::Path::new("/w/logs.txt")));
+    assert!(out.contains("/w/logs.txt"), "got: {}", out);
+}
+
+#[test]
+fn timeout_message_omits_log_path_when_absent() {
+    let out = render_timeout_message(true, 300, 60, None);
+    assert!(
+        !out.contains("ログ:"),
+        "no log line should be printed when no path is available: {}",
+        out
+    );
+}
+
+#[test]
+fn timeout_message_under_a_minute_uses_seconds() {
+    let out = render_timeout_message(true, 300, 45, None);
+    assert!(out.contains("45 秒"), "got: {}", out);
 }

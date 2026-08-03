@@ -123,6 +123,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 |--------|-------------|
 | *(none)* | **Interactive mode** — opens a Claude Code session inside the container |
 | `--prompt "..."` | Fire-and-forget mode — agent runs autonomously and exits when done |
+| `--prompt-file <path>` | Same as `--prompt`, but reads the prompt from a file. The content is passed through unmodified, bypassing host shell interpretation of special characters (`<`, `{`, backticks, `$`, ...). Mutually exclusive with `--prompt` |
 | `--resume` | Continue from the previous session (fire-and-forget) |
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
@@ -135,7 +136,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-update` | Skip the container's Claude Code update check entirely |
 | `--model <name>` | Pass `--model <name>` straight through to Claude Code inside the container. Not validated by VibePod — Claude Code decides if it is valid. Works in both interactive and `--prompt` mode. Omit to use Claude Code's own default |
 | `--no-auto-build` | Do not build the Docker image on demand when it is missing. By default `vibepod run` auto-builds it; pass this to fail fast and be told to run `vibepod init` instead |
-| `--timeout <dur>` | Wall-clock limit for a `--prompt` session. Accepts bare seconds (`1800`) or a duration (`30m`, `1h30m`); `0` disables it. Defaults to **30 minutes**. On timeout the container-side agent is stopped, the workspace is restored, and the run exits non-zero |
+| `--timeout <dur>` | Wall-clock limit for a `--prompt` session. Accepts bare seconds (`1800`) or a duration (`30m`, `1h30m`); `0` disables it. Defaults to **30 minutes**. On timeout the container-side agent is stopped and the run exits non-zero; workspace changes (commits and uncommitted edits alike) are left in place, not reset — use `vibepod restore` to revert them manually |
 | `--verbose` | Stream Claude Code's per-event activity to stdout during `--prompt` (pre-1.7 behavior). By default only a concise end-of-run summary is printed |
 
 **Image auto-build.** The first `vibepod run` in an environment where the image is missing builds it automatically (a few minutes) instead of erroring, so you can call `vibepod run` from another session without running `vibepod init` first. Concurrent runs are serialized by a build lock so the image is built once. Use `--no-auto-build` to opt out.
@@ -330,7 +331,7 @@ Pass `--verbose` to stream Claude Code's per-event activity live instead (the pr
 ────────────────────────────────────────────────────────
 ```
 
-If a `--prompt` run exceeds its `--timeout` (default 30 minutes), VibePod stops the container-side agent, restores the workspace to the session's starting commit, prints the `logs.txt` path, and exits non-zero — a timeout is never reported as success.
+If a `--prompt` run exceeds its `--timeout` (default 30 minutes), VibePod stops the container-side agent, prints the `logs.txt` path, and exits non-zero — a timeout is never reported as success. The workspace is **not** reset: any commits and uncommitted edits the agent made are left in place so you can inspect them with `git status` / `git log`. Run `vibepod restore` if you want to revert to the session's starting commit.
 
 #### Language toolchain auto-detection
 
@@ -343,6 +344,27 @@ When `--lang` is not specified, VibePod auto-detects the language from project f
 | `go.mod` | Go |
 | `pyproject.toml` / `requirements.txt` | Python |
 | `pom.xml` / `build.gradle` | Java |
+
+#### Swift profile
+
+Set `profile = "swift"` in the `[run]` section of `.vibepod/config.toml` to use an image variant with the Swift toolchain and SwiftLint pre-installed:
+
+```toml
+[run]
+profile = "swift"
+```
+
+This is configuration-file-only — there is no `--profile` CLI flag. `"swift"` is the only valid value; any other value makes `vibepod run` fail at startup. Like the default image, the swift-profile image is auto-built on the first `vibepod run` that needs it (see "Image auto-build" above).
+
+**Base image.** The swift-profile image is built on Debian 13 (trixie), not Debian 12 (bookworm) like the default image. This is required because SwiftLint's official Linux binary needs a glibc/libstdc++ newer than what bookworm ships (bookworm's `swiftlint version` fails to even start). The Swift toolchain itself still uses the Debian 12 tarball from swift.org (no Debian 13 build is published), which runs on trixie thanks to glibc's backward compatibility (see **Constraints** below for the `lldb` / `swift repl` exception). The default (non-Swift) image is unaffected and stays on Debian 12.
+
+**Version and updates.** The image pins Swift 6.3.3 and SwiftLint 0.65.0. To upgrade, bump the corresponding `ARG` versions in `templates/Dockerfile`, add the new release's SHA256 checksums to the tables there, then rebuild with `vibepod init --rebuild` (the same pin-then-rebuild pattern used for the `codex` CLI — see above). Keep your host's SwiftLint version aligned with the container's (0.65.0): a mismatch changes which lint rules fire, so lint results won't agree between host and container.
+
+**Constraints.** Only Foundation-only, pure SwiftPM packages build and run on Linux. Apple frameworks (UIKit, Vision, Core Image, StoreKit, etc.), `xcodebuild`, and the simulators are not available. Linux's corelibs-foundation differs from Darwin's Foundation in behavior details, so a green run inside the container does not substitute for verification on macOS (host or CI). `lldb` and `swift repl` are unavailable in the container (the debian12 Swift toolchain links `libpython3.11`, which Debian 13 does not ship). `swift build` / `swift test` / `swiftc` / `swiftlint` are unaffected.
+
+**Cache.** SwiftPM's caches (`~/.swiftpm`, `~/.cache/org.swift.swiftpm`, and the module cache) live under the container's home directory, so — like other language toolchains — they persist across `vibepod run` invocations in the default (non-disposable) container. `--worktree` runs use a disposable container and do not retain the cache. The only build artifact left in your workspace is SwiftPM's own `.build/`.
+
+**Network.** Package resolution needs outbound HTTPS. The default container already allows this, so no extra configuration is required — but combining `--no-network` with `profile = "swift"` will cause package resolution to fail.
 
 ## Roadmap
 

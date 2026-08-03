@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 
-use crate::config;
 use crate::runtime::{ContainerConfig, ContainerStatus};
 use crate::session::SessionStore;
 
@@ -41,6 +40,12 @@ pub enum ContainerLiveness {
 pub struct RunOptions {
     pub resume: bool,
     pub prompt: Option<String>,
+    /// `--prompt-file <path>`: プロンプトをファイルから読み込む。`--prompt` と
+    /// clap レベルで排他（`conflicts_with = "prompt"`）。`execute()` の冒頭で
+    /// `resolve_prompt_file` により読み込まれ、無加工のまま `prompt` へ格納
+    /// される。以降の全経路は `--prompt` と完全に同一のため、この field を
+    /// 直接参照するコードは `execute()` 以外に存在しない。
+    pub prompt_file: Option<String>,
     pub no_network: bool,
     pub env_vars: Vec<String>,
     pub env_file: Option<String>,
@@ -155,6 +160,61 @@ pub fn render_run_summary(
     out
 }
 
+/// タイムアウト種別（idle / overall）の日本語ラベルを一箇所で定義する。
+/// `render_timeout_message` と、タイムアウト時に `prompt.rs` が最終的に返す
+/// `anyhow::bail!` のエラー理由の両方がこれを参照することで、表示文言が
+/// 食い違う（片方だけ更新し忘れる）事故を防ぐ。
+pub fn timeout_kind_label(overall_timed_out: bool) -> &'static str {
+    if overall_timed_out {
+        "実時間上限"
+    } else {
+        "ストリーム無出力"
+    }
+}
+
+/// タイムアウト時に stderr へ出す打ち切りメッセージを組み立てる純関数。
+///
+/// 要件2（設計書 第3節: タイムアウト時の workspace 保全）: タイムアウト時は
+/// workspace の git 状態を一切変更しないため、この関数は git コマンドを一度も
+/// 呼ばない。中断理由（idle=ストリーム無出力 / overall=実時間上限）・上限値・
+/// ログパスのみから、エージェントの変更（コミット・未コミットとも）が
+/// workspace にそのまま残っている旨と、確認手順（`git status` / `git log`）・
+/// 開始時点へ戻す手順（`vibepod restore`）を示すメッセージを組み立てる。
+/// 表示層のロジックを I/O から切り離してユニットテスト可能にするため、必要な
+/// 値はすべて引数で受け取る（`render_run_summary` と同じパターン）。
+pub fn render_timeout_message(
+    overall_timed_out: bool,
+    idle_timeout_secs: u64,
+    overall_timeout_secs: u64,
+    log_path: Option<&std::path::Path>,
+) -> String {
+    let kind_label = timeout_kind_label(overall_timed_out);
+    let limit_secs = if overall_timed_out {
+        overall_timeout_secs
+    } else {
+        idle_timeout_secs
+    };
+    let timeout_display = if limit_secs >= 60 {
+        format!("{} 分", limit_secs / 60)
+    } else {
+        format!("{} 秒", limit_secs)
+    };
+
+    let mut out = format!(
+        "⚠ {}が{} を超えたため、セッションを中断しました。\n",
+        kind_label, timeout_display
+    );
+    if let Some(p) = log_path {
+        out.push_str(&format!("  ログ: {}\n", p.display()));
+    }
+    out.push_str(
+        "  エージェントによる変更（コミット・未コミットとも）は workspace にそのまま残っています。\n",
+    );
+    out.push_str("  確認するには: `git status` / `git log`\n");
+    out.push_str("  開始時点へ戻すには: `vibepod restore`");
+    out
+}
+
 pub(super) struct RunContext {
     pub(super) container_name: String,
     pub(super) effective_workspace: String,
@@ -186,7 +246,18 @@ pub(super) struct RunContext {
     /// vibepod のグローバル設定ディレクトリ（通常 `~/.config/vibepod`）。
     /// 更新チェックのタイムスタンプ (`update-check.json`) の保存先として使う。
     pub(super) config_dir: std::path::PathBuf,
-    pub(super) global_config: config::GlobalConfig,
+    /// コンテナ作成・`ensure_image_available` に実際に使うイメージ名。
+    /// `profile` が `Some` のときは `image_for_profile(&global_config.image,
+    /// profile)`（`global_config` は `prepare_context` 内のローカル変数）で
+    /// 導出した profile 付きイメージ名、`None` のときは
+    /// `global_config.image` と同じ値。コンテナ作成側（`build_container_config`
+    /// の呼び出し側）はこのフィールドを使う — `global_config.image` を直接
+    /// 使うと profile が無視される。
+    pub(super) effective_image: String,
+    /// `.vibepod/config.toml` の `[run] profile`（プロジェクト優先でマージ済み、
+    /// `prepare_context` で検証済み）。`None` は profile 未指定。ラベル
+    /// （`vibepod.profile`）の生成に使う。
+    pub(super) profile: Option<String>,
     pub(super) home: std::path::PathBuf,
     pub(super) worktree_branch_name: Option<String>,
     pub(super) worktree_dir_name: Option<String>,
@@ -1703,17 +1774,26 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     // installed.
     labels.insert("vibepod.lang".to_string(), ctx.lang_names.join(","));
 
+    // profile: 未指定は空文字列で保存する（prepare.rs の 9b 比較ロジックと
+    // 同じ表現に揃える）。値が変わった場合の再作成促しは他ラベルと同一の
+    // warn_config_changes 経路に乗る。
+    labels.insert(
+        "vibepod.profile".to_string(),
+        ctx.profile.clone().unwrap_or_default(),
+    );
+
     // Label schema version. Monotonically increasing: never decrement,
     // even when features are removed (a smaller value would misidentify
     // newer containers as older ones). Previous releases used "1" (legacy
-    // single-token `vibepod.lang`), "2" (full comma-joined lang set), and
-    // "3" (added the now-removed `vibepod.template_setup_hash`). Removing
-    // the template machinery advances to "4".
+    // single-token `vibepod.lang`), "2" (full comma-joined lang set), "3"
+    // (added the now-removed `vibepod.template_setup_hash`), and "4"
+    // (removed the template machinery). Adding `vibepod.profile` advances
+    // to "5".
     //
     // Currently this value is NOT read anywhere — no code branches on it.
     // It is written and reserved for a future backward-compatibility gate
     // that may need to distinguish container schema generations.
-    labels.insert("vibepod.labels_version".to_string(), "4".to_string());
+    labels.insert("vibepod.labels_version".to_string(), "5".to_string());
 
     // ワークスペースパスを保存（ps コマンドでの表示に使用）
     labels.insert(
@@ -1729,7 +1809,37 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     labels
 }
 
+/// `--prompt-file <path>` の内容を読み込み、検証する純関数。
+///
+/// 要件3（設計書 第4節）: ホストシェルの解釈を経由せずプロンプトを渡すための
+/// 経路。内容は**無加工**（trim せず）で返す — 山括弧・波括弧・バッククォート・
+/// `$` を含むファイルでも、そのまま `claude -p` へ渡る `opts.prompt` になる
+/// 必要があるため。
+///
+/// エラーは運用者がすぐ直せるよう、常にパスを含める:
+/// - ファイルが読めない場合（存在しない・権限がない等）
+/// - 内容が空、または空白のみの場合（`claude -p ""` を渡すのは無意味なため
+///   起動前に弾く）
+pub fn resolve_prompt_file(path: &str) -> Result<String> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read prompt file: {}", path))?;
+    if content.trim().is_empty() {
+        anyhow::bail!("Prompt file is empty or whitespace-only: {}", path);
+    }
+    Ok(content)
+}
+
 pub async fn execute(opts: RunOptions) -> Result<()> {
+    // clap の `conflicts_with = "prompt"` により `--prompt` と `--prompt-file`
+    // の同時指定は既に弾かれているため、ここで両方 Some になるケースは無い。
+    // 読み込み内容は無加工で opts.prompt へ代入することで、以降の全経路
+    // （ロック・タイムアウト・`claude -p` への受け渡し・ログ・サマリ）を
+    // `--prompt` と完全に同一にする。
+    let mut opts = opts;
+    if let Some(ref path) = opts.prompt_file {
+        opts.prompt = Some(resolve_prompt_file(path)?);
+    }
+
     let interactive = !opts.resume && opts.prompt.is_none();
 
     let Some(ctx) = prepare::prepare_context(&opts).await? else {
