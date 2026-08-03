@@ -35,7 +35,7 @@ VibePod はこの手順を `init` + `login` + `run` の 3 ステップに簡素�
 - `config.toml` 設定ファイル統合（config.json → config.toml）→ v1.4
 - bridge 削除・docker run 統一・run.rs 分割 → v1.4
 - バナーバージョン表示 → v1.4
-- `--prompt` ストリーム途絶検知 & 自動リセット（`prompt_idle_timeout`）→ v1.4.1
+- `--prompt` ストリーム途絶検知（`prompt_idle_timeout`）→ エージェントを停止するが、workspace の変更（コミット・未コミットとも）は保持される。取り消す場合は `vibepod restore` で実行開始時点へ戻す → v1.4.1
 - `--prompt` セッション排他制御（PromptLock）→ v1.4.1
 - `~/.claude/CLAUDE.md`, `skills/`, `agents/` の read-only マウント → v1.4.1
 - `vibepod ps` に ELAPSED / LAST OUTPUT カラム追加 → v1.4.1
@@ -121,32 +121,11 @@ vibepod/
 
 **Dockerfile（バンドル）：**
 
-```dockerfile
-FROM debian:bookworm-slim
+`templates/Dockerfile` が正本。v1.2 期はここに単一ステージの内容を掲載していたが、profile 機構（`distro-<profile>` / `profile-<profile>` の multi-stage 化、`docs/superpowers/specs/2026-08-03-swift-profile-and-session-hardening-design.md` 2.3 節）・codex CLI 層・GitHub CLI（`gh`）の keyring 経由インストール等が加わり、この文書内のスニペットを都度同期するのはコストに見合わないため、要約とリンクのみ置く:
 
-ARG HOST_UID=501
-ARG HOST_GID=20
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  git sudo jq curl ca-certificates gh \
-  && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# vibepod ユーザーを作成し、ホストの uid/gid に合わせる
-RUN groupadd --non-unique -g ${HOST_GID} vibepod && \
-    useradd -m -u ${HOST_UID} -g ${HOST_GID} -s /bin/bash vibepod
-
-USER vibepod
-ENV PATH=/home/vibepod/.local/bin:$PATH
-RUN curl -fsSL https://claude.ai/install.sh | bash
-
-USER root
-RUN mkdir -p /workspace && chown vibepod:vibepod /workspace
-
-USER vibepod
-WORKDIR /workspace
-
-CMD ["claude"]
-```
+- ベースイメージ: `debian:bookworm-slim`（`profile = "swift"` のときのみ `debian:trixie-slim` — 理由は上記 spec 2.3.1 参照）
+- 主な導入物: `git` / `gh` / `sudo` 等の apt パッケージ、`vibepod` ユーザー（ホスト uid/gid に合わせる）、Claude Code CLI、codex CLI（バージョン pin + SHA256 検証）、（swift profile のみ）Swift toolchain + SwiftLint
+- バージョン・SHA256 テーブルの正本も `templates/Dockerfile` 自身（このファイルには複製しない）
 
 > **uid マッピング**: macOS のデフォルト uid は 501 だが、Linux は 1000 が一般的。
 > `vibepod init` 時にホストの uid/gid を検出し、`--build-arg` で Dockerfile に渡す。
