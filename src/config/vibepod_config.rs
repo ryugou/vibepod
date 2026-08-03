@@ -19,6 +19,11 @@ pub struct RunConfig {
 
 /// `profile` に指定できる値の一覧。エラーメッセージにそのまま埋め込む
 /// ため、増える場合はここへ追記するだけで済むようにしている。
+///
+/// profile を追加する際は、この配列への追記に加えて `templates/Dockerfile`
+/// へ `AS distro-<p>` と `AS profile-<p>` の2ステージを両方追加すること
+/// （`tests/dockerfile_profile_stage_test.rs` がこの配列を読んで両ステージの
+/// 存在を静的に検証しており、追加を忘れると `cargo test` の時点で落ちる）。
 pub const VALID_PROFILES: &[&str] = &["swift"];
 
 /// `.vibepod/config.toml` の `[run] profile` を検証する純関数。
@@ -45,14 +50,24 @@ pub fn validate_profile(profile: &Option<String>) -> Result<()> {
 ///
 /// - `vibepod-claude:latest` + `"swift"` → `vibepod-claude-swift:latest`
 /// - `vibepod-claude`（タグなし） → `vibepod-claude-swift`
+/// - `localhost:5000/vibepod-claude:latest` → `localhost:5000/vibepod-claude-swift:latest`
+/// - `localhost:5000/vibepod-claude`（タグなし） → `localhost:5000/vibepod-claude-swift`
 ///
-/// 呼び出し元は vibepod が生成・管理するイメージ名（`vibepod-<agent>[:<tag>]`）
-/// のみを渡す想定。レジストリポート（`host:5000/name`）のような `:` を含む
-/// が実際にはタグではない形式は現行の呼び出し元では発生しないため扱わない。
+/// `rsplit_once(':')` は最後の `:` で分割するため、レジストリポート付き
+/// かつタグなしの形式（`host:port/name`）だと `:` の後ろがポート番号＋
+/// パス（`5000/name`）になり、誤ってポート番号をタグとして書き換えて
+/// しまう。`:` の後ろに `/` を含む場合はタグではないと判定し、名前部を
+/// 特定できないので全体の末尾へサフィックスを付ける（`host:port/name-swift`
+/// のようにレジストリ部を含めて丸ごと扱う）。
+///
+/// digest 参照（`name@sha256:...`）は非対応。`docker build -t` のタグとして
+/// 指定できる形式ではなく、呼び出し元（`image_for_profile` を呼ぶ経路）が
+/// 生成・管理するイメージ名は常にタグ形式のため、この関数の入力として渡り
+/// 得ない前提（YAGNI: 到達不能な入力へのガードは追加しない）。
 pub fn image_for_profile(base_image: &str, profile: &str) -> String {
     match base_image.rsplit_once(':') {
-        Some((name, tag)) => format!("{}-{}:{}", name, profile, tag),
-        None => format!("{}-{}", base_image, profile),
+        Some((name, tag)) if !tag.contains('/') => format!("{}-{}:{}", name, profile, tag),
+        _ => format!("{}-{}", base_image, profile),
     }
 }
 
@@ -222,6 +237,26 @@ mod tests {
         assert_eq!(
             image_for_profile("vibepod-claude", "swift"),
             "vibepod-claude-swift"
+        );
+    }
+
+    // レジストリポート形式（`host:port/name[:tag]`）は `:` を含むが、
+    // 最後の `:` 以降がタグとは限らない（`/` を含む場合はポート番号）。
+    // タグ扱いして誤ってポート部を書き換えないことを確認する。
+
+    #[test]
+    fn image_for_profile_with_registry_port_and_tag_inserts_before_tag() {
+        assert_eq!(
+            image_for_profile("localhost:5000/vibepod-claude:latest", "swift"),
+            "localhost:5000/vibepod-claude-swift:latest"
+        );
+    }
+
+    #[test]
+    fn image_for_profile_with_registry_port_and_no_tag_appends_suffix() {
+        assert_eq!(
+            image_for_profile("localhost:5000/vibepod-claude", "swift"),
+            "localhost:5000/vibepod-claude-swift"
         );
     }
 }
