@@ -406,9 +406,27 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     // タイムアウト時は workspace を一切変更しない（要件2: 設計書 第3節）。
     // エージェントのコミット・未コミット変更・未追跡ファイルはそのまま残し、
     // セッションも restored 扱いにしない（`vibepod restore` による手動復元の
-    // 対象として残す）。ここでは中断理由・上限値・ログパスから組み立てた
-    // stderr メッセージを出すのみで、git コマンドは一切呼ばない。
+    // 対象として残す）。ここで呼ぶ `git::get_head_hash` / `git::has_uncommitted_changes`
+    // は状態を読むだけの read-only 呼び出しであり、workspace を変更する
+    // git コマンド（reset / clean 等）は一切呼ばない。
     if was_timed_out {
+        // F2/F3（フル再レビュー Major 指摘）: `vibepod restore` は未コミット
+        // 変更が残っていると必ず bail する（restore.rs）ため、無条件に
+        // 案内すると到達不能なコマンドを勧めてしまう。実際の状態を読んで
+        // `render_timeout_message` の分岐に渡す。
+        //
+        // `--worktree` のときは `ctx.effective_workspace` が
+        // `.worktrees/<dir>` を指すため、そのまま同じ経路で head/uncommitted
+        // を調べれば worktree 側の状態になる（cwd を余分に見に行く必要はない）。
+        let workspace_path = std::path::Path::new(&ctx.effective_workspace);
+        // head_advanced の判定に使う `get_head_hash` 自体が失敗した場合
+        // （通常は起こらないが、権限やディスク不調等）は「変更なし」と
+        // 誤って安心させるより「変更ありかもしれない」側に倒す。
+        let head_advanced = crate::git::get_head_hash(workspace_path)
+            .map(|current_head| current_head != ctx.deferred_session.head_before)
+            .unwrap_or(true);
+        let has_uncommitted = crate::git::has_uncommitted_changes(workspace_path);
+
         eprintln!();
         eprintln!(
             "{}",
@@ -417,6 +435,9 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
                 idle_timeout_secs,
                 overall_timeout_secs,
                 log_path.as_deref(),
+                head_advanced,
+                has_uncommitted,
+                ctx.worktree_dir_name.as_deref(),
             )
         );
     }

@@ -35,7 +35,7 @@ VibePod はこの手順を `init` + `login` + `run` の 3 ステップに簡素�
 - `config.toml` 設定ファイル統合（config.json → config.toml）→ v1.4
 - bridge 削除・docker run 統一・run.rs 分割 → v1.4
 - バナーバージョン表示 → v1.4
-- `--prompt` ストリーム途絶検知（`prompt_idle_timeout`）→ エージェントを停止するが、workspace の変更（コミット・未コミットとも）は保持される。取り消す場合は `vibepod restore` で実行開始時点へ戻す → v1.4.1
+- `--prompt` ストリーム途絶検知（`prompt_idle_timeout`）→ エージェントを停止するが、workspace の変更（コミット・未コミットとも）は保持される。復元手順は状態依存（未コミット残り/コミット済みのみ/無変更 × `--worktree` かどうか。詳細: README `--timeout` 節）→ v1.4.1
 - `--prompt` セッション排他制御（PromptLock）→ v1.4.1
 - `~/.claude/CLAUDE.md`, `skills/`, `agents/` の read-only マウント → v1.4.1
 - `vibepod ps` に ELAPSED / LAST OUTPUT カラム追加 → v1.4.1

@@ -172,21 +172,87 @@ pub fn timeout_kind_label(overall_timed_out: bool) -> &'static str {
     }
 }
 
+/// タイムアウト上限値を「N 分」「N 秒」「N 分 M 秒」の日本語表記にする純関数。
+///
+/// F9（フル再レビュー指摘）: 旧実装は `limit_secs / 60` の整数除算のみで
+/// 分表記を作っており、`--timeout 90` のような端数を持つ値が「1 分」に
+/// 切り捨てられ、実際に待たされた 30 秒分の情報が消えていた。60 の倍数
+/// ちょうどのときだけ「N 分」、端数があるときは「N 分 M 秒」、60 秒未満は
+/// 「N 秒」にする。
+fn format_timeout_duration(limit_secs: u64) -> String {
+    if limit_secs < 60 {
+        return format!("{} 秒", limit_secs);
+    }
+    let minutes = limit_secs / 60;
+    let remainder_secs = limit_secs % 60;
+    if remainder_secs == 0 {
+        format!("{} 分", minutes)
+    } else {
+        format!("{} 分 {} 秒", minutes, remainder_secs)
+    }
+}
+
 /// タイムアウト時に stderr へ出す打ち切りメッセージを組み立てる純関数。
 ///
 /// 要件2（設計書 第3節: タイムアウト時の workspace 保全）: タイムアウト時は
 /// workspace の git 状態を一切変更しないため、この関数は git コマンドを一度も
-/// 呼ばない。中断理由（idle=ストリーム無出力 / overall=実時間上限）・上限値・
-/// ログパスのみから、エージェントの変更（コミット・未コミットとも）が
-/// workspace にそのまま残っている旨と、確認手順（`git status` / `git log`）・
-/// 開始時点へ戻す手順（`vibepod restore`）を示すメッセージを組み立てる。
+/// 呼ばない。呼び出し元（`prompt.rs`）が read-only な `git::get_head_hash` /
+/// `git::has_uncommitted_changes` で先に状態を調べ、その結果を bool として
+/// ここへ渡す（この関数自体は純関数のまま維持する）。この doc コメントが
+/// 案内文言・各コマンドを選んだ判断根拠の正本（設計spec 3.2節はここへの
+/// 参照のみを持つ）。
+///
+/// 案内は「未コミット変更あり」「コミット済みのみ・clean」「開始時点から無変更」
+/// の3状態（F2, フル再レビュー Major 指摘）を軸に**1回だけ**書く。
+/// `worktree_dir` が `Some(dir)` のとき（F3）は、確認・破棄コマンドの対象を
+/// `.worktrees/<dir>`（cwd とは別の git worktree）へ切り替えるだけで、3状態
+/// の構造自体は cwd と共有する — `git` クロージャが `worktree_dir` の有無で
+/// `git -C .worktrees/<dir> <args>` / `git <args>` を組み立てる。
+///
+/// Q3（フル再レビュー後 simplify 指摘）: 以前は `match worktree_dir { Some
+/// => {3状態}, None => {3状態} }` という二重実装で、cwd/worktree 双方に
+/// ほぼ同じ分岐を別々に書いていた。この二重化自体が実装漏れの温床になって
+/// おり、実際に worktree の「未コミットあり」分岐にだけ `log` が無い・
+/// 「コミット済みのみ」分岐にだけ `status` が無いという非対称（本来どちらの
+/// モードでも確認手段は同じであるべき）が生じていた。3状態の分岐を1本化し、
+/// worktree/cwd の違いは `git` クロージャと状態末尾の締めの文言だけに閉じ
+/// 込めることで、この種の漏れが構造的に起きなくなる。
+///
+/// 各状態の内容:
+/// - **未コミット変更あり**: `vibepod restore` は未コミット変更が残っている
+///   と必ず bail する（`git status --porcelain` が非空なら "Uncommitted
+///   changes detected" で失敗）ため、cwd では使えない旨を明記する。確認
+///   コマンド（`status` / `log`、両モード対称）、破棄コマンド（MJ1: 引数
+///   無し `reset --hard`（HEAD を動かさず index + working tree を HEAD の
+///   状態へ戻す）と `clean -fd` の組み合わせ — 以前の `checkout .` は index
+///   から working tree を復元するだけでステージ済み変更を戻せず、
+///   `clean -fd` も `git add` 済みファイルを消せなかったため、案内どおり
+///   破棄しても bail が再現していた）を示す。締めは cwd なら保持/コミット
+///   の選択肢、worktree なら保持の選択肢に加え worktree 削除コマンド
+///   （mn1: dirty な worktree への素の `git worktree remove` は "contains
+///   modified or untracked files, use --force to delete it" で必ず失敗する
+///   ため `--force` 付き）。
+/// - **コミット済みのみ・clean**: 確認コマンド（`status` / `log`）に加え、
+///   worktree のみ `diff main` も案内する（cwd は自分自身のブランチとの
+///   diff になり無意味なため、worktree 固有の価値がある `diff main` だけを
+///   意図的に非対称のまま残す — 実装漏れではない）。締めは cwd なら
+///   `vibepod restore`、worktree なら（clean なので `--force` 無しの）
+///   `git worktree remove`。
+/// - **開始時点から無変更**: その旨のみ。`vibepod restore` も worktree 削除
+///   コマンドも、それぞれ案内する価値がない cwd/worktree 側では出さない
+///   （worktree 削除は無変更でも案内する — 掃除のため）。
+///
 /// 表示層のロジックを I/O から切り離してユニットテスト可能にするため、必要な
 /// 値はすべて引数で受け取る（`render_run_summary` と同じパターン）。
+#[allow(clippy::too_many_arguments)]
 pub fn render_timeout_message(
     overall_timed_out: bool,
     idle_timeout_secs: u64,
     overall_timeout_secs: u64,
     log_path: Option<&std::path::Path>,
+    head_advanced: bool,
+    has_uncommitted: bool,
+    worktree_dir: Option<&str>,
 ) -> String {
     let kind_label = timeout_kind_label(overall_timed_out);
     let limit_secs = if overall_timed_out {
@@ -194,11 +260,7 @@ pub fn render_timeout_message(
     } else {
         idle_timeout_secs
     };
-    let timeout_display = if limit_secs >= 60 {
-        format!("{} 分", limit_secs / 60)
-    } else {
-        format!("{} 秒", limit_secs)
-    };
+    let timeout_display = format_timeout_duration(limit_secs);
 
     let mut out = format!(
         "⚠ {}が{} を超えたため、セッションを中断しました。\n",
@@ -207,11 +269,91 @@ pub fn render_timeout_message(
     if let Some(p) = log_path {
         out.push_str(&format!("  ログ: {}\n", p.display()));
     }
-    out.push_str(
-        "  エージェントによる変更（コミット・未コミットとも）は workspace にそのまま残っています。\n",
-    );
-    out.push_str("  確認するには: `git status` / `git log`\n");
-    out.push_str("  開始時点へ戻すには: `vibepod restore`");
+
+    // cwd は素の `git <args>`、worktree は `.worktrees/<dir>` を明示的に
+    // 対象にする `git -C .worktrees/<dir> <args>` を組み立てる（Q3）。
+    let git = |args: &str| match worktree_dir {
+        Some(dir) => format!("git -C .worktrees/{dir} {args}"),
+        None => format!("git {args}"),
+    };
+
+    if let Some(dir) = worktree_dir {
+        out.push_str(&format!(
+            "  作業は `.worktrees/{}`（cwd とは別の git worktree）に残っています。\n",
+            dir
+        ));
+    }
+
+    if has_uncommitted {
+        out.push_str(if worktree_dir.is_some() {
+            "  未コミットの変更があります。\n"
+        } else {
+            "  エージェントによる変更（コミット・未コミットとも）は workspace にそのまま残っています。\n"
+        });
+        out.push_str(&format!(
+            "  確認するには: `{}` / `{}`\n",
+            git("status"),
+            git("log")
+        ));
+        if worktree_dir.is_none() {
+            out.push_str("  `vibepod restore` は未コミットの変更が残っていると実行できません。\n");
+        }
+        out.push_str(&format!(
+            "  破棄するには（取り消し不能です）: `{} && {}`\n",
+            git("reset --hard"),
+            git("clean -fd")
+        ));
+        match worktree_dir {
+            None => out.push_str(
+                "  残したい場合は、そのまま保持するか `git add -A && git commit` でコミットしてから `vibepod restore` を使ってください。",
+            ),
+            Some(dir) => {
+                out.push_str(
+                    "  残したい場合は、そのまま保持するかそのブランチ内でコミットしてください。\n",
+                );
+                out.push_str(&format!(
+                    "  未コミットの変更があるため、削除する場合は先に上記の破棄を行うか \
+                     `git worktree remove --force .worktrees/{}` を使ってください。",
+                    dir
+                ));
+            }
+        }
+    } else if head_advanced {
+        out.push_str(if worktree_dir.is_some() {
+            "  変更はコミット済みです。\n"
+        } else {
+            "  エージェントによる変更はコミット済みで workspace にそのまま残っています。\n"
+        });
+        out.push_str(&format!(
+            "  確認するには: `{}` / `{}`\n",
+            git("status"),
+            git("log")
+        ));
+        match worktree_dir {
+            None => out.push_str("  開始時点へ戻すには: `vibepod restore`"),
+            Some(dir) => {
+                // worktree 固有: main との差分は worktree だけの価値がある
+                // （cwd は自分自身との diff になり無意味）。意図的な非対称。
+                out.push_str(&format!("  main との差分: `{}`\n", git("diff main")));
+                out.push_str(&format!(
+                    "  worktree を削除するには: `git worktree remove .worktrees/{}`",
+                    dir
+                ));
+            }
+        }
+    } else {
+        match worktree_dir {
+            None => out.push_str("  開始時点から workspace に変更はありません。"),
+            Some(dir) => {
+                out.push_str("  開始時点から変更はありません。\n");
+                out.push_str(&format!(
+                    "  worktree を削除するには: `git worktree remove .worktrees/{}`",
+                    dir
+                ));
+            }
+        }
+    }
+
     out
 }
 
@@ -1882,6 +2024,25 @@ pub async fn execute(opts: RunOptions) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // F9（フル再レビュー指摘）: `format_timeout_duration` の端数表示回帰。
+
+    #[test]
+    fn format_timeout_duration_under_a_minute_uses_seconds() {
+        assert_eq!(format_timeout_duration(45), "45 秒");
+    }
+
+    #[test]
+    fn format_timeout_duration_exact_minutes_omits_seconds() {
+        assert_eq!(format_timeout_duration(60), "1 分");
+        assert_eq!(format_timeout_duration(1800), "30 分");
+    }
+
+    #[test]
+    fn format_timeout_duration_with_remainder_shows_both_units() {
+        // 旧実装は `90 / 60 == 1` で「1 分」に切り捨て、30 秒の端数を失っていた。
+        assert_eq!(format_timeout_duration(90), "1 分 30 秒");
+    }
 
     #[test]
     fn test_build_mounts_label_is_deterministic() {

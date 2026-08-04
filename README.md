@@ -136,7 +136,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-update` | Skip the container's Claude Code update check entirely |
 | `--model <name>` | Pass `--model <name>` straight through to Claude Code inside the container. Not validated by VibePod — Claude Code decides if it is valid. Works in both interactive and `--prompt` mode. Omit to use Claude Code's own default |
 | `--no-auto-build` | Do not build the Docker image on demand when it is missing. By default `vibepod run` auto-builds it; pass this to fail fast and be told to run `vibepod init` instead |
-| `--timeout <dur>` | Wall-clock limit for a `--prompt` session. Accepts bare seconds (`1800`) or a duration (`30m`, `1h30m`); `0` disables it. Defaults to **30 minutes**. On timeout the container-side agent is stopped and the run exits non-zero; workspace changes (commits and uncommitted edits alike) are left in place, not reset — use `vibepod restore` to revert them manually |
+| `--timeout <dur>` | Wall-clock limit for a `--prompt` session. Accepts bare seconds (`1800`) or a duration (`30m`, `1h30m`); `0` disables it. Defaults to **30 minutes**. On timeout the container-side agent is stopped and the run exits non-zero; workspace changes are left in place, not reset. Recovery depends on the state found: `vibepod restore` only works with a clean tree — uncommitted changes must be committed or discarded (`git reset --hard && git clean -fd`, irreversible) first; `--worktree` runs point you at `.worktrees/<dir>` instead (see below) |
 | `--verbose` | Stream Claude Code's per-event activity to stdout during `--prompt` (pre-1.7 behavior). By default only a concise end-of-run summary is printed |
 
 **Image auto-build.** The first `vibepod run` in an environment where the image is missing builds it automatically (a few minutes) instead of erroring, so you can call `vibepod run` from another session without running `vibepod init` first. Concurrent runs are serialized by a build lock so the image is built once. Use `--no-auto-build` to opt out.
@@ -331,7 +331,11 @@ Pass `--verbose` to stream Claude Code's per-event activity live instead (the pr
 ────────────────────────────────────────────────────────
 ```
 
-If a `--prompt` run exceeds its `--timeout` (default 30 minutes), VibePod stops the container-side agent, prints the `logs.txt` path, and exits non-zero — a timeout is never reported as success. The workspace is **not** reset: any commits and uncommitted edits the agent made are left in place so you can inspect them with `git status` / `git log`. Run `vibepod restore` if you want to revert to the session's starting commit.
+If a `--prompt` run exceeds its `--timeout` (default 30 minutes), VibePod stops the container-side agent, prints the `logs.txt` path, and exits non-zero — a timeout is never reported as success. The workspace is **not** reset: any commits and uncommitted edits the agent made are left in place so you can inspect them with `git status` / `git log`. What to do next depends on the state VibePod finds:
+
+- **Uncommitted changes present**: `vibepod restore` refuses to run whenever the tree isn't clean, so it isn't offered here. Discard everything with `git reset --hard && git clean -fd` (irreversible — `git checkout .` alone is not enough, since it leaves staged changes and `git add`-ed new files behind), or keep the changes — leave them as-is, or `git add -A && git commit` them and then run `vibepod restore` if you still want to rewind to the session's start.
+- **Only commits, tree clean**: `vibepod restore` works as usual and rewinds to the session's starting commit.
+- **`--worktree` runs**: the agent's changes live in `.worktrees/<dir>`, a separate git worktree — `vibepod restore` doesn't apply there (it operates on the current directory's session history, not the worktree). Inspect with `git -C .worktrees/<dir> status` / `git -C .worktrees/<dir> log`, diff against your branch with `git -C .worktrees/<dir> diff main`. Remove the worktree with `git worktree remove .worktrees/<dir>` once you're done with it — if it still has uncommitted changes, that fails and you'll need `git worktree remove --force .worktrees/<dir>` instead (or discard first with `git -C .worktrees/<dir> reset --hard && git -C .worktrees/<dir> clean -fd`).
 
 #### Language toolchain auto-detection
 

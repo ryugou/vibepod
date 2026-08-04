@@ -144,12 +144,28 @@ FROM profile-${VIBEPOD_PROFILE}
 
 ### 3.2 終了メッセージ
 
-タイムアウト時の stderr メッセージを次の内容に置き換える。
+タイムアウト時の stderr メッセージを次の内容に含める。
 
 - 中断理由（実時間上限 / ストリーム無出力）と上限値、ログパス（現行どおり）。
-- エージェントの変更（コミット・未コミットとも）が workspace に残っている旨。
-- 確認手順: `git status` / `git log`。
-- 開始時点へ戻す場合の手順: `vibepod restore`。
+- エージェントの変更（コミット・未コミットとも）が workspace に残っている旨（変更が
+  無ければその旨）。
+- 復元手順は「未コミット変更が残っている」「コミット済みのみで clean」「開始時点から
+  無変更」の3状態と、`--worktree` 実行かどうかで出し分ける。`vibepod restore` は
+  未コミット変更が残っていると使えない（`restore.rs` が bail する）ため、
+  `--worktree` 実行時は `vibepod restore` を案内せず `.worktrees/<dir>` 側での
+  確認・破棄コマンドに置き換える。
+
+**改訂履歴**: フル再レビュー F2/F3（状態別の出し分けを導入）→ MJ1/mn1（破棄
+コマンドを `git reset --hard && git clean -fd` へ修正、worktree 削除案内に
+`--force` 分岐を追加）→ Q3（simplify 指摘: cwd/worktree の3状態テンプレート
+二重実装を `git(args)` クロージャで1本化）を経て現在の形になった。**分岐の詳細・
+各コマンドを選んだ判断根拠の正本は実装（`render_timeout_message`、
+`src/cli/run/mod.rs`）の doc コメント。** このファイルには逐語コピーを置かず、
+実装ドキュメントと2箇所で食い違う余地を作らない。関数自体は引き続き git
+コマンドを一切呼ばない純関数のまま維持する（呼び出し元の `prompt.rs` が
+read-only な `git::get_head_hash` / `git::has_uncommitted_changes` で調べた
+`head_advanced: bool` / `has_uncommitted: bool` / `worktree_dir: Option<&str>`
+を渡す）。
 
 ### 3.3 横断更新
 

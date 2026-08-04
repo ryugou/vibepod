@@ -95,8 +95,9 @@ pub enum Commands {
         /// limit. Defaults to 30 minutes when omitted. On timeout the
         /// container-side agent is stopped and the run exits non-zero;
         /// workspace changes made by the agent (commits and uncommitted
-        /// edits alike) are left in place, not reset. Use `vibepod restore`
-        /// to revert them manually.
+        /// edits alike) are left in place, not reset. `vibepod restore`
+        /// only works with a clean tree; see the README for recovery
+        /// steps when uncommitted changes remain or `--worktree` was used.
         #[arg(long)]
         timeout: Option<String>,
         /// Stream Claude Code's per-event activity to stdout during a
