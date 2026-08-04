@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -74,15 +74,37 @@ pub fn image_for_profile(base_image: &str, profile: &str) -> String {
 impl VibepodConfig {
     /// プロジェクト設定 → グローバル設定の順でマージした設定を返す
     pub fn load(project_dir: &Path, global_config_dir: &Path) -> Result<Self> {
-        let project_config = Self::load_file(&project_dir.join(".vibepod/config.toml"));
-        let global_config = Self::load_file(&global_config_dir.join("config.toml"));
+        let project_config = Self::load_file(&project_dir.join(".vibepod/config.toml"))?;
+        let global_config = Self::load_file(&global_config_dir.join("config.toml"))?;
 
         Ok(Self::merge(project_config, global_config))
     }
 
-    fn load_file(path: &Path) -> Option<VibepodConfig> {
-        let content = std::fs::read_to_string(path).ok()?;
-        toml::from_str(&content).ok()
+    /// `path` の config.toml を読み込む。
+    ///
+    /// ファイルが存在しない（`ErrorKind::NotFound`）場合のみ「設定なし」の
+    /// `Ok(None)` を返す — `.vibepod/config.toml` を置かないプロジェクトは
+    /// 正常運用のため。それ以外の読込エラー（権限等）・TOML 構文エラー・
+    /// 型エラー（例: `profile = 123`）は握り潰さず、対象パスを含む context
+    /// 付きで呼び出し元へ伝播する。
+    ///
+    /// 旧実装は `read_to_string(path).ok()?` と `toml::from_str(&content).ok()`
+    /// を使っており、権限エラーも構文エラーも型エラーも一律「ファイルなし」に
+    /// 潰していた。これだと config.toml を typo した運用者に何のエラーも
+    /// 出さずに「profile 未指定」として起動してしまい、意図しない default
+    /// イメージで実行される事故につながる（CLAUDE.md のエラー握り潰し禁止に
+    /// も反する）。
+    fn load_file(path: &Path) -> Result<Option<VibepodConfig>> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to read {}", path.display()));
+            }
+        };
+        let config: VibepodConfig = toml::from_str(&content)
+            .with_context(|| format!("Failed to parse {} as TOML", path.display()))?;
+        Ok(Some(config))
     }
 
     fn merge(project: Option<Self>, global: Option<Self>) -> Self {
@@ -257,6 +279,89 @@ mod tests {
         assert_eq!(
             image_for_profile("localhost:5000/vibepod-claude", "swift"),
             "localhost:5000/vibepod-claude-swift"
+        );
+    }
+
+    // F1（フル再レビュー Major 指摘）: `load_file` の握り潰し解消。
+    //
+    // 旧実装は `read_to_string(path).ok()?` と `toml::from_str(&content).ok()`
+    // により、権限エラー・TOML 構文エラー・型エラー（`profile = 123` 等）が
+    // すべて「ファイルなし（設定なし）」に化けていた。運用者が config.toml を
+    // typo しても vibepod が黙って「profile 未指定」として起動してしまい、
+    // 意図しない default イメージで走る事故につながる。ファイル不存在
+    // （`ErrorKind::NotFound`）のみ `Ok(None)` とし、それ以外の読込エラー・
+    // 解析エラーは対象パスを含めて呼び出し元へ伝播することを、プロジェクト側・
+    // グローバル側の両方、構文エラー・型エラーの両方で固定する。
+
+    fn write_raw(dir: &Path, content: &str) {
+        std::fs::create_dir_all(dir).expect("failed to create config dir");
+        std::fs::write(dir.join("config.toml"), content).expect("failed to write config.toml");
+    }
+
+    #[test]
+    fn load_fails_with_path_context_on_invalid_toml_syntax_in_project_config() {
+        let project = tempfile::tempdir().expect("failed to create project tempdir");
+        let global = tempfile::tempdir().expect("failed to create global tempdir");
+        // 閉じられていない `[run` — TOML として構文エラー。
+        write_raw(
+            &project.path().join(".vibepod"),
+            "[run\nprofile = \"swift\"\n",
+        );
+
+        let err = VibepodConfig::load(project.path(), global.path())
+            .expect_err("syntax error in project config.toml must not be swallowed as 'no config'");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("config.toml"),
+            "error must name the offending file: {message}"
+        );
+    }
+
+    #[test]
+    fn load_fails_with_path_context_on_type_error_in_project_config() {
+        let project = tempfile::tempdir().expect("failed to create project tempdir");
+        let global = tempfile::tempdir().expect("failed to create global tempdir");
+        // `profile` は文字列型のはずが整数 — TOML としては valid、型が不一致。
+        write_raw(&project.path().join(".vibepod"), "[run]\nprofile = 123\n");
+
+        let err = VibepodConfig::load(project.path(), global.path())
+            .expect_err("type error in project config.toml must not be swallowed as 'no config'");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("config.toml"),
+            "error must name the offending file: {message}"
+        );
+    }
+
+    #[test]
+    fn load_fails_with_path_context_on_invalid_toml_syntax_in_global_config() {
+        let project = tempfile::tempdir().expect("failed to create project tempdir");
+        let global = tempfile::tempdir().expect("failed to create global tempdir");
+        write_raw(&project.path().join(".vibepod"), "[run]\nlang = \"rust\"\n");
+        write_raw(global.path(), "[run\nprofile = \"swift\"\n");
+
+        let err = VibepodConfig::load(project.path(), global.path())
+            .expect_err("syntax error in global config.toml must not be swallowed as 'no config'");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("config.toml"),
+            "error must name the offending file: {message}"
+        );
+    }
+
+    #[test]
+    fn load_fails_with_path_context_on_type_error_in_global_config() {
+        let project = tempfile::tempdir().expect("failed to create project tempdir");
+        let global = tempfile::tempdir().expect("failed to create global tempdir");
+        write_raw(&project.path().join(".vibepod"), "[run]\nlang = \"rust\"\n");
+        write_raw(global.path(), "[run]\nprofile = 123\n");
+
+        let err = VibepodConfig::load(project.path(), global.path())
+            .expect_err("type error in global config.toml must not be swallowed as 'no config'");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("config.toml"),
+            "error must name the offending file: {message}"
         );
     }
 }

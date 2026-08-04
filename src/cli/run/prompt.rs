@@ -406,9 +406,44 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
     // タイムアウト時は workspace を一切変更しない（要件2: 設計書 第3節）。
     // エージェントのコミット・未コミット変更・未追跡ファイルはそのまま残し、
     // セッションも restored 扱いにしない（`vibepod restore` による手動復元の
-    // 対象として残す）。ここでは中断理由・上限値・ログパスから組み立てた
-    // stderr メッセージを出すのみで、git コマンドは一切呼ばない。
+    // 対象として残す）。ここで呼ぶ `git::get_head_hash` / `git::has_uncommitted_changes`
+    // は状態を読むだけの read-only 呼び出しであり、workspace を変更する
+    // git コマンド（reset / clean 等）は一切呼ばない。
     if was_timed_out {
+        // F2/F3（フル再レビュー Major 指摘）: `vibepod restore` は未コミット
+        // 変更が残っていると必ず bail する（restore.rs）ため、無条件に
+        // 案内すると到達不能なコマンドを勧めてしまう。実際の状態を読んで
+        // `render_timeout_message` の分岐に渡す。
+        //
+        // `--worktree` のときは `ctx.effective_workspace` が
+        // `.worktrees/<dir>` を指すため、そのまま同じ経路で head/uncommitted
+        // を調べれば worktree 側の状態になる（cwd を余分に見に行く必要はない）。
+        //
+        // Copilot 指摘 + reviewer mn2（フル再レビュー後、独立に再検出）:
+        // 以前はここで `has_uncommitted` の probe 失敗を `.unwrap_or(true)`
+        // で「変更あり」に決め打ちしていたが、これは probe が実際には
+        // 確認できていない事実を断定してしまう（一見安全側に見えても、
+        // 「未コミットあり」という誤った具体的な状態を語ることに変わりは
+        // ない）。`get_head_hash`（`Result`）と
+        // `try_has_uncommitted_changes`（`Option`）の**どちらかが失敗したら**
+        // 状態全体を `TimeoutWorkspaceState::Unknown` にする — 部分的に
+        // 得られた情報だけで確度の低い断定をしない。
+        let workspace_path = std::path::Path::new(&ctx.effective_workspace);
+        let head_result = crate::git::get_head_hash(workspace_path);
+        let uncommitted_result = crate::git::try_has_uncommitted_changes(workspace_path);
+        let state = match (head_result, uncommitted_result) {
+            (Ok(current_head), Some(has_uncommitted)) => {
+                if has_uncommitted {
+                    super::TimeoutWorkspaceState::Uncommitted
+                } else if current_head != ctx.deferred_session.head_before {
+                    super::TimeoutWorkspaceState::CommittedClean
+                } else {
+                    super::TimeoutWorkspaceState::Unchanged
+                }
+            }
+            _ => super::TimeoutWorkspaceState::Unknown,
+        };
+
         eprintln!();
         eprintln!(
             "{}",
@@ -417,6 +452,8 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
                 idle_timeout_secs,
                 overall_timeout_secs,
                 log_path.as_deref(),
+                state,
+                ctx.worktree_dir_name.as_deref(),
             )
         );
     }

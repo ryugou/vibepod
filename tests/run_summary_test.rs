@@ -1,7 +1,8 @@
 //! `--timeout` パースと `--prompt` 実行後の要約レンダリング（純関数）の検証。
 
 use vibepod::cli::run::{
-    parse_timeout_secs, render_run_summary, render_timeout_message, DEFAULT_OVERALL_TIMEOUT_SECS,
+    parse_timeout_secs, render_run_summary, render_timeout_message, TimeoutWorkspaceState,
+    DEFAULT_OVERALL_TIMEOUT_SECS,
 };
 use vibepod::git::ChangedFiles;
 
@@ -165,43 +166,373 @@ fn summary_always_includes_logs_path() {
 //
 // 要件2（設計書 第3節）: タイムアウト時は workspace を一切変更しない。この
 // 関数は純関数であり git コマンドを一切呼ばないため、呼び出すだけで
-// 「git 操作を行わない」ことを構造的に保証できる。ここでは組み立てられる
-// 文言が期待する内容（git status / git log / vibepod restore への言及）を
-// 含むことを検証する。
+// 「git 操作を行わない」ことを構造的に保証できる。呼び出し元（prompt.rs）が
+// read-only な git 呼び出しで求めた状態を `TimeoutWorkspaceState` として
+// 渡す設計なので、ここでは状態ごとに出力される案内が正しく出し分けられる
+// ことを検証する。
+//
+// F2（フル再レビュー Major 指摘）: `vibepod restore` は未コミット変更が
+// 残っていると必ず bail するため、無条件に案内すると到達不能なコマンドを
+// 勧めてしまっていた。cwd（`worktree_dir = None`）での3状態:
+//   (a) Uncommitted     → restore 不可の理由 + 破棄/保持の選択肢
+//   (b) CommittedClean  → 従来通り restore 案内
+//   (c) Unchanged       → 「変更なし」のみ
+//
+// F3（フル再レビュー Major 指摘）: `--worktree` 実行では成果物が
+// `.worktrees/<dir>` にあり `vibepod restore` は適用できないため、
+// `worktree_dir = Some(..)` のときは cwd 前提の案内を一切出さず、
+// `git -C .worktrees/<dir>` 経由の案内に置き換える。
+//
+// Copilot 指摘 + reviewer mn2（フル再レビュー後の独立検出）: probe
+// （`git::get_head_hash` / `git::try_has_uncommitted_changes`）が失敗した
+// 場合、以前は `has_uncommitted` を `.unwrap_or(true)` で決め打ちしており、
+// これは「変更あり」という誤った断定だった（true 決め打ちは一見安全側に
+// 見えるが、実際には存在しない `vibepod restore` 不可の理由を語ったり、
+// 逆に他の分岐で誤った確度の案内を出したりし得る）。`TimeoutWorkspaceState`
+// に第4の状態 `Unknown` を導入し、probe 失敗時は状態を断定せず「確認でき
+// なかった」旨と手動確認コマンドのみを示す（4番目の状態: (d) Unknown）。
 
-#[test]
-fn timeout_message_mentions_recovery_steps_not_reset() {
-    let out = render_timeout_message(
+fn timeout_msg(state: TimeoutWorkspaceState, worktree_dir: Option<&str>) -> String {
+    render_timeout_message(
         false,
         900,
         1800,
         Some(std::path::Path::new("/tmp/logs.txt")),
-    );
+        state,
+        worktree_dir,
+    )
+}
+
+const ALL_STATES: [TimeoutWorkspaceState; 4] = [
+    TimeoutWorkspaceState::Uncommitted,
+    TimeoutWorkspaceState::CommittedClean,
+    TimeoutWorkspaceState::Unchanged,
+    TimeoutWorkspaceState::Unknown,
+];
+
+#[test]
+fn timeout_message_never_claims_an_automatic_reset() {
+    // 状態の組み合わせによらず、workspace が自動でリセットされたと誤読
+    // させる文言を含んではならない（要件2の不変条件）。
+    //
+    // MJ1（フル再レビュー指摘）で破棄コマンドを `git reset --hard` に
+    // 変更したため、素の "reset" という単語自体は（バッククォート付きの
+    // 手動実行コマンドとして）メッセージに正当に現れるようになった。
+    // このテストが本来防ぎたいのは「vibepod が自動でリセットした」という
+    // 過去形の断定であって、「あなたが `git reset --hard` を実行すれば
+    // 戻せる」という手動コマンドの案内ではない。そのため判定を、自動実行を
+    // 意味するフレーズの不在に絞る。
+    let automatic_claim_phrases = [
+        "自動でリセット",
+        "自動的にリセット",
+        "リセットされました",
+        // 旧実装が実際に出力していた能動形（「作業ディレクトリを {} に
+        // リセットしました。」）。最も可能性の高い回帰形なので明示的に禁止する。
+        "リセットしました",
+        "リセット済み",
+        "automatically reset",
+        "has been reset",
+    ];
+    for state in ALL_STATES {
+        for worktree_dir in [None, Some("vibepod-prompt-20260803-000000")] {
+            let out = timeout_msg(state, worktree_dir);
+            for phrase in automatic_claim_phrases {
+                assert!(
+                    !out.contains(phrase),
+                    "must not claim an automatic reset happened (found {phrase:?}, \
+                     state={state:?}, worktree_dir={worktree_dir:?}): {out}"
+                );
+            }
+        }
+    }
+}
+
+// --- cwd（worktree_dir = None）: F2 の3分岐 ---
+
+#[test]
+fn cwd_with_uncommitted_changes_says_restore_is_unavailable_and_offers_discard_or_keep() {
+    let out = timeout_msg(TimeoutWorkspaceState::Uncommitted, None);
     assert!(
-        out.contains("git status"),
-        "must tell the operator how to inspect the workspace: {}",
+        out.contains("git status") && out.contains("git log"),
+        "must still tell the operator how to inspect the workspace: {}",
         out
     );
     assert!(
-        out.contains("git log"),
-        "must tell the operator how to inspect commits: {}",
+        out.contains("`vibepod restore` は未コミットの変更が残っていると実行できません"),
+        "must explain why `vibepod restore` cannot be used here: {}",
         out
     );
     assert!(
-        out.contains("vibepod restore"),
-        "must point to the manual recovery command: {}",
+        out.contains("git reset --hard && git clean -fd") && out.contains("取り消し不能"),
+        "must offer the discard command and flag it as irreversible: {}",
         out
     );
     assert!(
-        !out.contains("reset"),
-        "must not claim an automatic reset happened: {}",
+        // MJ1（フル再レビュー指摘）回帰: `git checkout .` は index から
+        // working tree を復元するだけでステージ済み変更を戻さず、
+        // `git clean -fd` も `git add` 済みの新規ファイル（index 入り =
+        // tracked 扱い）を消せない。案内どおり破棄しても
+        // restore.rs:47 の bail が再現していた。引数無し `git reset --hard`
+        // は HEAD を動かさず index + working tree の両方を HEAD の状態へ
+        // 戻すため、この問題が起きない。
+        !out.contains("git checkout ."),
+        "must not offer the flawed `git checkout .` discard command (leaves staged changes \
+         behind): {}",
+        out
+    );
+    assert!(
+        out.contains("git add -A && git commit"),
+        "must offer a way to keep the changes (commit then restore): {}",
         out
     );
 }
 
 #[test]
+fn cwd_committed_and_clean_recommends_vibepod_restore() {
+    let out = timeout_msg(TimeoutWorkspaceState::CommittedClean, None);
+    assert!(
+        out.contains("git status") && out.contains("git log"),
+        "must tell the operator how to inspect the workspace: {}",
+        out
+    );
+    assert!(
+        out.contains("開始時点へ戻すには: `vibepod restore`"),
+        "must point to the manual recovery command when it is actually usable: {}",
+        out
+    );
+}
+
+#[test]
+fn cwd_no_changes_says_nothing_changed_and_does_not_mention_restore() {
+    let out = timeout_msg(TimeoutWorkspaceState::Unchanged, None);
+    assert!(
+        out.contains("開始時点から workspace に変更はありません"),
+        "must say plainly that nothing changed: {}",
+        out
+    );
+    assert!(
+        !out.contains("vibepod restore"),
+        "must not suggest restoring when there is nothing to restore: {}",
+        out
+    );
+}
+
+#[test]
+fn cwd_unknown_state_does_not_guess_and_avoids_destructive_commands() {
+    // Copilot 指摘 + reviewer mn2: probe 失敗時に「変更なし」「コミット済み」
+    // 「未コミットあり」のいずれかを勝手に断定してはならない。破壊的
+    // コマンド（reset --hard 等）や `vibepod restore` も勧めてはならない
+    // （実際にはまだ未コミット変更が残っているかもしれず、`vibepod restore`
+    // は bail するか、あるいは意図せず「使える」と誤解させるかのいずれか
+    // になり得るため）。
+    let out = timeout_msg(TimeoutWorkspaceState::Unknown, None);
+    assert!(
+        out.contains("確認できませんでした"),
+        "must state that the workspace state could not be determined: {}",
+        out
+    );
+    assert!(
+        out.contains("git status"),
+        "must still offer a manual way to check: {}",
+        out
+    );
+    assert!(
+        !out.contains("vibepod restore"),
+        "must not suggest `vibepod restore` when the state is unknown: {}",
+        out
+    );
+    assert!(
+        !out.contains("reset --hard"),
+        "must not offer a destructive discard command when the state is unknown: {}",
+        out
+    );
+    assert!(
+        !out.contains("変更はありません") && !out.contains("コミット済み"),
+        "must not assert a definitive state when probes failed: {}",
+        out
+    );
+}
+
+// --- worktree（worktree_dir = Some）: F3 ---
+
+const WORKTREE_DIR: &str = "vibepod-prompt-20260803-120000";
+
+#[test]
+fn worktree_with_uncommitted_changes_uses_git_dash_c_discard_not_vibepod_restore() {
+    let out = timeout_msg(TimeoutWorkspaceState::Uncommitted, Some(WORKTREE_DIR));
+    assert!(
+        out.contains(&format!(".worktrees/{}", WORKTREE_DIR)),
+        "must name the worktree path: {}",
+        out
+    );
+    assert!(
+        out.contains(&format!("git -C .worktrees/{} status", WORKTREE_DIR)),
+        "must offer a git -C status command scoped to the worktree: {}",
+        out
+    );
+    assert!(
+        // Q3（simplify 指摘）回帰: cwd/worktree の3状態テンプレートが二重
+        // 実装だったせいで、worktree の「未コミットあり」分岐にだけ `log`
+        // が無かった（cwd 側は status/log の両方を案内していた）。確認
+        // コマンドは両モードで対称であるべき。
+        out.contains(&format!("git -C .worktrees/{} log", WORKTREE_DIR)),
+        "must offer a git -C log command scoped to the worktree (symmetry with cwd, which \
+         offers both status and log here): {}",
+        out
+    );
+    assert!(
+        out.contains(&format!("git -C .worktrees/{} reset --hard", WORKTREE_DIR))
+            && out.contains("取り消し不能"),
+        "must offer a worktree-scoped discard command flagged as irreversible: {}",
+        out
+    );
+    assert!(
+        // MJ1 回帰（worktree 版）: cwd 側と同じ理由で `checkout .` は
+        // ステージ済み変更を戻せない。
+        !out.contains("checkout ."),
+        "must not offer the flawed `checkout .` discard command: {}",
+        out
+    );
+    assert!(
+        !out.contains("vibepod restore"),
+        "vibepod restore operates on cwd, not the worktree, and must not be suggested: {}",
+        out
+    );
+    assert!(
+        // mn1（フル再レビュー指摘）: 未コミットの変更が残っている worktree に
+        // 対して素の `git worktree remove` は
+        // "contains modified or untracked files, use --force to delete it"
+        // で必ず失敗する。この分岐では --force 付きの案内でなければならない。
+        out.contains(&format!(
+            "git worktree remove --force .worktrees/{}",
+            WORKTREE_DIR
+        )),
+        "must offer --force when the worktree has uncommitted changes (plain `git worktree \
+         remove` fails on a dirty worktree): {}",
+        out
+    );
+}
+
+#[test]
+fn worktree_committed_and_clean_uses_git_dash_c_diff_not_vibepod_restore() {
+    let out = timeout_msg(TimeoutWorkspaceState::CommittedClean, Some(WORKTREE_DIR));
+    assert!(
+        out.contains(&format!("git -C .worktrees/{} log", WORKTREE_DIR)),
+        "must offer a way to inspect the worktree's commits: {}",
+        out
+    );
+    assert!(
+        // Q3（simplify 指摘）回帰: worktree の「コミット済みのみ・clean」
+        // 分岐にだけ `status` が無かった（cwd 側は status/log の両方を
+        // 案内していた）。確認コマンドは両モードで対称であるべき。
+        out.contains(&format!("git -C .worktrees/{} status", WORKTREE_DIR)),
+        "must offer a git -C status command scoped to the worktree (symmetry with cwd, which \
+         offers both status and log here): {}",
+        out
+    );
+    assert!(
+        out.contains(&format!("git -C .worktrees/{} diff main", WORKTREE_DIR)),
+        "must offer a way to diff the worktree branch against main: {}",
+        out
+    );
+    assert!(
+        !out.contains("vibepod restore"),
+        "vibepod restore operates on cwd, not the worktree, and must not be suggested: {}",
+        out
+    );
+    assert!(
+        // mn1: ツリーが clean（コミット済みのみ）なら `git worktree remove`
+        // は素のまま成功するため、--force を勧める必要はない。
+        out.contains(&format!("git worktree remove .worktrees/{}", WORKTREE_DIR))
+            && !out.contains("--force"),
+        "must offer plain `git worktree remove` (no --force needed on a clean worktree): {}",
+        out
+    );
+}
+
+#[test]
+fn worktree_no_changes_still_names_the_worktree_path() {
+    let out = timeout_msg(TimeoutWorkspaceState::Unchanged, Some(WORKTREE_DIR));
+    assert!(
+        out.contains(&format!(".worktrees/{}", WORKTREE_DIR)),
+        "must name the worktree path even when nothing changed: {}",
+        out
+    );
+    assert!(
+        out.contains("開始時点から変更はありません"),
+        "must say plainly that nothing changed: {}",
+        out
+    );
+    assert!(
+        !out.contains("vibepod restore"),
+        "vibepod restore operates on cwd, not the worktree, and must not be suggested: {}",
+        out
+    );
+    assert!(
+        // mn1: 変更が無いツリーも clean なので --force は不要。
+        out.contains(&format!("git worktree remove .worktrees/{}", WORKTREE_DIR))
+            && !out.contains("--force"),
+        "must offer plain `git worktree remove` (no --force needed when nothing changed): {}",
+        out
+    );
+}
+
+#[test]
+fn worktree_unknown_state_does_not_guess_and_avoids_destructive_commands() {
+    // Copilot 指摘 + reviewer mn2（worktree 版）: probe 失敗時は cwd と同じく
+    // 状態を断定せず、`vibepod restore`・破棄コマンド・`git worktree remove`
+    // （`--force` の有無を問わず — dirty かどうか分からないため削除自体を
+    // 勧めない）のいずれも出さない。
+    let out = timeout_msg(TimeoutWorkspaceState::Unknown, Some(WORKTREE_DIR));
+    assert!(
+        out.contains(&format!(".worktrees/{}", WORKTREE_DIR)),
+        "must still name the worktree path: {}",
+        out
+    );
+    assert!(
+        out.contains("確認できませんでした"),
+        "must state that the workspace state could not be determined: {}",
+        out
+    );
+    assert!(
+        out.contains(&format!("git -C .worktrees/{} status", WORKTREE_DIR)),
+        "must offer a git -C status command scoped to the worktree: {}",
+        out
+    );
+    assert!(
+        !out.contains("vibepod restore"),
+        "must not suggest `vibepod restore` when the state is unknown: {}",
+        out
+    );
+    assert!(
+        !out.contains("reset --hard"),
+        "must not offer a destructive discard command when the state is unknown: {}",
+        out
+    );
+    assert!(
+        !out.contains("git worktree remove"),
+        "must not suggest removing the worktree when it's unknown whether it's dirty: {}",
+        out
+    );
+    assert!(
+        !out.contains("変更はありません") && !out.contains("コミット済み"),
+        "must not assert a definitive state when probes failed: {}",
+        out
+    );
+}
+
+// --- タイムアウト表示（ラベル・上限値） ---
+
+#[test]
 fn timeout_message_idle_uses_idle_limit() {
-    let out = render_timeout_message(false, 300, 1800, None);
+    let out = render_timeout_message(
+        false,
+        300,
+        1800,
+        None,
+        TimeoutWorkspaceState::CommittedClean,
+        None,
+    );
     assert!(
         out.contains("ストリーム無出力"),
         "idle timeout should be labeled as such: {}",
@@ -216,7 +547,14 @@ fn timeout_message_idle_uses_idle_limit() {
 
 #[test]
 fn timeout_message_overall_uses_overall_limit() {
-    let out = render_timeout_message(true, 300, 1800, None);
+    let out = render_timeout_message(
+        true,
+        300,
+        1800,
+        None,
+        TimeoutWorkspaceState::CommittedClean,
+        None,
+    );
     assert!(
         out.contains("実時間"),
         "overall timeout should be labeled as such: {}",
@@ -231,13 +569,27 @@ fn timeout_message_overall_uses_overall_limit() {
 
 #[test]
 fn timeout_message_includes_log_path_when_present() {
-    let out = render_timeout_message(true, 300, 60, Some(std::path::Path::new("/w/logs.txt")));
+    let out = render_timeout_message(
+        true,
+        300,
+        60,
+        Some(std::path::Path::new("/w/logs.txt")),
+        TimeoutWorkspaceState::CommittedClean,
+        None,
+    );
     assert!(out.contains("/w/logs.txt"), "got: {}", out);
 }
 
 #[test]
 fn timeout_message_omits_log_path_when_absent() {
-    let out = render_timeout_message(true, 300, 60, None);
+    let out = render_timeout_message(
+        true,
+        300,
+        60,
+        None,
+        TimeoutWorkspaceState::CommittedClean,
+        None,
+    );
     assert!(
         !out.contains("ログ:"),
         "no log line should be printed when no path is available: {}",
@@ -247,6 +599,34 @@ fn timeout_message_omits_log_path_when_absent() {
 
 #[test]
 fn timeout_message_under_a_minute_uses_seconds() {
-    let out = render_timeout_message(true, 300, 45, None);
+    let out = render_timeout_message(
+        true,
+        300,
+        45,
+        None,
+        TimeoutWorkspaceState::CommittedClean,
+        None,
+    );
     assert!(out.contains("45 秒"), "got: {}", out);
+}
+
+#[test]
+fn timeout_message_with_remainder_seconds_shows_minutes_and_seconds() {
+    // F9 回帰: `limit_secs / 60` の整数除算だけだと 90 秒が「1 分」と表示され、
+    // 切り捨てられた 30 秒の端数が運用者に伝わらない（実際には 1 分 30 秒
+    // 待たされたのに「1 分」と言われると、タイムアウト設定値の見直しを
+    // 誤らせる）。端数がある場合は分と秒の両方を表示すること。
+    let out = render_timeout_message(
+        true,
+        300,
+        90,
+        None,
+        TimeoutWorkspaceState::CommittedClean,
+        None,
+    );
+    assert!(
+        out.contains("1 分 30 秒"),
+        "90s should read as '1 分 30 秒', not silently truncate the remainder: {}",
+        out
+    );
 }

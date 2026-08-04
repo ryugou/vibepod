@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+mod common;
+
 /// Get the path to the built binary
 fn vibepod_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_vibepod"))
@@ -60,7 +62,10 @@ fn test_run_outside_git_repo_fails() {
 /// `git branch -D` の手動クリーンアップが必要になる。この回帰を検知する。
 #[test]
 fn test_run_worktree_invalid_profile_fails_before_creating_worktree() {
-    let tmp = tempfile::TempDir::new().unwrap();
+    // F10（フル再レビュー指摘）: git リポジトリのセットアップは
+    // `tests/common/mod.rs` の `init_test_repo()` に集約されている
+    // （`tests/git_test.rs` と共有）。
+    let tmp = common::init_test_repo();
 
     let git = |args: &[&str]| {
         Command::new("git")
@@ -69,14 +74,6 @@ fn test_run_worktree_invalid_profile_fails_before_creating_worktree() {
             .output()
             .expect("Failed to run git")
     };
-    assert!(git(&["init"]).status.success());
-    assert!(git(&["config", "user.email", "test@example.com"])
-        .status
-        .success());
-    assert!(git(&["config", "user.name", "Test"]).status.success());
-    std::fs::write(tmp.path().join("README.md"), "test\n").unwrap();
-    assert!(git(&["add", "."]).status.success());
-    assert!(git(&["commit", "-m", "initial"]).status.success());
 
     // `kotlin` は VALID_PROFILES に含まれない不正値。
     std::fs::create_dir_all(tmp.path().join(".vibepod")).unwrap();

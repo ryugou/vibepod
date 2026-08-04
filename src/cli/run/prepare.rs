@@ -323,6 +323,19 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         (cwd_str.clone(), None, None)
     };
 
+    // F11（フル再レビュー指摘）: この Package.swift 検知は、すぐ下の
+    // `detect_languages` とは意図的に別立てにしている。`detect_languages` は
+    // `--lang` 表示ラベルや `get_lang_install_cmd` によるコンテナ内インストール
+    // コマンドの機構に載るが、Swift は profile 経由のイメージ選定（2.2 節。
+    // Swift toolchain 自体は Dockerfile に焼き込み済みで、apt 等でその場
+    // インストールしない）で扱う言語であり、この2つの仕組みに swift を
+    // 混ぜたくないため。
+    //
+    // 判定対象を `cwd` ではなく `effective_workspace` にしているのは、
+    // `--worktree` 実行時に Package.swift の有無を実際の作業先（worktree 内）
+    // で判定すべきという設計書 2.5 手順4の要件に従うため。cwd で判定すると、
+    // worktree 内にのみ Package.swift が存在するケースを見逃す。
+    //
     // profile 未指定かつ workspace 直下に Package.swift があるプロジェクトへ、
     // profile 設定を促す 1 行の注意を出す。実行は継続する（設計書 2.5 手順4）。
     if effective_profile.is_none()
