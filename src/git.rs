@@ -93,6 +93,37 @@ pub fn has_uncommitted_changes(path: &Path) -> bool {
     }
 }
 
+/// `has_uncommitted_changes` の probe 失敗を区別できる版。
+///
+/// Copilot 指摘 + reviewer mn2: `has_uncommitted_changes` は spawn 失敗・
+/// git 非ゼロ終了（非 git ディレクトリ等）を区別せず `false`（clean）に
+/// 潰す。`restore.rs` はこの関数を「bail するかどうか」の判定にしか使って
+/// おらず、probe 失敗を「変更なし」寄りに倒しても実害が無い（bail しない
+/// 方向へ倒れるだけ）ため、`has_uncommitted_changes` 自体の既存挙動は
+/// 変更しない。
+///
+/// 一方タイムアウト案内（`render_timeout_message`）は probe 失敗を
+/// 「clean」と誤断定すると、実際には変更が残っているかもしれない
+/// workspace に対して `vibepod restore` や `--force` 無しの
+/// `git worktree remove` を安全であるかのように勧めてしまう危険がある。
+/// そのため probe 失敗を `None` として明示的に区別できるこの関数を別途
+/// 用意する。
+///
+/// `Some(true)`: 未コミットの変更あり。`Some(false)`: クリーン。
+/// `None`: spawn 失敗、または `git` が非ゼロ終了した（probe 自体が信頼
+/// できない）。
+pub fn try_has_uncommitted_changes(path: &Path) -> Option<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(!output.stdout.is_empty())
+}
+
 pub fn get_commit_log(path: &Path, from: &str, to: &str) -> Result<String> {
     let output = Command::new("git")
         .args(["log", "--oneline", &format!("{}..{}", from, to)])

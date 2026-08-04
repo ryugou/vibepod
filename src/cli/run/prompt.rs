@@ -418,14 +418,31 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
         // `--worktree` のときは `ctx.effective_workspace` が
         // `.worktrees/<dir>` を指すため、そのまま同じ経路で head/uncommitted
         // を調べれば worktree 側の状態になる（cwd を余分に見に行く必要はない）。
+        //
+        // Copilot 指摘 + reviewer mn2（フル再レビュー後、独立に再検出）:
+        // 以前はここで `has_uncommitted` の probe 失敗を `.unwrap_or(true)`
+        // で「変更あり」に決め打ちしていたが、これは probe が実際には
+        // 確認できていない事実を断定してしまう（一見安全側に見えても、
+        // 「未コミットあり」という誤った具体的な状態を語ることに変わりは
+        // ない）。`get_head_hash`（`Result`）と
+        // `try_has_uncommitted_changes`（`Option`）の**どちらかが失敗したら**
+        // 状態全体を `TimeoutWorkspaceState::Unknown` にする — 部分的に
+        // 得られた情報だけで確度の低い断定をしない。
         let workspace_path = std::path::Path::new(&ctx.effective_workspace);
-        // head_advanced の判定に使う `get_head_hash` 自体が失敗した場合
-        // （通常は起こらないが、権限やディスク不調等）は「変更なし」と
-        // 誤って安心させるより「変更ありかもしれない」側に倒す。
-        let head_advanced = crate::git::get_head_hash(workspace_path)
-            .map(|current_head| current_head != ctx.deferred_session.head_before)
-            .unwrap_or(true);
-        let has_uncommitted = crate::git::has_uncommitted_changes(workspace_path);
+        let head_result = crate::git::get_head_hash(workspace_path);
+        let uncommitted_result = crate::git::try_has_uncommitted_changes(workspace_path);
+        let state = match (head_result, uncommitted_result) {
+            (Ok(current_head), Some(has_uncommitted)) => {
+                if has_uncommitted {
+                    super::TimeoutWorkspaceState::Uncommitted
+                } else if current_head != ctx.deferred_session.head_before {
+                    super::TimeoutWorkspaceState::CommittedClean
+                } else {
+                    super::TimeoutWorkspaceState::Unchanged
+                }
+            }
+            _ => super::TimeoutWorkspaceState::Unknown,
+        };
 
         eprintln!();
         eprintln!(
@@ -435,8 +452,7 @@ pub(super) async fn run_fire_and_forget(opts: &RunOptions, ctx: &RunContext) -> 
                 idle_timeout_secs,
                 overall_timeout_secs,
                 log_path.as_deref(),
-                head_advanced,
-                has_uncommitted,
+                state,
                 ctx.worktree_dir_name.as_deref(),
             )
         );

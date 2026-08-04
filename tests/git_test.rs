@@ -73,6 +73,44 @@ fn test_has_uncommitted_changes_dirty() {
     assert!(vibepod::git::has_uncommitted_changes(dir.path()));
 }
 
+// Copilot 指摘 + reviewer mn2: `has_uncommitted_changes` は probe 失敗
+// （spawn 失敗・git 非ゼロ終了）を `false`（＝clean）に潰すため、呼び出し元
+// （タイムアウト案内）が「変更なし」と誤断定し得る。`try_has_uncommitted_changes`
+// は probe 失敗を `None` として区別できる新関数（`has_uncommitted_changes`
+// 自体の挙動は `restore.rs` への影響を避けるため変更しない）。
+
+#[test]
+fn test_try_has_uncommitted_changes_clean() {
+    let dir = init_test_repo();
+    assert_eq!(
+        vibepod::git::try_has_uncommitted_changes(dir.path()),
+        Some(false)
+    );
+}
+
+#[test]
+fn test_try_has_uncommitted_changes_dirty() {
+    let dir = init_test_repo();
+    std::fs::write(dir.path().join("file.txt"), "hello").unwrap();
+    assert_eq!(
+        vibepod::git::try_has_uncommitted_changes(dir.path()),
+        Some(true)
+    );
+}
+
+#[test]
+fn test_try_has_uncommitted_changes_none_outside_a_git_repo() {
+    // `git status --porcelain` は非 git ディレクトリでは非ゼロ終了する
+    // （"fatal: not a git repository"）。probe 失敗として `None` を返す
+    // こと — `has_uncommitted_changes` のように `false`（clean）へ
+    // 誤って倒さないこと。
+    let non_git = TempDir::new().unwrap();
+    assert_eq!(
+        vibepod::git::try_has_uncommitted_changes(non_git.path()),
+        None
+    );
+}
+
 #[test]
 fn changed_files_reports_unavailable_outside_a_git_repo() {
     // A non-git directory makes `git diff` fail; the result must be the

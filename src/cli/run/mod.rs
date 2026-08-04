@@ -192,55 +192,89 @@ fn format_timeout_duration(limit_secs: u64) -> String {
     }
 }
 
+/// タイムアウト時点の workspace 状態。`render_timeout_message` の案内内容を
+/// 決める唯一の入力（`worktree_dir` を除く）。
+///
+/// Copilot 指摘 + reviewer mn2（フル再レビュー後、独立に再検出）: 以前は
+/// `head_advanced: bool` / `has_uncommitted: bool` の2引数で表現しており、
+/// 呼び出し元（`prompt.rs`）は probe（`git::get_head_hash` /
+/// `git::try_has_uncommitted_changes`）が失敗した場合に
+/// `has_uncommitted.unwrap_or(true)` のようなフォールバック値を埋めていた。
+/// 「true 決め打ち」は一見安全側に見えるが、実際には存在しない
+/// `vibepod restore` 不可の理由を語ったり、そもそも「未コミットあり」と
+/// 断定すること自体が probe が実際に確認できていない事実を語ることになる
+/// （握り潰しの一種）。`Unknown` を独立した状態として持つことで、
+/// 「確認できなかった」という事実そのものを案内でき、bool 2つの組み合わせ
+/// では表現できない第4の状態を型で表現する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutWorkspaceState {
+    /// 未コミットの変更が残っている（probe 成功）。
+    Uncommitted,
+    /// コミット済みの変更のみで、ツリーは clean（probe 成功）。
+    CommittedClean,
+    /// 開始時点から変更なし（probe 成功）。
+    Unchanged,
+    /// probe が失敗し、状態を確認できなかった（spawn 失敗・git 非ゼロ終了）。
+    Unknown,
+}
+
 /// タイムアウト時に stderr へ出す打ち切りメッセージを組み立てる純関数。
 ///
 /// 要件2（設計書 第3節: タイムアウト時の workspace 保全）: タイムアウト時は
 /// workspace の git 状態を一切変更しないため、この関数は git コマンドを一度も
 /// 呼ばない。呼び出し元（`prompt.rs`）が read-only な `git::get_head_hash` /
-/// `git::has_uncommitted_changes` で先に状態を調べ、その結果を bool として
-/// ここへ渡す（この関数自体は純関数のまま維持する）。この doc コメントが
-/// 案内文言・各コマンドを選んだ判断根拠の正本（設計spec 3.2節はここへの
-/// 参照のみを持つ）。
+/// `git::try_has_uncommitted_changes` で先に状態を調べ、その結果を
+/// `TimeoutWorkspaceState` としてここへ渡す（この関数自体は純関数のまま
+/// 維持する）。この doc コメントが案内文言・各コマンドを選んだ判断根拠の
+/// 正本（設計spec 3.2節はここへの参照のみを持つ）。
 ///
-/// 案内は「未コミット変更あり」「コミット済みのみ・clean」「開始時点から無変更」
-/// の3状態（F2, フル再レビュー Major 指摘）を軸に**1回だけ**書く。
-/// `worktree_dir` が `Some(dir)` のとき（F3）は、確認・破棄コマンドの対象を
-/// `.worktrees/<dir>`（cwd とは別の git worktree）へ切り替えるだけで、3状態
-/// の構造自体は cwd と共有する — `git` クロージャが `worktree_dir` の有無で
+/// 案内は `TimeoutWorkspaceState` の4状態（F2 で導入した3状態 + Copilot/mn2
+/// で追加した `Unknown`）を軸に**1回だけ**書く。`worktree_dir` が
+/// `Some(dir)` のとき（F3）は、確認・破棄コマンドの対象を `.worktrees/<dir>`
+/// （cwd とは別の git worktree）へ切り替えるだけで、状態分岐の構造自体は
+/// cwd と共有する — `git` クロージャが `worktree_dir` の有無で
 /// `git -C .worktrees/<dir> <args>` / `git <args>` を組み立てる。
 ///
 /// Q3（フル再レビュー後 simplify 指摘）: 以前は `match worktree_dir { Some
-/// => {3状態}, None => {3状態} }` という二重実装で、cwd/worktree 双方に
-/// ほぼ同じ分岐を別々に書いていた。この二重化自体が実装漏れの温床になって
-/// おり、実際に worktree の「未コミットあり」分岐にだけ `log` が無い・
-/// 「コミット済みのみ」分岐にだけ `status` が無いという非対称（本来どちらの
-/// モードでも確認手段は同じであるべき）が生じていた。3状態の分岐を1本化し、
-/// worktree/cwd の違いは `git` クロージャと状態末尾の締めの文言だけに閉じ
-/// 込めることで、この種の漏れが構造的に起きなくなる。
+/// => {状態分岐}, None => {状態分岐} }` という二重実装で、cwd/worktree
+/// 双方にほぼ同じ分岐を別々に書いていた。この二重化自体が実装漏れの温床に
+/// なっており、実際に worktree の「未コミットあり」分岐にだけ `log` が
+/// 無い・「コミット済みのみ」分岐にだけ `status` が無いという非対称
+/// （本来どちらのモードでも確認手段は同じであるべき）が生じていた。状態
+/// 分岐を1本化し、worktree/cwd の違いは `git` クロージャと状態末尾の締めの
+/// 文言だけに閉じ込めることで、この種の漏れが構造的に起きなくなる。
 ///
 /// 各状態の内容:
-/// - **未コミット変更あり**: `vibepod restore` は未コミット変更が残っている
-///   と必ず bail する（`git status --porcelain` が非空なら "Uncommitted
-///   changes detected" で失敗）ため、cwd では使えない旨を明記する。確認
-///   コマンド（`status` / `log`、両モード対称）、破棄コマンド（MJ1: 引数
-///   無し `reset --hard`（HEAD を動かさず index + working tree を HEAD の
-///   状態へ戻す）と `clean -fd` の組み合わせ — 以前の `checkout .` は index
-///   から working tree を復元するだけでステージ済み変更を戻せず、
-///   `clean -fd` も `git add` 済みファイルを消せなかったため、案内どおり
-///   破棄しても bail が再現していた）を示す。締めは cwd なら保持/コミット
-///   の選択肢、worktree なら保持の選択肢に加え worktree 削除コマンド
-///   （mn1: dirty な worktree への素の `git worktree remove` は "contains
-///   modified or untracked files, use --force to delete it" で必ず失敗する
-///   ため `--force` 付き）。
-/// - **コミット済みのみ・clean**: 確認コマンド（`status` / `log`）に加え、
-///   worktree のみ `diff main` も案内する（cwd は自分自身のブランチとの
-///   diff になり無意味なため、worktree 固有の価値がある `diff main` だけを
-///   意図的に非対称のまま残す — 実装漏れではない）。締めは cwd なら
-///   `vibepod restore`、worktree なら（clean なので `--force` 無しの）
-///   `git worktree remove`。
-/// - **開始時点から無変更**: その旨のみ。`vibepod restore` も worktree 削除
-///   コマンドも、それぞれ案内する価値がない cwd/worktree 側では出さない
-///   （worktree 削除は無変更でも案内する — 掃除のため）。
+/// - **`Uncommitted`（未コミット変更あり）**: `vibepod restore` は未コミット
+///   変更が残っていると必ず bail する（`git status --porcelain` が非空なら
+///   "Uncommitted changes detected" で失敗）ため、cwd では使えない旨を明記
+///   する。確認コマンド（`status` / `log`、両モード対称）、破棄コマンド
+///   （MJ1: 引数無し `reset --hard`（HEAD を動かさず index + working tree
+///   を HEAD の状態へ戻す）と `clean -fd` の組み合わせ — 以前の
+///   `checkout .` は index から working tree を復元するだけでステージ済み
+///   変更を戻せず、`clean -fd` も `git add` 済みファイルを消せなかった
+///   ため、案内どおり破棄しても bail が再現していた）を示す。締めは cwd
+///   なら保持/コミットの選択肢、worktree なら保持の選択肢に加え worktree
+///   削除コマンド（mn1: dirty な worktree への素の `git worktree remove`
+///   は "contains modified or untracked files, use --force to delete it"
+///   で必ず失敗するため `--force` 付き）。
+/// - **`CommittedClean`（コミット済みのみ・clean）**: 確認コマンド
+///   （`status` / `log`）に加え、worktree のみ `diff main` も案内する
+///   （cwd は自分自身のブランチとの diff になり無意味なため、worktree
+///   固有の価値がある `diff main` だけを意図的に非対称のまま残す —
+///   実装漏れではない）。締めは cwd なら `vibepod restore`、worktree なら
+///   （clean なので `--force` 無しの）`git worktree remove`。
+/// - **`Unchanged`（開始時点から無変更）**: その旨のみ。`vibepod restore`
+///   も worktree 削除コマンドも、それぞれ案内する価値がない cwd/worktree
+///   側では出さない（worktree 削除は無変更でも案内する — 掃除のため）。
+/// - **`Unknown`（probe 失敗、Copilot 指摘 + reviewer mn2）**: 状態を一切
+///   断定しない。「確認できなかった」旨と、手動確認コマンド（`status`)の
+///   みを示す。`vibepod restore`・破棄コマンド・worktree 削除コマンドは
+///   一切出さない — dirty かどうか分からない workspace に対してこれらを
+///   勧めると、実際には未コミット変更が残っているのに `vibepod restore`
+///   を試みて予期しない bail を招いたり、`git worktree remove`（force
+///   無し）が失敗したり、最悪 `--force` 付きの破棄コマンドが実在する変更を
+///   握り潰したりし得るため。
 ///
 /// 表示層のロジックを I/O から切り離してユニットテスト可能にするため、必要な
 /// 値はすべて引数で受け取る（`render_run_summary` と同じパターン）。
@@ -250,8 +284,7 @@ pub fn render_timeout_message(
     idle_timeout_secs: u64,
     overall_timeout_secs: u64,
     log_path: Option<&std::path::Path>,
-    head_advanced: bool,
-    has_uncommitted: bool,
+    state: TimeoutWorkspaceState,
     worktree_dir: Option<&str>,
 ) -> String {
     let kind_label = timeout_kind_label(overall_timed_out);
@@ -284,65 +317,69 @@ pub fn render_timeout_message(
         ));
     }
 
-    if has_uncommitted {
-        out.push_str(if worktree_dir.is_some() {
-            "  未コミットの変更があります。\n"
-        } else {
-            "  エージェントによる変更（コミット・未コミットとも）は workspace にそのまま残っています。\n"
-        });
-        out.push_str(&format!(
-            "  確認するには: `{}` / `{}`\n",
-            git("status"),
-            git("log")
-        ));
-        if worktree_dir.is_none() {
-            out.push_str("  `vibepod restore` は未コミットの変更が残っていると実行できません。\n");
-        }
-        out.push_str(&format!(
-            "  破棄するには（取り消し不能です）: `{} && {}`\n",
-            git("reset --hard"),
-            git("clean -fd")
-        ));
-        match worktree_dir {
-            None => out.push_str(
-                "  残したい場合は、そのまま保持するか `git add -A && git commit` でコミットしてから `vibepod restore` を使ってください。",
-            ),
-            Some(dir) => {
+    match state {
+        TimeoutWorkspaceState::Uncommitted => {
+            out.push_str(if worktree_dir.is_some() {
+                "  未コミットの変更があります。\n"
+            } else {
+                "  エージェントによる変更（コミット・未コミットとも）は workspace にそのまま残っています。\n"
+            });
+            out.push_str(&format!(
+                "  確認するには: `{}` / `{}`\n",
+                git("status"),
+                git("log")
+            ));
+            if worktree_dir.is_none() {
                 out.push_str(
-                    "  残したい場合は、そのまま保持するかそのブランチ内でコミットしてください。\n",
+                    "  `vibepod restore` は未コミットの変更が残っていると実行できません。\n",
                 );
-                out.push_str(&format!(
-                    "  未コミットの変更があるため、削除する場合は先に上記の破棄を行うか \
-                     `git worktree remove --force .worktrees/{}` を使ってください。",
-                    dir
-                ));
+            }
+            out.push_str(&format!(
+                "  破棄するには（取り消し不能です）: `{} && {}`\n",
+                git("reset --hard"),
+                git("clean -fd")
+            ));
+            match worktree_dir {
+                None => out.push_str(
+                    "  残したい場合は、そのまま保持するか `git add -A && git commit` でコミットしてから `vibepod restore` を使ってください。",
+                ),
+                Some(dir) => {
+                    out.push_str(
+                        "  残したい場合は、そのまま保持するかそのブランチ内でコミットしてください。\n",
+                    );
+                    out.push_str(&format!(
+                        "  未コミットの変更があるため、削除する場合は先に上記の破棄を行うか \
+                         `git worktree remove --force .worktrees/{}` を使ってください。",
+                        dir
+                    ));
+                }
             }
         }
-    } else if head_advanced {
-        out.push_str(if worktree_dir.is_some() {
-            "  変更はコミット済みです。\n"
-        } else {
-            "  エージェントによる変更はコミット済みで workspace にそのまま残っています。\n"
-        });
-        out.push_str(&format!(
-            "  確認するには: `{}` / `{}`\n",
-            git("status"),
-            git("log")
-        ));
-        match worktree_dir {
-            None => out.push_str("  開始時点へ戻すには: `vibepod restore`"),
-            Some(dir) => {
-                // worktree 固有: main との差分は worktree だけの価値がある
-                // （cwd は自分自身との diff になり無意味）。意図的な非対称。
-                out.push_str(&format!("  main との差分: `{}`\n", git("diff main")));
-                out.push_str(&format!(
-                    "  worktree を削除するには: `git worktree remove .worktrees/{}`",
-                    dir
-                ));
+        TimeoutWorkspaceState::CommittedClean => {
+            out.push_str(if worktree_dir.is_some() {
+                "  変更はコミット済みです。\n"
+            } else {
+                "  エージェントによる変更はコミット済みで workspace にそのまま残っています。\n"
+            });
+            out.push_str(&format!(
+                "  確認するには: `{}` / `{}`\n",
+                git("status"),
+                git("log")
+            ));
+            match worktree_dir {
+                None => out.push_str("  開始時点へ戻すには: `vibepod restore`"),
+                Some(dir) => {
+                    // worktree 固有: main との差分は worktree だけの価値がある
+                    // （cwd は自分自身との diff になり無意味）。意図的な非対称。
+                    out.push_str(&format!("  main との差分: `{}`\n", git("diff main")));
+                    out.push_str(&format!(
+                        "  worktree を削除するには: `git worktree remove .worktrees/{}`",
+                        dir
+                    ));
+                }
             }
         }
-    } else {
-        match worktree_dir {
+        TimeoutWorkspaceState::Unchanged => match worktree_dir {
             None => out.push_str("  開始時点から workspace に変更はありません。"),
             Some(dir) => {
                 out.push_str("  開始時点から変更はありません。\n");
@@ -351,6 +388,16 @@ pub fn render_timeout_message(
                     dir
                 ));
             }
+        },
+        TimeoutWorkspaceState::Unknown => {
+            // Copilot 指摘 + reviewer mn2: probe 失敗を「変更なし」等に誤断定
+            // せず、確認できなかった旨だけを伝える。`vibepod restore` も
+            // 破棄コマンドも worktree 削除コマンドも一切出さない（dirty
+            // かどうか分からない workspace に対して安全と誤解させないため）。
+            out.push_str(
+                "  git の状態を確認できませんでした。変更が残っている可能性があるため、workspace はそのまま保持しています。\n",
+            );
+            out.push_str(&format!("  手動で確認してください: `{}`", git("status")));
         }
     }
 
