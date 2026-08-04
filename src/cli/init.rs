@@ -86,15 +86,21 @@ pub fn auto_build_decision(image_exists: bool, no_auto_build: bool) -> AutoBuild
     }
 }
 
-/// `init --rebuild` 時に swift バリアントイメージも再ビルドするかどうかの
-/// 純粋な判定。docker を呼ばずに済むよう `execute` から切り出している
-/// （`auto_build_decision` と同じパターン）。
+/// `init --rebuild` 時に profile バリアントイメージ（`VALID_PROFILES` の各
+/// エントリ）も再ビルドするかどうかの純粋な判定。docker を呼ばずに済むよう
+/// `execute` から切り出している（`auto_build_decision` と同じパターン）。
 ///
-/// 引数無し `vibepod init`（`rebuild = false`）では、swift イメージが
+/// F7（フル再レビュー指摘）: 以前は `swift_rebuild_decision` という名前で
+/// "swift" 専用のように読めたが、判定ロジック自体は元から profile 名に
+/// 依存しない（`rebuild && exists` のみ）。呼び出し側（`execute`）を
+/// `VALID_PROFILES` のループへ一般化したのに合わせ、profile 非依存の名前へ
+/// リネームした。
+///
+/// 引数無し `vibepod init`（`rebuild = false`）では、対象 profile イメージが
 /// 過去に作られていても再ビルドしない — 未使用の profile を勝手に
 /// ビルドし始めない現行仕様（設計書 2.5）を守るための不変条件。
-pub fn swift_rebuild_decision(rebuild: bool, swift_image_exists: bool) -> bool {
-    rebuild && swift_image_exists
+pub fn profile_rebuild_decision(rebuild: bool, profile_image_exists: bool) -> bool {
+    rebuild && profile_image_exists
 }
 
 /// 自動ビルドの同時実行を直列化するためのアドバイザリロック。
@@ -284,11 +290,19 @@ pub async fn execute(rebuild: bool) -> Result<()> {
         }
     }
 
-    // 3b. `--rebuild` のときだけ、既に docker 上にある swift バリアントイメージも
-    //     同じ引数（rebuild=true, profile="swift"）で再ビルドする。存在しない
-    //     場合は何もしない（未使用の profile を勝手にビルドし始めない）。
+    // 3b. `--rebuild` のときだけ、既に docker 上にある profile バリアント
+    //     イメージも同じ引数（rebuild=true, profile=<p>）で再ビルドする。
+    //     `config::VALID_PROFILES` の各エントリについて存在確認し、存在する
+    //     ものだけを対象にする（未使用の profile を勝手にビルドし始めない）。
     //     `vibepod init`（rebuild なし）では default イメージのみをビルドする
-    //     現行仕様を変えない（`swift_rebuild_decision` が守る不変条件）。
+    //     現行仕様を変えない（`profile_rebuild_decision` が守る不変条件）。
+    //
+    //     F7（フル再レビュー指摘）: 以前は "swift" 一つだけを決め打ちしており、
+    //     `VALID_PROFILES` に新しい profile を追加してもここが追随せず、
+    //     `vibepod init --rebuild` がその profile のイメージを再ビルドし忘れる
+    //     （古いイメージのまま使われ続ける）バグを生みかねなかった。
+    //     `VALID_PROFILES` をループする形に一般化し、profile 追加時の
+    //     rebuild 漏れを構造的に防ぐ。
     //
     //     `image_exists` の確認自体は付随処理として扱う: default イメージの
     //     ビルドは既にここまでで成功しているため、確認が docker daemon 不調・
@@ -297,33 +311,40 @@ pub async fn execute(rebuild: bool) -> Result<()> {
     //     `save_global_config` に到達できず、真因が伝わらないまま
     //     `~/.config/vibepod/config.toml` が更新されず後続の `vibepod run` が
     //     「Config not found」で失敗する — ユーザーからは無関係に見える。
-    let swift_image_name = config::image_for_profile(&image_name, "swift");
-    let swift_image_exists = if rebuild {
-        match runtime.image_exists(&swift_image_name).await {
-            Ok(exists) => exists,
-            Err(e) => {
-                eprintln!(
-                    "  Warning: could not check whether the swift variant image '{}' exists: {}. \
-                     Skipping the swift variant rebuild check (the default image was already \
-                     rebuilt successfully). Run `vibepod init --rebuild` again to retry.",
-                    swift_image_name, e
-                );
-                false
+    for profile in config::VALID_PROFILES {
+        let profile_image_name = config::image_for_profile(&image_name, profile);
+        let profile_image_exists = if rebuild {
+            match runtime.image_exists(&profile_image_name).await {
+                Ok(exists) => exists,
+                Err(e) => {
+                    eprintln!(
+                        "  Warning: could not check whether the {profile} variant image '{}' \
+                         exists: {}. Skipping the {profile} variant rebuild check (the default \
+                         image was already rebuilt successfully). Run `vibepod init --rebuild` \
+                         again to retry.",
+                        profile_image_name, e
+                    );
+                    false
+                }
             }
-        }
-    } else {
-        false
-    };
+        } else {
+            false
+        };
 
-    if swift_rebuild_decision(rebuild, swift_image_exists) {
-        println!(
-            "\n  Rebuilding Docker image from scratch: {} (--pull --no-cache)...",
-            swift_image_name
-        );
-        if let Err(e) = build_image_for(&runtime, &swift_image_name, true, Some("swift")).await {
-            eprintln!("\n  ✗ Build failed: {}", e);
-            eprintln!("    Check your network connection and try `vibepod init --rebuild` again.");
-            return Err(e);
+        if profile_rebuild_decision(rebuild, profile_image_exists) {
+            println!(
+                "\n  Rebuilding Docker image from scratch: {} (--pull --no-cache)...",
+                profile_image_name
+            );
+            if let Err(e) =
+                build_image_for(&runtime, &profile_image_name, true, Some(profile)).await
+            {
+                eprintln!("\n  ✗ Build failed: {}", e);
+                eprintln!(
+                    "    Check your network connection and try `vibepod init --rebuild` again."
+                );
+                return Err(e);
+            }
         }
     }
 
