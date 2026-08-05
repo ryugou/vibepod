@@ -92,13 +92,21 @@ FROM profile-${VIBEPOD_PROFILE}
      - debian12-aarch64: `ecba8ef87b54a5048d466af500f3169c939a6b8a2cb7c600f76b5184457f293a`
      - debian12 (x86_64): `19e0c78cad5418ad48bfa87aa20c53ac9ac9996d1695d04dd94f7c7ea4eb133f`
    - `/opt/swift` へ展開し、`ENV PATH=/opt/swift/usr/bin:$PATH` で `swift` を通す。
+     **PATH は ENV と `/etc/profile.d` の二重化が必要**（E2E スモークで発覚）:
+     エージェントは `bash --login` で起動されるが、Debian の `/etc/profile` が
+     login シェルの PATH をリセットするため `ENV PATH` だけでは login シェル内で
+     `swift` が見つからない。`/etc/profile.d/swift-toolchain.sh` に同じ export を
+     書き、`/etc/profile` 経由（PATH 設定後に `profile.d/*.sh` を source する）でも
+     通るようにする。swiftlint は `/usr/local/bin` にあるため影響を受けない。
 3. SwiftLint（`ARG SWIFTLINT_VERSION=0.65.0`）:
    - URL: `https://github.com/realm/SwiftLint/releases/download/${SWIFTLINT_VERSION}/swiftlint_linux_<arch>.zip`（arch: `arm64` / `amd64`）
    - SHA256（0.65.0）:
      - linux_arm64: `12d3b84bc5b69ae13a99a5a5c79904f9ce25867f099f6368d0037854f9ee6c26`
      - linux_amd64: `79306a34e5c7cc55a220cd108cbb861dcad5f10138dcdf261e2624ae8b0a486b`
    - `/usr/local/bin/swiftlint` へ配置する。
-4. 検証: `RUN swift --version && swiftlint version`
+4. 検証: `RUN bash --login -c 'swift --version && swiftlint version'`（login シェル
+   経由。上記 PATH 二重化の対象を実際に検証する経路と一致させるため、非 login の
+   `RUN swift --version && ...` から変更した）
 
 実装後は `templates/Dockerfile` のテーブルをバージョン・SHA256 の正本とする。
 

@@ -124,23 +124,29 @@ fn dockerfile_has_stage(dockerfile: &str, stage_name: &str) -> bool {
 }
 
 /// Swift toolchain の `ARG SWIFT_VERSION` 宣言から、スモークチェック
-/// (`RUN swift --version && swiftlint version`) 直前までの provisioning
-/// ブロックを切り出す。
+/// (`RUN bash --login -c 'swift --version && swiftlint version'`) 直前
+/// までの provisioning ブロックを切り出す。
 ///
 /// F6（フル再レビュー指摘）: バージョン pin・SHA256 テーブルの実在チェックを
 /// ファイル全文への `contains` にすると、たとえば別セクションに同じ文字列が
 /// 偶然/コメントとして書かれているだけでも green になり得る。この関数で
 /// 切り出した provisioning ブロック内に限定してチェックすることで、
 /// 「実際に使われている pin・ハッシュか」を確認する。
+///
+/// 実欠陥修正（E2E スモークで発覚: `bash --login` 起動だと `/etc/profile`
+/// が PATH をリセットし `ENV PATH` だけでは login シェルで `swift` が
+/// 見つからない）に伴い、スモークチェックを login シェル経由
+/// （`RUN bash --login -c '...'`）に変更したため、終端マーカーもそれに
+/// 合わせて更新した。
 fn provisioning_block(dockerfile: &str) -> &str {
     let start = dockerfile
         .find("ARG SWIFT_VERSION")
         .expect("expected `ARG SWIFT_VERSION` in templates/Dockerfile");
     let end = dockerfile
-        .find("RUN swift --version && swiftlint version")
+        .find("RUN bash --login -c 'swift --version && swiftlint version'")
         .expect(
-            "expected the swift/swiftlint smoke check `RUN swift --version && swiftlint version` \
-             in templates/Dockerfile",
+            "expected the swift/swiftlint smoke check \
+             `RUN bash --login -c 'swift --version && swiftlint version'` in templates/Dockerfile",
         );
     &dockerfile[start..end]
 }
@@ -279,6 +285,50 @@ fn swiftlint_checksum_table_contains_both_verified_arch_hashes() {
         block.contains(SWIFTLINT_AMD64_SHA256),
         "expected the verified amd64 SHA256 ({SWIFTLINT_AMD64_SHA256}) for SwiftLint 0.65.0 to \
          be present in templates/Dockerfile's provisioning block"
+    );
+}
+
+#[test]
+fn swift_path_is_exported_for_login_shells_via_profile_d() {
+    // 実欠陥（E2E スモークで発覚）: エージェントは `bash --login` で起動
+    // されるが、Debian の /etc/profile が PATH をリセットするため、
+    // `ENV PATH=/opt/swift/usr/bin:$PATH` だけでは login シェル内で
+    // `swift` が PATH に無い（swiftlint は /usr/local/bin にあるため影響
+    // を受けない）。/etc/profile は PATH 設定後に /etc/profile.d/*.sh を
+    // source するため、ここに書けば login シェルでも有効になる。
+    let dockerfile = read_dockerfile();
+    let block = provisioning_block(&dockerfile);
+    assert!(
+        block.contains("/etc/profile.d/swift-toolchain.sh")
+            && block.contains("export PATH=/opt/swift/usr/bin:$PATH"),
+        "expected a PATH export written to /etc/profile.d/swift-toolchain.sh so login shells \
+         (`bash --login`, which is how the agent is started) pick up the Swift toolchain: {block}"
+    );
+    assert!(
+        // Copilot 指摘（PR #61）: /etc/profile 側の source 判定は `[ -r $i ]`
+        // （可読かどうか）であり、ビルド時の umask 次第で非可読（例: 0600、
+        // root のみ）になると無言でスキップされ、vibepod ユーザーの login
+        // シェルで再び swift が PATH から消える。umask に頼らず 0644 を
+        // 明示していることを固定する。
+        block.contains("chmod 0644 /etc/profile.d/swift-toolchain.sh"),
+        "expected the profile.d script's permissions to be explicitly set to 0644 (not left to \
+         the build-time umask), since /etc/profile silently skips unreadable scripts: {block}"
+    );
+}
+
+#[test]
+fn smoke_check_runs_through_a_login_shell() {
+    // 実欠陥回帰: 旧スモーク `RUN swift --version && swiftlint version` は
+    // 非 login シェルで実行されるため、`ENV PATH` だけで通ってしまい、
+    // login シェルで `swift` が見つからないこの欠陥クラスを構造的に検知
+    // できなかった。`bash --login -c '...'` 経由にすることで、エージェント
+    // の実際の起動方法（`bash --login`）と同じ経路をビルド時に通す。
+    let dockerfile = read_dockerfile();
+    assert!(
+        dockerfile.contains("RUN bash --login -c 'swift --version && swiftlint version'"),
+        "expected the smoke check to run through a login shell (`bash --login -c '...'`), not a \
+         plain `RUN swift --version && swiftlint version`, so PATH regressions that only affect \
+         login shells are caught at build time instead of only in E2E: {dockerfile}"
     );
 }
 
