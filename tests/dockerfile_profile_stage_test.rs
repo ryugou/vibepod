@@ -304,6 +304,16 @@ fn swift_path_is_exported_for_login_shells_via_profile_d() {
         "expected a PATH export written to /etc/profile.d/swift-toolchain.sh so login shells \
          (`bash --login`, which is how the agent is started) pick up the Swift toolchain: {block}"
     );
+    assert!(
+        // Copilot 指摘（PR #61）: /etc/profile 側の source 判定は `[ -r $i ]`
+        // （可読かどうか）であり、ビルド時の umask 次第で非可読（例: 0600、
+        // root のみ）になると無言でスキップされ、vibepod ユーザーの login
+        // シェルで再び swift が PATH から消える。umask に頼らず 0644 を
+        // 明示していることを固定する。
+        block.contains("chmod 0644 /etc/profile.d/swift-toolchain.sh"),
+        "expected the profile.d script's permissions to be explicitly set to 0644 (not left to \
+         the build-time umask), since /etc/profile silently skips unreadable scripts: {block}"
+    );
 }
 
 #[test]

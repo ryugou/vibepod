@@ -150,7 +150,12 @@ ENV PATH=/opt/swift/usr/bin:$PATH
 # /etc/profile は PATH 設定後に /etc/profile.d/*.sh を source するため、
 # ここに書けば login シェルでも有効になる。`ENV PATH` は docker exec で
 # コマンドを直接渡す非 login 経路向けに維持し、削除しない。
-RUN echo 'export PATH=/opt/swift/usr/bin:$PATH' > /etc/profile.d/swift-toolchain.sh
+# /etc/profile 側の source 判定は `[ -r $i ]`(可読かどうか)であり、
+# ビルド時の umask 次第で非可読(例: 0600、root のみ)になると無言でスキップ
+# され vibepod ユーザーの login シェルで再び swift が消える。umask に頼らず
+# 0644 を明示する(Copilot 指摘、PR #61)。
+RUN printf 'export PATH=/opt/swift/usr/bin:$PATH\n' > /etc/profile.d/swift-toolchain.sh \
+    && chmod 0644 /etc/profile.d/swift-toolchain.sh
 
 # SwiftLint(アーキ別 SHA256 検証必須。latest エスケープハッチは無し)。
 ARG SWIFTLINT_VERSION=0.65.0
