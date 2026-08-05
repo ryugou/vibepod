@@ -143,6 +143,15 @@ RUN set -eu; \
     rm -rf "${tmp_dir}"
 ENV PATH=/opt/swift/usr/bin:$PATH
 
+# login シェル用の PATH 設定(E2E スモークで発覚した実欠陥への対処)。
+# エージェントは `bash --login` 起動で、Debian の /etc/profile が PATH を
+# リセットするため、上の `ENV PATH` だけでは login シェル内で `swift` が
+# 見つからない(swiftlint は /usr/local/bin にあるため影響を受けない)。
+# /etc/profile は PATH 設定後に /etc/profile.d/*.sh を source するため、
+# ここに書けば login シェルでも有効になる。`ENV PATH` は docker exec で
+# コマンドを直接渡す非 login 経路向けに維持し、削除しない。
+RUN echo 'export PATH=/opt/swift/usr/bin:$PATH' > /etc/profile.d/swift-toolchain.sh
+
 # SwiftLint(アーキ別 SHA256 検証必須。latest エスケープハッチは無し)。
 ARG SWIFTLINT_VERSION=0.65.0
 
@@ -171,7 +180,10 @@ RUN set -eu; \
     install -m 0755 "${tmp_dir}/swiftlint" /usr/local/bin/swiftlint; \
     rm -rf "${tmp_dir}"
 
-RUN swift --version && swiftlint version
+# login シェル経由でスモークする(上記 PATH 修正の対象がここで検証される
+# 経路と一致するように — 非 login シェルの `RUN swift --version` だけでは
+# `ENV PATH` があれば通ってしまい、login シェルでの PATH 欠落を検知できない)。
+RUN bash --login -c 'swift --version && swiftlint version'
 
 USER vibepod
 
