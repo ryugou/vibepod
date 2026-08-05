@@ -5,6 +5,20 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-08-05
+
+### Added
+- Swift language profile: setting `profile = "swift"` under `[run]` in `.vibepod/config.toml` selects an image variant with the Swift toolchain and SwiftLint baked in — Swift 6.3.3 and SwiftLint 0.65.0, both pinned with per-architecture SHA256 verification before extraction and no `latest` escape hatch. Only the `swift` profile's image is built on Debian 13 (trixie) instead of Debian 12 (bookworm); this is required because SwiftLint's official Linux binary needs a newer glibc than bookworm ships, while the default image is unaffected and stays on bookworm. The Swift toolchain's `PATH` is set both via `ENV` and a `/etc/profile.d` script (with permissions explicitly set to `0644`) so it's available in both non-login shells and the login shell the agent actually starts (Debian's `/etc/profile` resets `PATH` for login shells, so `ENV` alone isn't enough). The swift-profile image (`vibepod-claude-swift`, derived from the configured image name) is auto-built on first use just like the default image; `vibepod init --rebuild` now rebuilds every profile variant that has previously been built, not just the default. Projects with a `Package.swift` but no `profile` set get a one-line hint on each run pointing at this setting (the run continues normally). Constraints: only Foundation-only, pure SwiftPM packages build and run on Linux — no Apple frameworks, `xcodebuild`, simulators, `lldb`, or `swift repl`
+- `--prompt-file <path>`: reads the `--prompt` text verbatim from a file instead of a shell argument, avoiding host-shell interpretation of special characters (`<`, `{`, backticks, `$`, ...); mutually exclusive with `--prompt`
+- Timeout recovery guidance now reflects the actual workspace state: uncommitted changes, committed-only and clean, unchanged since the session started, or undeterminable because a git status probe failed, each combined with whether `--worktree` was used. Only commands that will actually succeed in that state are suggested (`vibepod restore`, a discard command, or `--worktree`-scoped `git -C` commands) — a probe failure is reported as "state unknown" rather than guessed at, and no destructive or bound-to-fail command is ever offered
+
+### Changed
+- **Behavior change:** a `--prompt` session that hits its timeout no longer resets the workspace (1.7.x auto-reset it — a hard reset to the starting commit when the tree was clean at session start, or a mixed reset of HEAD when it wasn't). The agent's changes — commits and uncommitted edits alike — are now always preserved; revert them with `vibepod restore` or the manual command shown in the timeout guidance
+- **Behavior change:** a malformed `.vibepod/config.toml` or global `config.toml` (TOML syntax error, a type error such as `profile = 123`, or a read error such as a permissions issue) now makes `vibepod run` fail explicitly instead of silently treating it as "no config". A genuinely missing config file is still treated as no config, as before
+
+### Fixed
+- `--timeout` values that aren't a whole number of minutes are no longer truncated in the timeout message (`--timeout 90` used to display as 1 minute, dropping the 30 seconds)
+
 ## [1.7.1] - 2026-07-22
 
 ### Added
