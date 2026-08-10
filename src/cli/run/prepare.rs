@@ -416,11 +416,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     //
     // profile 未指定かつ workspace 直下に Package.swift があるプロジェクトへ、
     // profile 設定を促す 1 行の注意を出す。実行は継続する（設計書 2.5 手順4）。
-    if effective_profile.is_none()
-        && std::path::Path::new(&effective_workspace)
-            .join("Package.swift")
-            .is_file()
-    {
+    let has_package_swift = std::path::Path::new(&effective_workspace)
+        .join("Package.swift")
+        .is_file();
+    if effective_profile.is_none() && has_package_swift {
         eprintln!(
             "Note: Detected Package.swift but no `profile` is set. Add `profile = \"swift\"` \
              under [run] in .vibepod/config.toml to use the Swift toolchain image."
@@ -553,7 +552,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 7. Build claude args
-    let claude_args = build_claude_args(opts, interactive, None);
+    // コンテナ内エージェントへ環境を伝える経路は claude -p の引数のみ
+    // （設計 3.5）。ロックキー・Session.prompt・ログ表示は元のプロンプトを使う。
+    let preamble = environment_preamble(effective_profile.as_deref(), has_package_swift);
+    let claude_args = build_claude_args(opts, interactive, preamble.as_deref());
 
     if std::env::var("VIBEPOD_TRACE").is_ok() {
         eprintln!("vibepod: claude_args = {:?}", claude_args);
