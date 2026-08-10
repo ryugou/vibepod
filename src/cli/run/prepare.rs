@@ -33,7 +33,8 @@ const SWIFT_AVAILABLE_PREAMBLE: &str = "[vibepod 環境情報 / 自動付与]
 const SWIFT_ABSENT_PREAMBLE: &str = "[vibepod 環境情報 / 自動付与]
 このコンテナに Swift toolchain と SwiftLint は導入されていない。
 - インストールを試みてはならない。共有ライブラリ不足で失敗し、時間だけを消費する。
-- ビルド・テスト・lint は実行せず、最終出力に「未実行」と明記すること。
+- Swift のビルド・テスト・lint は実行せず、最終出力に「未実行」と明記すること。
+  他言語の検証はこの制約の対象外であり、通常どおり実行してよい。
 - 恒久対応: .vibepod/config.toml の [run] へ profile = \"swift\" を設定する。
 
 --- ここから利用者のプロンプト ---";

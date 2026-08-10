@@ -108,7 +108,8 @@ pub fn build_claude_args(
 [vibepod 環境情報 / 自動付与]
 このコンテナに Swift toolchain と SwiftLint は導入されていない。
 - インストールを試みてはならない。共有ライブラリ不足で失敗し、時間だけを消費する。
-- ビルド・テスト・lint は実行せず、最終出力に「未実行」と明記すること。
+- Swift のビルド・テスト・lint は実行せず、最終出力に「未実行」と明記すること。
+  他言語の検証はこの制約の対象外であり、通常どおり実行してよい。
 - 恒久対応: .vibepod/config.toml の [run] へ profile = "swift" を設定する。
 
 --- ここから利用者のプロンプト ---
@@ -141,11 +142,13 @@ pub image: Option<String>,
 pub profile: Option<String>,
 ```
 
-### 4.2 格納タイミング
+### 4.2 `effective_image` 算出の前倒し
 
-`Session` の構築（`prepare.rs`。`deferred_session`）は `effective_image` の決定より前に位置する。構築位置は変更せず、両フィールドを `None` で初期化し、`effective_image` の決定直後に両方へ代入する。`deferred_session` を `mut` とする。
+`Session` の構築（`deferred_session`）と要件1 の表示は、いずれも現状の `effective_image` 決定位置より前にある。`config::load_global_config` の呼び出しと `effective_image` の算出を `Session` 構築より前へ移動し、構築時に両フィールドを埋める。後から代入する形にはしない。
 
-構築位置を `effective_image` 決定後へ移してはならない。`ensure_image_available` はイメージ未存在時に自動ビルドを行うため、移動すると `started_at` が利用者のコマンド実行時刻から最大でビルド所要時間だけ後ろへずれる。
+移動対象は global config の読み込みとイメージ名の算出のみとする。`ensure_image_available`（イメージ未存在時に自動ビルドを行う）は現在位置に残す。移動すると `started_at` が利用者のコマンド実行時刻からビルド所要時間だけ後ろへずれる。
+
+副作用として `load_global_config` の失敗が worktree 作成より前に起きる。副作用を伴う処理の前に失敗するため、意図した変更として受け入れる。
 
 ### 4.3 不変条件
 
