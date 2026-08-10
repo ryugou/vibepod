@@ -197,6 +197,8 @@ image = "vibepod-claude:latest"
 >
 > **`--prompt` 指定時**: fire-and-forget モードで起動。`--dangerously-skip-permissions` + `-p` + `--output-format stream-json --verbose` で Claude Code を起動し、JSONL ストリームをリアルタイムにフォーマット表示する。コンテナ隔離が安全境界となる。
 >
+> - `--prompt` 実行時、`claude -p` へ渡すプロンプトの先頭へ環境情報を自動前置する（profile 由来。ロックキー・`Session.prompt`・ログ表示には含めない）。正本: `docs/superpowers/specs/2026-08-10-profile-visibility-and-environment-disclosure-design.md`
+>
 > **コンテナ再利用（デフォルト動作）**: プロジェクトごとに 1 つのコンテナ（`vibepod-{project}-{path_hash}`）を作成・再利用する。初回は `docker run -d`（idle entrypoint: `tail -f /dev/null`）でコンテナを作成し、setup 完了後にマーカーファイル `~/.vibepod-setup-done` を記録する。2 回目以降は既存コンテナに `docker exec` で直接接続し、セットアップをスキップする。`--new` を指定すると既存コンテナを破棄して再作成する。`vibepod stop` でコンテナを停止（保持）、`vibepod rm` で削除できる。
 
 **コンテナ構成：**
@@ -268,6 +270,7 @@ registered_at = "2026-03-22T10:00:00Z"
   ◇  Detected git repository: my-project
   │  Remote: github.com/user/my-project
   │  Branch: feat/add-dashboard
+  │  Profile: default (image: vibepod-claude:latest)
   │
   ◆  First time running in this project. Register it?
   │  ● Yes, register and continue

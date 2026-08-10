@@ -128,7 +128,7 @@ Runs an AI coding agent inside a container, mounting your project directory.
 | `--no-network` | Disable container networking |
 | `--env KEY=VALUE` | Pass environment variables (repeatable) |
 | `--env-file <path>` | Load environment variables from file (`op://` references resolved via 1Password CLI) |
-| `--lang <name>` | Install a language toolchain in the container (`rust`, `node`, `python`, `go`, `java`). Auto-detected from project files if omitted |
+| `--lang <name>` | Install a language toolchain in the container (`rust`, `node`, `python`, `go`, `java`). Auto-detected from project files if omitted. For Swift, set `profile = "swift"` in `.vibepod/config.toml` instead — see [Swift profile](#swift-profile) |
 | `--worktree` | Run in an isolated git worktree (requires `--prompt`). Changes are made in `.worktrees/` instead of your working tree |
 | `--mount <src:dst>` | Mount additional host path into the container (read-only, repeatable) |
 | `--new` | Recreate the container from scratch. Removes a stopped container automatically; if the container is running, stop it first with `vibepod stop` or `vibepod rm` |
@@ -369,6 +369,15 @@ This is configuration-file-only — there is no `--profile` CLI flag. `"swift"` 
 **Cache.** SwiftPM's caches (`~/.swiftpm`, `~/.cache/org.swift.swiftpm`, and the module cache) live under the container's home directory, so — like other language toolchains — they persist across `vibepod run` invocations in the default (non-disposable) container. `--worktree` runs use a disposable container and do not retain the cache. The only build artifact left in your workspace is SwiftPM's own `.build/`.
 
 **Network.** Package resolution needs outbound HTTPS. The default container already allows this, so no extra configuration is required — but combining `--no-network` with `profile = "swift"` will cause package resolution to fail.
+
+**Verifying the profile is active.** `vibepod run` prints the resolved profile and image at startup, so you can confirm the setting took effect without inspecting containers:
+
+```
+Branch: main
+Profile: swift (image: vibepod-claude-swift:latest)
+```
+
+With no `profile` set, the same line reads `Profile: default (image: vibepod-claude:latest)`.
 
 ## Roadmap
 

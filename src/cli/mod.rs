@@ -59,7 +59,8 @@ pub enum Commands {
         /// Environment file (supports op:// references via 1Password CLI)
         #[arg(long)]
         env_file: Option<String>,
-        /// Language toolchain to install in container (rust, node, python, go, java)
+        /// Language toolchain to install in container (rust, node, python, go, java).
+        /// Swift toolchain: set `profile = "swift"` in .vibepod/config.toml (see README)
         #[arg(long)]
         lang: Option<String>,
         /// Run in an isolated git worktree (for --prompt mode)

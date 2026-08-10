@@ -11,6 +11,8 @@ fn test_generate_report() {
         prompt: "interactive".to_string(),
         claude_session_path: Some("~/.claude/projects/test/session.jsonl".to_string()),
         restored: false,
+        image: None,
+        profile: None,
     };
 
     let report = generate_report(
@@ -40,6 +42,8 @@ fn test_generate_report_no_session_log() {
         prompt: "interactive".to_string(),
         claude_session_path: None,
         restored: false,
+        image: None,
+        profile: None,
     };
 
     let report = generate_report(

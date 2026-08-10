@@ -13,6 +13,14 @@ pub struct Session {
     pub prompt: String,
     pub claude_session_path: Option<String>,
     pub restored: bool,
+    /// 実行に使用したイメージ名（`RunContext.effective_image`）。
+    /// `#[serde(default)]` により、両フィールドを持たない既存の
+    /// metadata.json を `None` として読める。
+    #[serde(default)]
+    pub image: Option<String>,
+    /// `[run] profile` の値。未指定は `None`。
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

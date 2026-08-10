@@ -12,6 +12,54 @@ use super::{
     detect_languages, get_lang_install_cmd, hash_env_vars, parse_mount_arg, RunContext, RunOptions,
 };
 
+/// `profile = "swift"` のコンテナでエージェントへ渡す環境情報。
+///
+/// バージョン番号を書かない: 正本は `templates/Dockerfile` の ARG であり、
+/// ここへ書き写すとイメージ更新のたびに二重管理になる。バージョンが必要な
+/// 場合、エージェントはコンテナ内で `swift --version` を実行できる。
+const SWIFT_AVAILABLE_PREAMBLE: &str = "[vibepod 環境情報 / 自動付与]
+このコンテナには Swift toolchain と SwiftLint が導入済みで、すぐに使える。
+- 検証はコンテナ内で実行すること(swift build / swift test / swiftlint lint)。
+- toolchain の追加導入は不要。試みてはならない。
+- Linux 環境のため、Apple フレームワーク(CryptoKit / SwiftUI / UIKit 等)に依存する
+  ターゲットはビルドできない。対象を Foundation のみに依存するパッケージへ限定すること。
+- コンテナ内が green でも macOS 側の検証を代替しない。
+
+--- ここから利用者のプロンプト ---";
+
+/// `Package.swift` があるのに profile 未指定のコンテナでエージェントへ渡す
+/// 環境情報。自力導入は共有ライブラリ不足で必ず失敗するため、試行そのものを
+/// 禁じたうえで恒久対応(config.toml への profile 設定)を示す。
+const SWIFT_ABSENT_PREAMBLE: &str = "[vibepod 環境情報 / 自動付与]
+このコンテナに Swift toolchain と SwiftLint は導入されていない。
+- インストールを試みてはならない。共有ライブラリ不足で失敗し、時間だけを消費する。
+- Swift のビルド・テスト・lint は実行せず、最終出力に「未実行」と明記すること。
+  他言語の検証はこの制約の対象外であり、通常どおり実行してよい。
+- 恒久対応: .vibepod/config.toml の [run] へ profile = \"swift\" を設定する。
+
+--- ここから利用者のプロンプト ---";
+
+/// profile と workspace の状態から、エージェントへ渡す環境情報ブロックを
+/// 導出する。前置が不要な場合は `None` を返す。
+///
+/// 生成規則(設計 3.3):
+///
+/// | `profile`       | `Package.swift` | 戻り値                     |
+/// | --------------- | --------------- | --------------------------- |
+/// | `Some("swift")` | 問わない        | `SWIFT_AVAILABLE_PREAMBLE` |
+/// | `None`          | あり            | `SWIFT_ABSENT_PREAMBLE`    |
+/// | `None`          | なし            | `None`                     |
+///
+/// `VALID_PROFILES` へ `swift` 以外を追加する場合は、この関数の分岐と対応する
+/// 定数を同時に追加すること(追加しない限り新 profile は `None` を返す)。
+pub fn environment_preamble(profile: Option<&str>, has_package_swift: bool) -> Option<String> {
+    match (profile, has_package_swift) {
+        (Some("swift"), _) => Some(SWIFT_AVAILABLE_PREAMBLE.to_string()),
+        (None, true) => Some(SWIFT_ABSENT_PREAMBLE.to_string()),
+        _ => None,
+    }
+}
+
 /// Claude CLI に渡す引数列を組み立てる。
 ///
 /// `prepare_context` 内の Docker チェックなどの副作用から独立させるため
@@ -24,7 +72,14 @@ use super::{
 ///   確認なし実行が vibepod の主目的であり、承認者不在で自律実行するため。
 /// - `--resume` や `-p <prompt>`（`--output-format stream-json --verbose`
 ///   付き）は従来通り後段で積み上げる。
-pub fn build_claude_args(opts: &RunOptions, interactive: bool) -> Vec<String> {
+/// - `preamble` が `Some` かつ `opts.prompt` が `Some` のとき、`-p` の値を
+///   `<preamble>\n<prompt>` とする。前置はこの引数列にのみ現れ、ロックキー・
+///   `Session.prompt`・ログ表示は元のプロンプトのままとする（設計 3.5）。
+pub fn build_claude_args(
+    opts: &RunOptions,
+    interactive: bool,
+    preamble: Option<&str>,
+) -> Vec<String> {
     let mut claude_args: Vec<String> = Vec::new();
     if !interactive {
         claude_args.push("--dangerously-skip-permissions".to_string());
@@ -40,7 +95,10 @@ pub fn build_claude_args(opts: &RunOptions, interactive: bool) -> Vec<String> {
     }
     if let Some(ref p) = opts.prompt {
         claude_args.push("-p".to_string());
-        claude_args.push(p.clone());
+        claude_args.push(match preamble {
+            Some(pre) => format!("{pre}\n{p}"),
+            None => p.clone(),
+        });
         claude_args.push("--output-format".to_string());
         claude_args.push("stream-json".to_string());
         claude_args.push("--verbose".to_string());
@@ -188,6 +246,17 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     let effective_profile = vibepod_config.profile();
     config::validate_profile(&effective_profile)?;
 
+    // 起動出力（設計 2）と Session 記録（設計 4）が effective_image を参照する
+    // ため、global config の読み込みとイメージ名の算出をここへ前倒しする。
+    // イメージの自動ビルド（ensure_image_available）は現在位置に残す —
+    // ビルド所要時間だけ Session.started_at が後ろへずれるのを避けるため。
+    let global_config = config::load_global_config(&config_dir)?;
+    // profile 未指定時は現行どおり global_config.image をそのまま使う。
+    let effective_image = match effective_profile.as_deref() {
+        Some(profile) => config::image_for_profile(&global_config.image, profile),
+        None => global_config.image.clone(),
+    };
+
     if opts.worktree && opts.prompt.is_none() {
         bail!("--worktree requires --prompt");
     }
@@ -251,6 +320,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         prompt: prompt_label,
         claude_session_path: None,
         restored: false,
+        image: Some(effective_image.clone()),
+        profile: effective_profile.clone(),
     };
 
     // プロジェクト名はシンボリックリンク解決後のパスから取得する
@@ -268,6 +339,9 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // Get branch
     let branch = current_branch;
 
+    // profile 未指定を "default" と表記する。行の有無で判別させないため、
+    // profile の指定有無にかかわらず常に出力する（設計 2.2）。
+    let profile_label = effective_profile.as_deref().unwrap_or("default");
     banner::print_banner();
     if opts.prompt.is_some() {
         println!();
@@ -276,6 +350,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             println!("Remote: {}", r);
         }
         println!("Branch: {}", branch);
+        println!("Profile: {} (image: {})", profile_label, effective_image);
         println!();
     } else {
         println!("  ┌");
@@ -285,6 +360,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             println!("  │  Remote: {}", r);
         }
         println!("  │  Branch: {}", branch);
+        println!(
+            "  │  Profile: {} (image: {})",
+            profile_label, effective_image
+        );
         println!("  │");
     }
 
@@ -338,11 +417,10 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     //
     // profile 未指定かつ workspace 直下に Package.swift があるプロジェクトへ、
     // profile 設定を促す 1 行の注意を出す。実行は継続する（設計書 2.5 手順4）。
-    if effective_profile.is_none()
-        && std::path::Path::new(&effective_workspace)
-            .join("Package.swift")
-            .is_file()
-    {
+    let has_package_swift = std::path::Path::new(&effective_workspace)
+        .join("Package.swift")
+        .is_file();
+    if effective_profile.is_none() && has_package_swift {
         eprintln!(
             "Note: Detected Package.swift but no `profile` is set. Add `profile = \"swift\"` \
              under [run] in .vibepod/config.toml to use the Swift toolchain image."
@@ -391,17 +469,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         eprintln!("Note: Language/tool setup requires sudo in the container. If setup fails, run `vibepod init` to rebuild the image.");
     }
 
-    // 2. Load global config (config_dir already loaded at the top).
-    let global_config = config::load_global_config(&config_dir)?;
-
-    // profile 未指定時は現行どおり global_config.image をそのまま使う
-    // （設計書 2.5 手順2）。
-    let effective_image = match effective_profile.as_deref() {
-        Some(profile) => config::image_for_profile(&global_config.image, profile),
-        None => global_config.image.clone(),
-    };
-
-    // 3. Check Docker & image
+    // 2. Check Docker & image
     let runtime = DockerRuntime::new()
         .await
         .context("Docker is not running. Please start Docker Desktop or OrbStack.")?;
@@ -418,7 +486,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     )
     .await?;
 
-    // 4. Compute container name
+    // 3. Compute container name
     //   - worktree: random short hash (disposable)
     //   - otherwise: project path → SHA256[:8] (v1.4.3 compatible)
     let container_name = if opts.worktree {
@@ -431,7 +499,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         format!("vibepod-{}-{}", project_name, hash)
     };
 
-    // 5. Check container status and handle --new flag
+    // 4. Check container status and handle --new flag
     let mut container_status = if opts.worktree {
         // ワークツリーはランダム名なので常に None
         ContainerStatus::None
@@ -452,15 +520,15 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
-    // 6. 既存コンテナのラベルを取得（設定変更の検知に使用）
-    // env ファイルのパースより前に取得し、env ハッシュとの比較は step 9 後に行う
+    // 5. 既存コンテナのラベルを取得（設定変更の検知に使用）
+    // env ファイルのパースより前に取得し、env ハッシュとの比較は step 8 後に行う
     let stored_labels_opt = if container_status != ContainerStatus::None && !opts.worktree {
         Some(runtime.get_container_labels(&container_name).await?)
     } else {
         None
     };
 
-    // 7. Project registration
+    // 6. Project registration
     let mut projects = config::load_projects(&config_dir)?;
     let should_register = if !config::is_project_registered(&projects, &cwd_str) {
         if interactive {
@@ -484,14 +552,17 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         config::save_projects(&projects, &config_dir)?;
     }
 
-    // 8. Build claude args
-    let claude_args = build_claude_args(opts, interactive);
+    // 7. Build claude args
+    // コンテナ内エージェントへ環境を伝える経路は claude -p の引数のみ
+    // （設計 3.5）。ロックキー・Session.prompt・ログ表示は元のプロンプトを使う。
+    let preamble = environment_preamble(effective_profile.as_deref(), has_package_swift);
+    let claude_args = build_claude_args(opts, interactive, preamble.as_deref());
 
     if std::env::var("VIBEPOD_TRACE").is_ok() {
         eprintln!("vibepod: claude_args = {:?}", claude_args);
     }
 
-    // 9. Resolve env file if provided
+    // 8. Resolve env file if provided
     let mut resolved_env_vars = opts.env_vars.clone();
     if let Some(ref env_file_path) = opts.env_file {
         let content = std::fs::read_to_string(env_file_path)
@@ -564,7 +635,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         }
     }
 
-    // 9b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
+    // 8b. 設定変更の検知（env ファイル解決後に env ハッシュを含めて比較）
     let home = crate::config::home_dir()?;
 
     // Per-container runtime directory: holds the temp claude.json copy and
@@ -645,7 +716,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         warn_config_changes(&stored_labels, &current_labels)?;
     }
 
-    // 10. Auth: load token
+    // 9. Auth: load token
     let auth_manager = crate::auth::AuthManager::new(config_dir.clone());
     let claude_json = home.join(".claude.json");
 
@@ -708,7 +779,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // `claude_config_mounts`（host `~/.claude/` の allowlist マウント）は
-    // 9b で既に解決済み。そのまま `extra_mounts` に積む。
+    // 8b で既に解決済み。そのまま `extra_mounts` に積む。
     for (host, container) in &claude_config_mounts {
         extra_mounts.push((host.clone(), container.clone()));
     }
