@@ -71,7 +71,14 @@ pub fn environment_preamble(profile: Option<&str>, has_package_swift: bool) -> O
 ///   確認なし実行が vibepod の主目的であり、承認者不在で自律実行するため。
 /// - `--resume` や `-p <prompt>`（`--output-format stream-json --verbose`
 ///   付き）は従来通り後段で積み上げる。
-pub fn build_claude_args(opts: &RunOptions, interactive: bool) -> Vec<String> {
+/// - `preamble` が `Some` かつ `opts.prompt` が `Some` のとき、`-p` の値を
+///   `<preamble>\n<prompt>` とする。前置はこの引数列にのみ現れ、ロックキー・
+///   `Session.prompt`・ログ表示は元のプロンプトのままとする（設計 3.5）。
+pub fn build_claude_args(
+    opts: &RunOptions,
+    interactive: bool,
+    preamble: Option<&str>,
+) -> Vec<String> {
     let mut claude_args: Vec<String> = Vec::new();
     if !interactive {
         claude_args.push("--dangerously-skip-permissions".to_string());
@@ -87,7 +94,10 @@ pub fn build_claude_args(opts: &RunOptions, interactive: bool) -> Vec<String> {
     }
     if let Some(ref p) = opts.prompt {
         claude_args.push("-p".to_string());
-        claude_args.push(p.clone());
+        claude_args.push(match preamble {
+            Some(pre) => format!("{pre}\n{p}"),
+            None => p.clone(),
+        });
         claude_args.push("--output-format".to_string());
         claude_args.push("stream-json".to_string());
         claude_args.push("--verbose".to_string());
@@ -532,7 +542,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // 8. Build claude args
-    let claude_args = build_claude_args(opts, interactive);
+    let claude_args = build_claude_args(opts, interactive, None);
 
     if std::env::var("VIBEPOD_TRACE").is_ok() {
         eprintln!("vibepod: claude_args = {:?}", claude_args);

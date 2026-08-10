@@ -35,7 +35,7 @@ fn model_value(args: &[String]) -> Option<&str> {
 #[test]
 fn model_absent_adds_no_model_flag_noninteractive() {
     let opts = base_opts();
-    let args = build_claude_args(&opts, false);
+    let args = build_claude_args(&opts, false, None);
     assert!(
         !args.iter().any(|a| a == "--model"),
         "no --model expected when model is None; got {:?}",
@@ -46,7 +46,7 @@ fn model_absent_adds_no_model_flag_noninteractive() {
 #[test]
 fn model_absent_adds_no_model_flag_interactive() {
     let opts = base_opts();
-    let args = build_claude_args(&opts, true);
+    let args = build_claude_args(&opts, true, None);
     assert!(
         !args.iter().any(|a| a == "--model"),
         "no --model expected when model is None; got {:?}",
@@ -58,7 +58,7 @@ fn model_absent_adds_no_model_flag_interactive() {
 fn model_passed_through_noninteractive() {
     let mut opts = base_opts();
     opts.model = Some("claude-fable-5".to_string());
-    let args = build_claude_args(&opts, false);
+    let args = build_claude_args(&opts, false, None);
     assert_eq!(
         model_value(&args),
         Some("claude-fable-5"),
@@ -73,7 +73,7 @@ fn model_passed_through_interactive() {
     let mut opts = base_opts();
     opts.prompt = None;
     opts.model = Some("some-model-id".to_string());
-    let args = build_claude_args(&opts, true);
+    let args = build_claude_args(&opts, true, None);
     assert_eq!(
         model_value(&args),
         Some("some-model-id"),
@@ -87,6 +87,6 @@ fn model_value_is_not_validated() {
     // vibepod はモデル名を検証しない: 未知の文字列でもそのまま透過する。
     let mut opts = base_opts();
     opts.model = Some("totally-made-up-model".to_string());
-    let args = build_claude_args(&opts, false);
+    let args = build_claude_args(&opts, false, None);
     assert_eq!(model_value(&args), Some("totally-made-up-model"));
 }
