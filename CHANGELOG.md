@@ -5,6 +5,16 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-08-10
+
+### Added
+- `vibepod run` prints the resolved profile and image at startup — `Profile: swift (image: vibepod-claude-swift:latest)`, or `Profile: default (image: vibepod-claude:latest)` when no profile is set — in both the `--prompt` and interactive output formats. `profile` is a configuration-file-only setting with no CLI flag, and there was previously no way to confirm it had taken effect short of inspecting containers with `docker ps -a`. The line is always printed, so a setting that failed to apply is visible in the same place and format as one that did
+- Session metadata (`.vibepod/sessions/<id>/metadata.json`) records the `image` and `profile` used for the run, making it possible to determine after the fact which image a past session actually ran on. Metadata files written by earlier versions still load, with both fields defaulting to `null`
+- The `--lang` help text and the README option table point at `profile = "swift"`. `--lang` accepts no `swift` value, so reading the help alone suggested Swift was unsupported
+
+### Changed
+- `--prompt` / `--prompt-file` runs prepend a short environment block to the prompt handed to the in-container agent, stating which toolchains are actually present. With `profile = "swift"` it reports that Swift and SwiftLint are installed and must not be reinstalled; with no profile set but a `Package.swift` in the workspace it reports that they are absent, that installing them will fail on missing shared libraries, and that Swift build/test/lint should be reported as not run — other languages are explicitly outside that restriction, so a polyglot repository still gets its other toolchains verified. The prepended text reaches the agent only: the session lock key, `Session.prompt`, and `--verbose` log output all keep the original prompt unchanged
+
 ## [1.8.0] - 2026-08-05
 
 ### Added
