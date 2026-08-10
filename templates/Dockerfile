@@ -95,6 +95,12 @@ RUN codex --version
 # latest エスケープハッチは設けない(未知の version/arch はビルド失敗
 # として扱う)。更新は ARG と下記 SHA256 テーブルの両方を bump してから
 # `vibepod init --rebuild` で行う。
+#
+# 展開と同じ RUN 内で /usr/local/include/node を削除する(実測 63MB)。
+# これは C++ ネイティブアドオンをソースからビルドするための node ヘッダで、
+# 本イメージの用途(codex-companion.mjs = node 組み込みモジュールのみを使う
+# 純 JS)では不要。npm(17MB)は将来の用途のため残す。別 RUN で削除すると
+# 上位レイヤーに残ってサイズが減らないため、必ずこの RUN 内で消すこと。
 ARG NODE_VERSION=22.23.2
 
 # pin されたバージョンごとの SHA256(アーキ別)。NODE_VERSION を bump する際は
@@ -123,7 +129,7 @@ RUN set -eu; \
     curl -fsSL "$url" -o "${tmp_dir}/${asset}"; \
     echo "${expected_sha256}  ${tmp_dir}/${asset}" | sha256sum -c -; \
     tar -xzf "${tmp_dir}/${asset}" -C /usr/local --strip-components=1; \
-    rm -rf "${tmp_dir}"
+    rm -rf "${tmp_dir}" /usr/local/include/node
 RUN node --version && npm --version
 
 USER vibepod
