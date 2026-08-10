@@ -10,7 +10,8 @@
 
 ## Global Constraints
 
-- 変更対象は `templates/Dockerfile` のみ(README に同梱ツールの一覧記載があればそこも追随)。CHANGELOG・バージョン bump は対象外。
+- 変更対象は `templates/Dockerfile` と `README.md` の codex 節(Step 4)。CHANGELOG・バージョン bump は**本計画のスコープ外**であり、実装完了後に受理判断者が別コミットで行う(v1.8.2 として実施済み)。
+- サイズ最適化(`/usr/local/include/node` の削除)も本計画のスコープ外。ホストでのビルド実測後に別コミットで追加した。
 - `ARG NODE_VERSION=22.23.2` を使う。
 - 取得元: `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-<arch>.tar.gz`(`arm64`→`arm64`、`amd64`→`x64`。それ以外は `exit 1`)。
 - SHA256(アーキ別、コメントでどちらがどちらか明記):
@@ -108,7 +109,7 @@ Expected: `ARG NODE_VERSION=22.23.2` の行と、2 つの SHA256 値がそれぞ
 
 - [ ] **Step 4: README の codex 節を Node.js 同梱の事実に合わせて更新する**
 
-`README.md:185-187` の現在の文面:
+`README.md:185-187` の**変更前**の文面(本計画の実施により、下記は既に置き換え済み):
 
 ```markdown
 The container image bundles the `codex` CLI (musl static binary, no node/npm

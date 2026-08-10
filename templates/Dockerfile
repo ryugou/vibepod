@@ -86,10 +86,10 @@ RUN set -eu; \
     rm -rf "${tmp_dir}"
 RUN codex --version
 
-# Node.js(codex CLI 本体は musl 静的バイナリで node を必要としないが、
+# Node.js。codex CLI 本体は musl 静的バイナリで node を必要としないが、
 # Claude Code の codex plugin が使う codex-companion.mjs は node 実行を
-# 必須とし、レビューフローをコンテナ内で完結させるために導入する。
-# Issue #65)。
+# 必須とし、レビューフローをコンテナ内で完結させるために導入する
+# (Issue #65)。
 #
 # codex CLI と同じバージョン pin + SHA256 テーブル方式を採用する。
 # latest エスケープハッチは設けない(未知の version/arch はビルド失敗
