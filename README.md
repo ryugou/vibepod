@@ -370,6 +370,15 @@ This is configuration-file-only — there is no `--profile` CLI flag. `"swift"` 
 
 **Network.** Package resolution needs outbound HTTPS. The default container already allows this, so no extra configuration is required — but combining `--no-network` with `profile = "swift"` will cause package resolution to fail.
 
+**Verifying the profile is active.** `vibepod run` prints the resolved profile and image at startup, so you can confirm the setting took effect without inspecting containers:
+
+```
+Branch: main
+Profile: swift (image: vibepod-claude-swift:latest)
+```
+
+With no `profile` set, the same line reads `Profile: default (image: vibepod-claude:latest)`.
+
 ## Roadmap
 
 VibePod is heading to **v2.0**, where it will be reorganized into a clear pair:
