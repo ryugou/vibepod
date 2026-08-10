@@ -319,6 +319,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         prompt: prompt_label,
         claude_session_path: None,
         restored: false,
+        image: Some(effective_image.clone()),
+        profile: effective_profile.clone(),
     };
 
     // プロジェクト名はシンボリックリンク解決後のパスから取得する

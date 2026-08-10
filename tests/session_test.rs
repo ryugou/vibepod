@@ -14,6 +14,8 @@ fn test_add_and_load_session() {
         prompt: "interactive".to_string(),
         claude_session_path: None,
         restored: false,
+        image: None,
+        profile: None,
     };
 
     store.add(session.clone()).unwrap();
@@ -38,6 +40,8 @@ fn test_session_limit_100() {
             prompt: "interactive".to_string(),
             claude_session_path: None,
             restored: false,
+            image: None,
+            profile: None,
         };
         store.add(session).unwrap();
     }
@@ -61,6 +65,8 @@ fn test_mark_restored() {
         prompt: "interactive".to_string(),
         claude_session_path: None,
         restored: false,
+        image: None,
+        profile: None,
     };
     store.add(session).unwrap();
 
@@ -83,6 +89,8 @@ fn test_mark_restored_since() {
             prompt: "interactive".to_string(),
             claude_session_path: None,
             restored: false,
+            image: None,
+            profile: None,
         };
         store.add(session).unwrap();
     }
@@ -107,6 +115,8 @@ fn test_restorable_sessions() {
         prompt: "interactive".to_string(),
         claude_session_path: None,
         restored: true,
+        image: None,
+        profile: None,
     };
     let s2 = Session {
         id: "s2".to_string(),
@@ -116,6 +126,8 @@ fn test_restorable_sessions() {
         prompt: "--resume".to_string(),
         claude_session_path: None,
         restored: false,
+        image: None,
+        profile: None,
     };
     store.add(s1).unwrap();
     store.add(s2).unwrap();
@@ -130,4 +142,27 @@ fn test_generate_session_id_unique() {
     let id1 = vibepod::session::generate_session_id();
     let id2 = vibepod::session::generate_session_id();
     assert_ne!(id1, id2);
+}
+
+/// 既存の metadata.json は image / profile を持たない。フィールド追加後も
+/// 読めることを固定する（`vibepod restore` / `logs` / `ps` が既存セッションを
+/// 読めなくなる回帰を防ぐ）。
+#[test]
+fn legacy_metadata_without_image_and_profile_deserializes() {
+    let json = r#"{
+        "id": "20260806-000943-8f89",
+        "started_at": "2026-08-06T00:09:43+09:00",
+        "head_before": "bd36ce35c0a460c68c645c6fc841134badd251c7",
+        "branch": "main",
+        "prompt": "do the thing",
+        "claude_session_path": null,
+        "restored": false
+    }"#;
+
+    let session: Session =
+        serde_json::from_str(json).expect("legacy metadata.json must still deserialize");
+
+    assert_eq!(session.image, None);
+    assert_eq!(session.profile, None);
+    assert_eq!(session.id, "20260806-000943-8f89");
 }
