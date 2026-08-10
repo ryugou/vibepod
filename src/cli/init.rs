@@ -469,9 +469,9 @@ pub async fn execute(rebuild: bool) -> Result<()> {
                      Re-run `vibepod init` from an interactive terminal: a confirmation \
                      prompt is shown only if running containers still exist at that time.\n  \
                      If you stop them yourself first with `vibepod stop --all`, no \
-                     containers will be running anymore, so re-running `vibepod init` \
-                     non-interactively will remove ALL vibepod containers across every \
-                     project WITHOUT a confirmation prompt.",
+                     containers will be running anymore, so re-running `vibepod init` — \
+                     even from an interactive terminal — will remove ALL vibepod \
+                     containers across every project WITHOUT a confirmation prompt.",
                     running_count
                 );
             }
