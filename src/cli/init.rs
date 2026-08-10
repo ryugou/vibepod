@@ -461,14 +461,17 @@ pub async fn execute(rebuild: bool) -> Result<()> {
                     "{} running vibepod container(s) found across projects, but this session \
                      is non-interactive (stderr is not a terminal) so a removal confirmation \
                      cannot be obtained. Aborting without touching them.\n  \
-                     Run `vibepod ps` to see which containers are running.\n  \
-                     Safest option: re-run `vibepod init` from an interactive terminal and \
-                     confirm removal there.\n  \
-                     If you stop them yourself first with `vibepod stop --all` and then \
-                     re-run `vibepod init` non-interactively, no containers will be running \
-                     anymore, so ALL vibepod containers across every project — including \
-                     stopped ones holding other sessions' state — will be removed WITHOUT \
-                     confirmation.",
+                     Whichever option below you take, if `vibepod init` proceeds to remove \
+                     containers it removes ALL vibepod containers across every project — \
+                     including stopped ones holding other sessions' resumable state. The \
+                     options differ only in whether a confirmation prompt is shown.\n  \
+                     Run `vibepod ps` first to see what is currently running.\n  \
+                     Re-run `vibepod init` from an interactive terminal: a confirmation \
+                     prompt is shown only if running containers still exist at that time.\n  \
+                     If you stop them yourself first with `vibepod stop --all`, no \
+                     containers will be running anymore, so re-running `vibepod init` \
+                     non-interactively will remove ALL vibepod containers across every \
+                     project WITHOUT a confirmation prompt.",
                     running_count
                 );
             }
