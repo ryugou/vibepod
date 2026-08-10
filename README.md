@@ -182,9 +182,11 @@ vibepod run --env-file .env.template
 
 #### Codex review inside the container
 
-The container image bundles the `codex` CLI (musl static binary, no node/npm
-required) so the implementation-delegation flow can run a `codex` review
-before code leaves the container.
+The container image bundles the `codex` CLI (musl static binary; the `codex`
+binary itself does not need node/npm) so the implementation-delegation flow
+can run a `codex` review before code leaves the container. The image also
+bundles Node.js, because the Codex Claude Code plugin's review path shells
+out to `codex-companion.mjs`, which does require a node runtime.
 
 Prerequisites:
 

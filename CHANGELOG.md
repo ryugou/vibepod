@@ -5,6 +5,11 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-08-10
+
+### Added
+- The container image now bundles Node.js (v22.23.2 LTS, pinned with per-architecture SHA256 verification before extraction, no `latest` escape hatch), so a `codex` review can run to completion inside the container. The `codex` CLI itself is a musl static binary that needs no runtime, but the Codex Claude Code plugin reaches it through `codex-companion.mjs`, which requires node — without it the in-container review flow stopped at that step every time. Node's C++ addon headers are removed in the same layer they are unpacked in (they serve no purpose here, and dropping them keeps 59MB out of the image); `npm` is kept. Net image growth is roughly 135MB
+
 ## [1.8.1] - 2026-08-10
 
 ### Added
