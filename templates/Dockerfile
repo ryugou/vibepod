@@ -86,6 +86,46 @@ RUN set -eu; \
     rm -rf "${tmp_dir}"
 RUN codex --version
 
+# Node.js(codex CLI 本体は musl 静的バイナリで node を必要としないが、
+# Claude Code の codex plugin が使う codex-companion.mjs は node 実行を
+# 必須とし、レビューフローをコンテナ内で完結させるために導入する。
+# Issue #65)。
+#
+# codex CLI と同じバージョン pin + SHA256 テーブル方式を採用する。
+# latest エスケープハッチは設けない(未知の version/arch はビルド失敗
+# として扱う)。更新は ARG と下記 SHA256 テーブルの両方を bump してから
+# `vibepod init --rebuild` で行う。
+ARG NODE_VERSION=22.23.2
+
+# pin されたバージョンごとの SHA256(アーキ別)。NODE_VERSION を bump する際は
+# 対応する行をこのテーブルに追加すること。未知の組み合わせはビルド失敗として
+# 扱う(取り違え防止のため、どちらのハッシュがどちらのアーキ用かを下記コメン
+# トで明記する)。
+#   node-v22.23.2-linux-arm64.tar.gz (arm64) の SHA256:
+#     013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30
+#   node-v22.23.2-linux-x64.tar.gz (amd64) の SHA256:
+#     b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      arm64) node_arch=arm64 ;; \
+      amd64) node_arch=x64 ;; \
+      *) echo "node: unsupported architecture '$arch'" >&2; exit 1 ;; \
+    esac; \
+    asset="node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"; \
+    case "${NODE_VERSION}:${node_arch}" in \
+      "22.23.2:arm64") expected_sha256="013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30" ;; \
+      "22.23.2:x64") expected_sha256="b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a" ;; \
+      *) echo "node: no known SHA256 for NODE_VERSION=${NODE_VERSION} (arch ${node_arch}); bump the checksum table in this Dockerfile" >&2; exit 1 ;; \
+    esac; \
+    url="https://nodejs.org/dist/v${NODE_VERSION}/${asset}"; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "$url" -o "${tmp_dir}/${asset}"; \
+    echo "${expected_sha256}  ${tmp_dir}/${asset}" | sha256sum -c -; \
+    tar -xzf "${tmp_dir}/${asset}" -C /usr/local --strip-components=1; \
+    rm -rf "${tmp_dir}"
+RUN node --version && npm --version
+
 USER vibepod
 WORKDIR /workspace
 
