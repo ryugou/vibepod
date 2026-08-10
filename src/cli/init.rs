@@ -251,6 +251,43 @@ pub async fn ensure_image_available(
     }
 }
 
+/// 非対話環境でも `vibepod init` を落とさないための agent 選択判定。
+///
+/// docker を呼ばず TTY 判定だけに依存する分岐なので、`execute` から切り出して
+/// ユニットテストできるようにしている（`auto_build_decision` と同じパターン）。
+///
+/// `is_terminal` が true（対話端末）のときだけ `prompts::select_agent()` で
+/// `dialoguer::Select` による選択プロンプトを出す。false（CI・パイプ・
+/// スクリプト経由など、Issue #67 で報告された `vibepod init` の非TTY実行）の
+/// ときは `prompts::select_agent()` を呼ばず（呼ぶと `IO error: not a
+/// terminal` で落ちる）、`GlobalConfig::default().default_agent`
+/// （`src/config/global.rs`）を既定値として使う。リテラルで二重管理せず
+/// 同じ値を参照することで、将来デフォルトが変わってもここが追従する。
+/// `prompts::select_agent()` の他の選択肢（Gemini CLI / OpenAI Codex）も
+/// 現状すべて内部で "claude" にフォールバックする実装（`src/ui/prompts.rs`）
+/// なので、対話・非対話のどちらでも実質的に選ばれる agent は変わらない。
+/// 暗黙にデフォルトへフォールバックしたことを運用者が追えるよう、
+/// 非対話時は stderr に警告を出す。
+///
+/// 注意: config.toml 手編集・対話再実行は次のアクションとして案内しない。
+/// `default_agent` は毎回上書き保存される dead field で手編集はすぐ失われ、
+/// 対話再実行も上記フォールバックにより結果が変わらないため。
+fn resolve_agent(is_terminal: bool) -> Result<String> {
+    if is_terminal {
+        prompts::select_agent()
+    } else {
+        let default_agent = GlobalConfig::default().default_agent;
+        eprintln!(
+            "  Warning: No interactive terminal detected; using default agent '{}' \
+             (non-interactive mode). It's currently the only supported agent, so the \
+             other choices in the interactive prompt (Gemini CLI, OpenAI Codex) would \
+             resolve to it too.",
+            default_agent
+        );
+        Ok(default_agent)
+    }
+}
+
 /// `rebuild`: pass `--pull --no-cache` to `docker build` so the image is
 /// reconstructed from scratch. Needed to pick up a newer Claude Code, since
 /// the `install.sh` layer is otherwise served from cache forever.
@@ -264,7 +301,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
     runtime.ping().await?;
 
     // 2. Select agent
-    let agent = prompts::select_agent()?;
+    let agent = resolve_agent(std::io::IsTerminal::is_terminal(&std::io::stdin()))?;
 
     // 3. Build image
     let image_name = format!("vibepod-{}:latest", agent);
@@ -430,5 +467,15 @@ mod tests {
     fn build_args_swift_profile_when_specified() {
         let args = build_args_for(1000, 1000, Some("swift"));
         assert_eq!(args.get("VIBEPOD_PROFILE"), Some(&"swift".to_string()));
+    }
+
+    // doc comment を参照。`is_terminal = false` 分岐が dialoguer を経由しない
+    // ことを固定するテスト。
+    #[test]
+    fn resolve_agent_non_interactive_defaults_to_claude() {
+        // GlobalConfig::default().default_agent（src/config/global.rs）を
+        // リテラルで複製せず、プロンプトを呼ばずに同じ値が返ることを検証する。
+        let agent = resolve_agent(false).unwrap();
+        assert_eq!(agent, GlobalConfig::default().default_agent);
     }
 }
