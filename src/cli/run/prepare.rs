@@ -12,6 +12,53 @@ use super::{
     detect_languages, get_lang_install_cmd, hash_env_vars, parse_mount_arg, RunContext, RunOptions,
 };
 
+/// `profile = "swift"` のコンテナでエージェントへ渡す環境情報。
+///
+/// バージョン番号を書かない: 正本は `templates/Dockerfile` の ARG であり、
+/// ここへ書き写すとイメージ更新のたびに二重管理になる。バージョンが必要な
+/// 場合、エージェントはコンテナ内で `swift --version` を実行できる。
+const SWIFT_AVAILABLE_PREAMBLE: &str = "[vibepod 環境情報 / 自動付与]
+このコンテナには Swift toolchain と SwiftLint が導入済みで、すぐに使える。
+- 検証はコンテナ内で実行すること(swift build / swift test / swiftlint lint)。
+- toolchain の追加導入は不要。試みてはならない。
+- Linux 環境のため、Apple フレームワーク(CryptoKit / SwiftUI / UIKit 等)に依存する
+  ターゲットはビルドできない。対象を Foundation のみに依存するパッケージへ限定すること。
+- コンテナ内が green でも macOS 側の検証を代替しない。
+
+--- ここから利用者のプロンプト ---";
+
+/// `Package.swift` があるのに profile 未指定のコンテナでエージェントへ渡す
+/// 環境情報。自力導入は共有ライブラリ不足で必ず失敗するため、試行そのものを
+/// 禁じたうえで恒久対応(config.toml への profile 設定)を示す。
+const SWIFT_ABSENT_PREAMBLE: &str = "[vibepod 環境情報 / 自動付与]
+このコンテナに Swift toolchain と SwiftLint は導入されていない。
+- インストールを試みてはならない。共有ライブラリ不足で失敗し、時間だけを消費する。
+- ビルド・テスト・lint は実行せず、最終出力に「未実行」と明記すること。
+- 恒久対応: .vibepod/config.toml の [run] へ profile = \"swift\" を設定する。
+
+--- ここから利用者のプロンプト ---";
+
+/// profile と workspace の状態から、エージェントへ渡す環境情報ブロックを
+/// 導出する。前置が不要な場合は `None` を返す。
+///
+/// 生成規則(設計 3.3):
+///
+/// | `profile`       | `Package.swift` | 戻り値                     |
+/// | --------------- | --------------- | --------------------------- |
+/// | `Some("swift")` | 問わない        | `SWIFT_AVAILABLE_PREAMBLE` |
+/// | `None`          | あり            | `SWIFT_ABSENT_PREAMBLE`    |
+/// | `None`          | なし            | `None`                     |
+///
+/// `VALID_PROFILES` へ `swift` 以外を追加する場合は、この関数の分岐と対応する
+/// 定数を同時に追加すること(追加しない限り新 profile は `None` を返す)。
+pub fn environment_preamble(profile: Option<&str>, has_package_swift: bool) -> Option<String> {
+    match (profile, has_package_swift) {
+        (Some("swift"), _) => Some(SWIFT_AVAILABLE_PREAMBLE.to_string()),
+        (None, true) => Some(SWIFT_ABSENT_PREAMBLE.to_string()),
+        _ => None,
+    }
+}
+
 /// Claude CLI に渡す引数列を組み立てる。
 ///
 /// `prepare_context` 内の Docker チェックなどの副作用から独立させるため
