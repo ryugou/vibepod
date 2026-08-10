@@ -256,7 +256,7 @@ pub async fn ensure_image_available(
 /// docker を呼ばず TTY 判定だけに依存する分岐なので、`execute` から切り出して
 /// ユニットテストできるようにしている（`auto_build_decision` と同じパターン）。
 ///
-/// `is_terminal` が true（対話端末）のときだけ `prompts::select_agent()` で
+/// `is_interactive` が true（対話端末）のときだけ `prompts::select_agent()` で
 /// `dialoguer::Select` による選択プロンプトを出す。false（CI・パイプ・
 /// スクリプト経由など、Issue #67 で報告された `vibepod init` の非TTY実行）の
 /// ときは `prompts::select_agent()` を呼ばず（呼ぶと `IO error: not a
@@ -272,8 +272,8 @@ pub async fn ensure_image_available(
 /// 注意: config.toml 手編集・対話再実行は次のアクションとして案内しない。
 /// `default_agent` は毎回上書き保存される dead field で手編集はすぐ失われ、
 /// 対話再実行も上記フォールバックにより結果が変わらないため。
-fn resolve_agent(is_terminal: bool) -> Result<String> {
-    if is_terminal {
+fn resolve_agent(is_interactive: bool) -> Result<String> {
+    if is_interactive {
         prompts::select_agent()
     } else {
         let default_agent = GlobalConfig::default().default_agent;
@@ -298,7 +298,7 @@ fn resolve_agent(is_terminal: bool) -> Result<String> {
 /// - `running_count == 0`（停止中コンテナのみ、または対象コンテナなし）は
 ///   対話・非対話を問わず確認なしで削除する。停止中コンテナの削除は
 ///   実行中の作業を壊さないため。
-/// - `running_count > 0` かつ対話端末（`is_terminal` = true）なら
+/// - `running_count > 0` かつ対話端末（`is_interactive` = true）なら
 ///   `dialoguer::Confirm` の確認プロンプトへ進む（従来どおり）。
 /// - `running_count > 0` かつ非対話（CI・パイプ経由など）は、確認を
 ///   取れないため削除せずエラーで中断する。`list_vibepod_containers()` は
@@ -315,10 +315,13 @@ enum ContainerRemovalDecision {
     Abort,
 }
 
-fn container_removal_decision(is_terminal: bool, running_count: usize) -> ContainerRemovalDecision {
+fn container_removal_decision(
+    is_interactive: bool,
+    running_count: usize,
+) -> ContainerRemovalDecision {
     if running_count == 0 {
         ContainerRemovalDecision::Remove
-    } else if is_terminal {
+    } else if is_interactive {
         ContainerRemovalDecision::Confirm
     } else {
         ContainerRemovalDecision::Abort
@@ -458,7 +461,14 @@ pub async fn execute(rebuild: bool) -> Result<()> {
                     "{} running vibepod container(s) found across projects, but this session \
                      is non-interactive (stderr is not a terminal) so a removal confirmation \
                      cannot be obtained. Aborting without touching them.\n  \
-                     Run `vibepod stop --all` to stop them, then re-run `vibepod init`.",
+                     Run `vibepod ps` to see which containers are running.\n  \
+                     Safest option: re-run `vibepod init` from an interactive terminal and \
+                     confirm removal there.\n  \
+                     If you stop them yourself first with `vibepod stop --all` and then \
+                     re-run `vibepod init` non-interactively, no containers will be running \
+                     anymore, so ALL vibepod containers across every project — including \
+                     stopped ones holding other sessions' state — will be removed WITHOUT \
+                     confirmation.",
                     running_count
                 );
             }
@@ -521,7 +531,7 @@ mod tests {
         assert_eq!(args.get("VIBEPOD_PROFILE"), Some(&"swift".to_string()));
     }
 
-    // doc comment を参照。`is_terminal = false` 分岐が dialoguer を経由しない
+    // doc comment を参照。`is_interactive = false` 分岐が dialoguer を経由しない
     // ことを固定するテスト。
     #[test]
     fn resolve_agent_non_interactive_defaults_to_claude() {
