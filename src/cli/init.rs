@@ -458,11 +458,11 @@ pub async fn execute(rebuild: bool) -> Result<()> {
                 // 削除すると他プロジェクトで実行中の別セッションを巻き込んで壊しうる。
                 // 確認を取れない以上、削除せずエラーで中断する。
                 bail!(
-                    "{} running vibepod container(s) found across projects, but this session \
+                    "{} running VibePod container(s) found across projects, but this session \
                      is non-interactive (stderr is not a terminal) so a removal confirmation \
                      cannot be obtained. Aborting without touching them.\n  \
                      Whichever option below you take, if `vibepod init` proceeds to remove \
-                     containers it removes ALL vibepod containers across every project — \
+                     containers it removes ALL VibePod containers across every project — \
                      including stopped ones holding other sessions' resumable state. The \
                      options differ only in whether a confirmation prompt is shown.\n  \
                      Run `vibepod ps` first to see what is currently running.\n  \
@@ -470,7 +470,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
                      prompt is shown only if running containers still exist at that time.\n  \
                      If you stop them yourself first with `vibepod stop --all`, no \
                      containers will be running anymore, so re-running `vibepod init` — \
-                     even from an interactive terminal — will remove ALL vibepod \
+                     even from an interactive terminal — will remove ALL VibePod \
                      containers across every project WITHOUT a confirmation prompt.",
                     running_count
                 );
@@ -537,7 +537,7 @@ mod tests {
     // doc comment を参照。`is_interactive = false` 分岐が dialoguer を経由しない
     // ことを固定するテスト。
     #[test]
-    fn resolve_agent_non_interactive_defaults_to_claude() {
+    fn resolve_agent_non_interactive_uses_default_agent() {
         // GlobalConfig::default().default_agent（src/config/global.rs）を
         // リテラルで複製せず、プロンプトを呼ばずに同じ値が返ることを検証する。
         let agent = resolve_agent(false).unwrap();

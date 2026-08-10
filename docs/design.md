@@ -115,7 +115,7 @@ vibepod/
 **フロー：**
 
 1. Docker Engine が動作しているか確認（`docker info` で確認）
-2. 使用する AI Agent を選択（v1 は Claude Code のみ、他は coming soon 表示）
+2. 使用する AI Agent を選択（v1 は Claude Code のみ、他は coming soon 表示）。非対話環境（stderr が TTY でない）では選択プロンプトをスキップし、既定エージェントへ自動フォールバックする（stderr に警告を出力）
 3. パッケージにバンドルされた Dockerfile を使い Docker イメージをビルド
 4. ビルド後に既存の vibepod コンテナを全削除する（新しいイメージを次回 `vibepod run` から使わせるため）。実行中コンテナがなければ確認なしで削除、実行中コンテナがあれば対話端末では確認プロンプトを表示してから削除する
 5. グローバル設定を保存
