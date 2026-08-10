@@ -288,26 +288,47 @@ fn resolve_agent(is_interactive: bool) -> Result<String> {
     }
 }
 
+/// 削除して安全と判定できる docker の `{{.State}}` 値。
+///
+/// これ以外（running / restarting / paused、および将来 docker が追加する
+/// 未知の state）は保護対象として扱う。値は docker が実際に返す小文字表記
+/// （`docker ps --format '{{.State}}'`）に合わせている。
+const REMOVABLE_STATES: &[&str] = &["exited", "created", "dead"];
+
+/// docker のコンテナ state が「保護対象」（無確認で触れてはならない）か
+/// どうかを判定する純関数。未知の state は安全側（保護）に倒す。
+///
+/// この判定結果は `container_removal_decision` の分岐そのものには使わない
+/// （分岐はコンテナの有無のみで決まる）。確認・abort メッセージに含める
+/// 「うち N 件が稼働中」の件数算出にのみ使う。
+fn is_protected_state(state: &str) -> bool {
+    !REMOVABLE_STATES.contains(&state.to_lowercase().as_str())
+}
+
 /// 非対話環境でも `vibepod init` を落とさない・かつ他プロジェクトの
 /// セッションを壊さないための、既存コンテナ削除の判定。
 ///
-/// docker を呼ばず TTY 判定と実行中コンテナ数だけに依存する分岐なので、
+/// docker を呼ばず TTY 判定とコンテナ件数だけに依存する分岐なので、
 /// `execute` から切り出してユニットテストできるようにしている
 /// （`auto_build_decision` / `resolve_agent` と同じパターン）。
 ///
-/// - `running_count == 0`（停止中コンテナのみ、または対象コンテナなし）は
-///   対話・非対話を問わず確認なしで削除する。停止中コンテナの削除は
-///   実行中の作業を壊さないため。
-/// - `running_count > 0` かつ対話端末（`is_interactive` = true）なら
-///   `dialoguer::Confirm` の確認プロンプトへ進む（従来どおり）。
-/// - `running_count > 0` かつ非対話（CI・パイプ経由など）は、確認を
+/// 稼働中コンテナ数では**分岐しない**。vibepod は非 disposable コンテナを
+/// 停止保持して再利用する設計であり、停止中（`exited`）のコンテナにも
+/// resume 可能なセッション状態が残る。「稼働中が 0 件だから消してよい」
+/// という前提は誤りであり、無確認削除の経路はコンテナが 1 件も存在しない
+/// 場合（削除対象そのものが無い no-op）にのみ限定する。
+///
+/// - コンテナが 0 件なら確認なしで続行する（実際には削除対象が無い no-op）。
+/// - コンテナが 1 件以上かつ対話端末（`is_interactive` = true）なら
+///   `dialoguer::Confirm` の確認プロンプトへ進む。
+/// - コンテナが 1 件以上かつ非対話（CI・パイプ経由など）は、確認を
 ///   取れないため削除せずエラーで中断する。`list_vibepod_containers()` は
-///   プロジェクト横断で全 vibepod コンテナを返すため、ここで無条件に
-///   削除すると他プロジェクトで実行中の別セッションのコンテナまで
-///   確認なしに巻き込んで壊しうる。
+///   プロジェクト横断で全 vibepod コンテナを返すため、ここで確認なしに
+///   削除すると他プロジェクトのコンテナ（稼働中・停止中を問わず、停止中
+///   なら resume 可能な状態を含む）まで巻き込んで壊しうる。
 #[derive(Debug, PartialEq, Eq)]
 enum ContainerRemovalDecision {
-    /// 確認なしで削除して続行する。
+    /// 確認なしで続行する（コンテナが無いので実質 no-op）。
     Remove,
     /// `dialoguer::Confirm` で確認を取ってから決める。
     Confirm,
@@ -317,15 +338,42 @@ enum ContainerRemovalDecision {
 
 fn container_removal_decision(
     is_interactive: bool,
-    running_count: usize,
+    container_count: usize,
 ) -> ContainerRemovalDecision {
-    if running_count == 0 {
+    if container_count == 0 {
         ContainerRemovalDecision::Remove
     } else if is_interactive {
         ContainerRemovalDecision::Confirm
     } else {
         ContainerRemovalDecision::Abort
     }
+}
+
+/// 非対話 abort 時のエラーメッセージを組み立てる純関数。
+///
+/// `build_completed` が true（削除直前チェックでの abort）のときだけ、
+/// イメージビルドが既に完了し `latest` タグも更新済みである旨を含める
+/// （ビルド前チェックでの abort はビルド自体が走っていないため不要）。
+fn non_interactive_abort_message(total: usize, running: usize, build_completed: bool) -> String {
+    let build_note = if build_completed {
+        "\n  Note: the Docker image was already rebuilt and its `latest` tag updated \
+         before this check ran — only the container removal step was aborted."
+    } else {
+        ""
+    };
+    format!(
+        "{} VibePod container(s) found across projects ({} of them currently running), but \
+         this session is non-interactive (stderr is not a terminal) so a removal confirmation \
+         cannot be obtained. Aborting without touching them.{}\n  \
+         `vibepod init` removes ALL VibePod containers across every project once it proceeds — \
+         including stopped ones holding other sessions' resumable state — so a confirmation is \
+         required whenever at least one container exists, running or not.\n  \
+         Run `vibepod ps` first to see what currently exists.\n  \
+         Re-run `vibepod init` from an interactive terminal to get a confirmation prompt, or \
+         remove the containers yourself first (e.g. `vibepod rm --all` from an interactive \
+         terminal) so none remain.",
+        total, running, build_note
+    )
 }
 
 /// `rebuild`: pass `--pull --no-cache` to `docker build` so the image is
@@ -347,11 +395,39 @@ pub async fn execute(rebuild: bool) -> Result<()> {
     // ではなく stderr で行う。stdin だけで判定すると、`vibepod init 2>&1 |
     // tee log` のように stdin は TTY でも stderr がパイプされているケースを
     // 対話と誤判定し、dialoguer が "IO error: not a terminal" でクラッシュ
-    // する。4. のコンテナ削除確認でも同じ理由でこの値を使い回す。
+    // する。3. と 5. のコンテナ削除確認でも同じ理由でこの値を使い回す。
     let is_interactive = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let agent = resolve_agent(is_interactive)?;
 
-    // 3. Build image
+    // 3. Pre-build container check（Issue #69）
+    //
+    // 非対話 CI で `--rebuild` を実行すると、`--pull --no-cache` を伴う
+    // 数分〜十数分のビルドを完走してから、後段のコンテナ削除確認で必ず
+    // 失敗していた（「ビルドは成功したのに init 全体は失敗し、しかも latest
+    // タグだけ更新済み」という部分成功状態を残す）。abort になることが
+    // 事前に分かっている非対話ケースは、ビルドに入る前に fail fast させる。
+    //
+    // ここでは Abort 分岐だけを見る。Remove（コンテナ 0 件）や Confirm
+    // （対話 + コンテナあり）は、実際の削除判断をビルド後の再チェック
+    // （TOCTOU 対策、下記 5.）に委ねるため、ここでは何もしない。
+    {
+        let containers = runtime.list_vibepod_containers().await?;
+        if let ContainerRemovalDecision::Abort =
+            container_removal_decision(is_interactive, containers.len())
+        {
+            let running = containers
+                .iter()
+                .filter(|c| is_protected_state(&c.state))
+                .count();
+            bail!(non_interactive_abort_message(
+                containers.len(),
+                running,
+                false
+            ));
+        }
+    }
+
+    // 4. Build image
     let image_name = format!("vibepod-{}:latest", agent);
 
     if rebuild {
@@ -375,7 +451,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
         }
     }
 
-    // 3b. `--rebuild` のときだけ、既に docker 上にある profile バリアント
+    // 4b. `--rebuild` のときだけ、既に docker 上にある profile バリアント
     //     イメージも同じ引数（rebuild=true, profile=<p>）で再ビルドする。
     //     `config::VALID_PROFILES` の各エントリについて存在確認し、存在する
     //     ものだけを対象にする（未使用の profile を勝手にビルドし始めない）。
@@ -433,54 +509,48 @@ pub async fn execute(rebuild: bool) -> Result<()> {
         }
     }
 
-    // 4. イメージ再ビルド後に既存のコンテナを全削除する（config 保存前に行う）
-    //    running コンテナがある場合、対話端末なら確認プロンプトを表示し、
-    //    非対話なら確認が取れないため削除せずエラー終了する
-    //    （停止中コンテナのみなら対話・非対話を問わず確認なしで削除する）
+    // 5. イメージ再ビルド後に既存のコンテナを全削除する（config 保存前に行う）
+    //
+    //    3. のビルド前チェックとは別に、ここでもう一度列挙・判定し直す
+    //    （TOCTOU 対策）。ビルドには数分〜十数分かかることがあり、その間に別
+    //    プロセスが `vibepod run` を開始してコンテナが増えている可能性が
+    //    あるため、ビルド前の判定結果をそのまま使い回さない。
+    //
+    //    コンテナが 1 件以上ある場合、対話端末なら確認プロンプトを表示し、
+    //    非対話なら確認が取れないため削除せずエラー終了する（稼働中・停止中
+    //    を問わない。停止中コンテナにも resume 可能な状態が残るため）。
     let containers = runtime.list_vibepod_containers().await?;
     if !containers.is_empty() {
         let running_count = containers
             .iter()
-            .filter(|(_, status)| {
-                status.starts_with("Up") || status.to_lowercase().contains("running")
-            })
+            .filter(|c| is_protected_state(&c.state))
             .count();
 
-        let should_remove = match container_removal_decision(is_interactive, running_count) {
+        let should_remove = match container_removal_decision(is_interactive, containers.len()) {
             ContainerRemovalDecision::Remove => true,
             ContainerRemovalDecision::Confirm => {
-                // インタラクティブ + running コンテナあり: 確認プロンプト
+                // インタラクティブ + コンテナあり: 確認プロンプト
                 prompts::confirm_remove_all_containers(containers.len(), running_count)?
             }
             ContainerRemovalDecision::Abort => {
-                // 非インタラクティブ + running コンテナあり: `list_vibepod_containers()`
-                // はプロジェクト横断で全 vibepod コンテナを返すため、ここで確認なしに
-                // 削除すると他プロジェクトで実行中の別セッションを巻き込んで壊しうる。
-                // 確認を取れない以上、削除せずエラーで中断する。
-                bail!(
-                    "{} running VibePod container(s) found across projects, but this session \
-                     is non-interactive (stderr is not a terminal) so a removal confirmation \
-                     cannot be obtained. Aborting without touching them.\n  \
-                     Whichever option below you take, if `vibepod init` proceeds to remove \
-                     containers it removes ALL VibePod containers across every project — \
-                     including stopped ones holding other sessions' resumable state. The \
-                     options differ only in whether a confirmation prompt is shown.\n  \
-                     Run `vibepod ps` first to see what is currently running.\n  \
-                     Re-run `vibepod init` from an interactive terminal: a confirmation \
-                     prompt is shown only if running containers still exist at that time.\n  \
-                     If you stop them yourself first with `vibepod stop --all`, no \
-                     containers will be running anymore, so re-running `vibepod init` — \
-                     even from an interactive terminal — will remove ALL VibePod \
-                     containers across every project WITHOUT a confirmation prompt.",
-                    running_count
-                );
+                // 非インタラクティブ + コンテナあり: `list_vibepod_containers()` は
+                // プロジェクト横断で全 vibepod コンテナを返すため、ここで確認なしに
+                // 削除すると他プロジェクトのコンテナ（停止中の resume 可能な状態を
+                // 含む）を巻き込んで壊しうる。確認を取れない以上、削除せずエラーで
+                // 中断する。この時点ではイメージビルドが既に完了しているため、
+                // その旨をメッセージに含める。
+                bail!(non_interactive_abort_message(
+                    containers.len(),
+                    running_count,
+                    true
+                ));
             }
         };
 
         if should_remove {
             println!("  Removing {} existing container(s)...", containers.len());
-            for (container_name, _) in &containers {
-                runtime.remove_container(container_name).await?;
+            for container in &containers {
+                runtime.remove_container(&container.name).await?;
             }
             println!("  Removed {} container(s).", containers.len());
         } else {
@@ -493,7 +563,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
         }
     }
 
-    // 5. Save config（コンテナ削除後に保存することで、削除キャンセル時に旧イメージが残ったまま
+    // 6. Save config（コンテナ削除後に保存することで、削除キャンセル時に旧イメージが残ったまま
     //    config が更新される問題を回避する）
     let config_dir = config::default_config_dir()?;
     let config = GlobalConfig {
@@ -544,40 +614,72 @@ mod tests {
         assert_eq!(agent, GlobalConfig::default().default_agent);
     }
 
-    // 欠陥2 回帰テスト: 非対話 + 実行中コンテナありは、他プロジェクトの
-    // セッションを確認なしで壊さないようエラーにする（削除しない）。
+    // Critical 1 回帰テスト: コンテナが 0 件なら対話・非対話を問わず
+    // 確認なしで続行する（削除対象そのものが無い no-op）。
     #[test]
-    fn container_removal_decision_non_interactive_with_running_containers_aborts() {
+    fn container_removal_decision_no_containers_removes_regardless_of_interactivity() {
+        assert_eq!(
+            container_removal_decision(false, 0),
+            ContainerRemovalDecision::Remove
+        );
+        assert_eq!(
+            container_removal_decision(true, 0),
+            ContainerRemovalDecision::Remove
+        );
+    }
+
+    // Critical 1 回帰テスト: コンテナが 1 件でもあれば非対話は確認なしに
+    // 削除できないためエラー終了する。停止中コンテナだけでも resume 可能な
+    // セッション状態を壊しうるため、「稼働中が 0 件だから削除してよい」と
+    // いう旧仕様の前提そのものをここで否定する。
+    #[test]
+    fn container_removal_decision_with_containers_non_interactive_aborts() {
+        assert_eq!(
+            container_removal_decision(false, 1),
+            ContainerRemovalDecision::Abort
+        );
         assert_eq!(
             container_removal_decision(false, 3),
             ContainerRemovalDecision::Abort
         );
     }
 
-    // 非対話 + 停止中のみは、実行中の作業を壊さないため確認なしで削除継続。
+    // コンテナが 1 件以上かつ対話端末なら、稼働中・停止中を問わず確認
+    // プロンプトへ進む（無確認削除の経路は存在しない）。
     #[test]
-    fn container_removal_decision_non_interactive_with_only_stopped_containers_removes() {
+    fn container_removal_decision_with_containers_interactive_confirms() {
         assert_eq!(
-            container_removal_decision(false, 0),
-            ContainerRemovalDecision::Remove
+            container_removal_decision(true, 1),
+            ContainerRemovalDecision::Confirm
         );
-    }
-
-    // 対話端末 + 実行中コンテナありは、従来どおり確認プロンプトへ進む。
-    #[test]
-    fn container_removal_decision_interactive_with_running_containers_prompts_confirmation() {
         assert_eq!(
             container_removal_decision(true, 3),
             ContainerRemovalDecision::Confirm
         );
     }
 
-    // 対話端末でも停止中のみなら確認プロンプトを挟まない既存挙動の固定。
+    // Critical 2 回帰テスト: `is_protected_state` の表形式テスト。
+    // running/restarting/paused は保護対象、exited/created/dead は削除して
+    // 安全、未知の state（将来 docker が追加しうる値を含む）は安全側の
+    // 保護対象に倒れることを固定する。
     #[test]
-    fn container_removal_decision_interactive_with_only_stopped_containers_removes() {
-        assert_eq!(
-            container_removal_decision(true, 0),
-            ContainerRemovalDecision::Remove
-        );
+    fn is_protected_state_table() {
+        let cases: &[(&str, bool)] = &[
+            ("running", true),
+            ("restarting", true),
+            ("paused", true),
+            ("exited", false),
+            ("created", false),
+            ("dead", false),
+            ("weird-new-state", true),
+        ];
+        for (state, expected_protected) in cases {
+            assert_eq!(
+                is_protected_state(state),
+                *expected_protected,
+                "state = {:?}",
+                state
+            );
+        }
     }
 }

@@ -35,8 +35,11 @@ pub async fn execute() -> Result<()> {
     }
 
     let mut infos: Vec<ContainerInfo> = Vec::new();
-    for (name, status) in &containers {
-        let labels = runtime.get_container_labels(name).await.unwrap_or_default();
+    for container in &containers {
+        let labels = runtime
+            .get_container_labels(&container.name)
+            .await
+            .unwrap_or_default();
         let workspace = labels.get("vibepod.workspace").cloned();
 
         let project = if let Some(ref ws) = workspace {
@@ -46,7 +49,7 @@ pub async fn execute() -> Result<()> {
                 .unwrap_or(ws.as_str())
                 .to_string()
         } else {
-            extract_project_fallback(name)
+            extract_project_fallback(&container.name)
         };
 
         let (elapsed, last_output) = if let Some(ref ws) = workspace {
@@ -56,10 +59,10 @@ pub async fn execute() -> Result<()> {
         };
 
         infos.push(ContainerInfo {
-            name: name.clone(),
+            name: container.name.clone(),
             project,
             workspace,
-            status: status.clone(),
+            status: container.status.clone(),
             elapsed,
             last_output,
         });

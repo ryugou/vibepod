@@ -17,6 +17,20 @@ pub enum ContainerStatus {
 /// Docker CLI ラッパー。docker コマンドを通じてコンテナ操作を行う。
 pub struct DockerRuntime;
 
+/// `list_vibepod_containers` が返すコンテナ情報。
+///
+/// タプルではなく構造体にしているのは、フィールドが増えたときに呼び出し元が
+/// `.0` / `.1` の位置ズレで壊れず、`.name` のように読みやすいまま拡張できるため。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerInfo {
+    pub name: String,
+    /// docker の `{{.State}}`（running / restarting / paused / exited / created / dead）。
+    /// 削除して安全かどうかの判定はこちらを使う（`status` は表示用）。
+    pub state: String,
+    /// docker の `{{.Status}}`（"Up 5 minutes" 等の表示用文字列）。
+    pub status: String,
+}
+
 /// コンテナ起動設定。`docker run` に渡す全パラメータを保持する。
 /// コンテナは常にアイドルエントリポイント（`tail -f /dev/null`）で起動し、
 /// Claude は `docker exec` で実行する。
@@ -339,7 +353,7 @@ impl DockerRuntime {
         Ok(None)
     }
 
-    pub async fn list_vibepod_containers(&self) -> Result<Vec<(String, String)>> {
+    pub async fn list_vibepod_containers(&self) -> Result<Vec<ContainerInfo>> {
         let output = Command::new("docker")
             .args([
                 "ps",
@@ -347,7 +361,7 @@ impl DockerRuntime {
                 "--filter",
                 "name=vibepod-",
                 "--format",
-                "{{.Names}}\t{{.Status}}",
+                "{{.Names}}\t{{.State}}\t{{.Status}}",
             ])
             .output()
             .await
@@ -366,10 +380,18 @@ impl DockerRuntime {
             if line.is_empty() {
                 continue;
             }
-            if let Some((name, status)) = line.split_once('\t') {
-                if name.starts_with("vibepod-") {
-                    result.push((name.to_string(), status.to_string()));
-                }
+            let mut fields = line.splitn(3, '\t');
+            let (Some(name), Some(state), Some(status)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if name.starts_with("vibepod-") {
+                result.push(ContainerInfo {
+                    name: name.to_string(),
+                    state: state.to_string(),
+                    status: status.to_string(),
+                });
             }
         }
         Ok(result)
