@@ -25,7 +25,7 @@ pub async fn execute() -> Result<()> {
         without_prefix.to_string()
     };
 
-    struct ContainerInfo {
+    struct ContainerDisplayRow {
         name: String,
         project: String,
         workspace: Option<String>,
@@ -34,7 +34,7 @@ pub async fn execute() -> Result<()> {
         last_output: Option<String>,
     }
 
-    let mut infos: Vec<ContainerInfo> = Vec::new();
+    let mut infos: Vec<ContainerDisplayRow> = Vec::new();
     for container in &containers {
         let labels = runtime
             .get_container_labels(&container.name)
@@ -58,7 +58,7 @@ pub async fn execute() -> Result<()> {
             (None, None)
         };
 
-        infos.push(ContainerInfo {
+        infos.push(ContainerDisplayRow {
             name: container.name.clone(),
             project,
             workspace,
