@@ -8,15 +8,19 @@ pub async fn execute() -> Result<()> {
     println!("\n  ┌  VibePod Login");
     println!("  │");
 
-    // トークン取得の実体である `auth::run_setup_token`（`src/auth.rs`）は、
-    // OAuth フローを `docker exec -it` で実行し、`stdin` もホストの端末へ
-    // 接続する（`src/auth.rs` の該当箇所）。`docker exec -it` は TTY が無い
-    // 環境では `the input device is not a TTY` で失敗するため、既存トークン
-    // の有無にかかわらずこのコマンドは非 TTY 環境では完走できない。上書き
-    // 確認だけをガードしても、トークンが無い場合は docker 由来の分かりにくい
-    // エラーで落ちてしまうため、コマンド全体の前提条件としてここで 1 回だけ
-    // 判定する。
-    ensure_interactive_terminal(std::io::IsTerminal::is_terminal(&std::io::stderr()))?;
+    // `vibepod login` は対話ストリームを 2 つ必要とする。stdin は
+    // `auth::run_setup_token`（`src/auth.rs`）が `docker exec -it` で
+    // OAuth フローを実行する際にホストの端末へ接続するために使い、
+    // stderr は既存トークンの上書き確認 `dialoguer::Confirm`
+    // （`Term::stderr()` を使う）が使う。どちらか一方でも非 TTY だと、
+    // stdin 側は `docker exec -it` が `the input device is not a TTY` で
+    // 落ち、stderr 側は確認プロンプトが出せない。両方を満たさない限り
+    // このコマンドは完走できないため、コマンド全体の前提条件として
+    // ここで 1 回だけ AND 条件で判定する。
+    ensure_interactive_terminal(
+        std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )?;
 
     let runtime = DockerRuntime::new()
         .await
@@ -79,20 +83,34 @@ pub async fn execute() -> Result<()> {
 /// `vibepod login` 全体の前提条件（対話端末が必要）の判定。docker や
 /// dialoguer を呼ばず TTY 判定だけに依存する分岐なので、`execute` から
 /// 切り出してユニットテストできるようにしている（`src/cli/init.rs` の
-/// `auto_build_decision` と同じパターン）。stderr が TTY でなければ、
-/// 上書き確認の `dialoguer::Confirm` はもちろん、その先にある
-/// `auth::run_setup_token`（`docker exec -it` で OAuth フローを実行する）
-/// にも到達させず、ここで中断する。
-fn ensure_interactive_terminal(stderr_is_terminal: bool) -> Result<()> {
-    if stderr_is_terminal {
+/// `auto_build_decision` と同じパターン）。
+///
+/// `login` だけは stdin と stderr の**両方**が TTY であることを AND 条件
+/// で要求する。他のコマンド（`init.rs` / `restore.rs`）が stderr のみを
+/// 判定しているのとは異なる特殊なケースであり、理由は次のとおり：
+///
+/// - stdin: `auth::run_setup_token`（`src/auth.rs`）が OAuth フローを
+///   `docker exec -it` で実行する際、ホストの `stdin` をコンテナへ接続する
+///   （`.stdin(Stdio::inherit())`）。stdin が非 TTY だと `docker exec -it`
+///   が `the input device is not a TTY` で失敗する。
+/// - stderr: 既存トークンの上書き確認に使う `dialoguer::Confirm` は
+///   `Term::stderr()` を使って対話する。stderr が非 TTY だと確認プロンプト
+///   を出せない。
+///
+/// `init.rs` / `restore.rs` は `dialoguer` のみを使い `docker exec -it` を
+/// 使わないため stderr のみの判定で正しい。`login` を書き換える際にこの
+/// AND 条件を片方だけに戻さないこと（stdin のみの見逃し・stderr のみの
+/// 過剰拒否のどちらも再発する）。
+fn ensure_interactive_terminal(stdin_is_terminal: bool, stderr_is_terminal: bool) -> Result<()> {
+    if stdin_is_terminal && stderr_is_terminal {
         Ok(())
     } else {
         bail!(
             "vibepod login requires an interactive terminal.\n  \
              The OAuth token setup runs `claude setup-token` inside the container via \
-             `docker exec -it`, which needs a real terminal for both input and output \
-             regardless of whether an existing token is present, so this run is being \
-             aborted before starting the container.\n  \
+             `docker exec -it`, which needs a real terminal for both input (stdin) and \
+             output (stderr) regardless of whether an existing token is present, so this \
+             run is being aborted before starting the container.\n  \
              Re-run `vibepod login` from an interactive terminal."
         )
     }
@@ -102,15 +120,32 @@ fn ensure_interactive_terminal(stderr_is_terminal: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    // Issue #68: 非 TTY はエラーで中断する（既存トークンの有無に関係なく、
-    // OAuth フロー自体が `docker exec -it` を使うため）。
+    // Issue #68 (W-A): stdin と stderr の両方が TTY のときだけ Ok。
+    // OAuth フローが stdin を使う `docker exec -it`（src/auth.rs）と、
+    // 上書き確認が stderr を使う `dialoguer::Confirm` の両方に依存する
+    // ため、4 象限すべてを固定する。
     #[test]
-    fn ensure_interactive_terminal_non_terminal_errors() {
-        assert!(ensure_interactive_terminal(false).is_err());
+    fn ensure_interactive_terminal_both_tty_ok() {
+        assert!(ensure_interactive_terminal(true, true).is_ok());
     }
 
     #[test]
-    fn ensure_interactive_terminal_terminal_ok() {
-        assert!(ensure_interactive_terminal(true).is_ok());
+    fn ensure_interactive_terminal_stdin_only_errors() {
+        // stdin=true, stderr=false: `vibepod login 2> login.log` に相当。
+        // 上書き確認の dialoguer::Confirm が stderr を使えないため Err。
+        assert!(ensure_interactive_terminal(true, false).is_err());
+    }
+
+    #[test]
+    fn ensure_interactive_terminal_stderr_only_errors() {
+        // stdin=false, stderr=true: `vibepod login < /dev/null` に相当。
+        // docker exec -it が stdin を使えず `the input device is not a TTY`
+        // で落ちる経路のため、ここで先に Err にする。
+        assert!(ensure_interactive_terminal(false, true).is_err());
+    }
+
+    #[test]
+    fn ensure_interactive_terminal_neither_tty_errors() {
+        assert!(ensure_interactive_terminal(false, false).is_err());
     }
 }
