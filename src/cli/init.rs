@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::config::{self, GlobalConfig};
-use crate::runtime::DockerRuntime;
+use crate::runtime::{ContainerInfo, DockerRuntime};
 use crate::ui::{banner, prompts};
 
 /// ホストの UID/GID を返す（Dockerfile の HOST_UID / HOST_GID build-arg 用）。
@@ -377,6 +377,124 @@ fn non_interactive_abort_message(total: usize, protected: usize, build_completed
     )
 }
 
+/// コンテナ削除まわりの安全判定（`container_removal_decision` /
+/// `is_protected_state`）を実際に守っているのが、列挙・削除の呼び出し側
+/// （`execute`）であることをテストで固定するための最小 trait。
+///
+/// `DockerRuntime` 全体を trait 化すると呼び出し元 5 ファイル
+/// （`run/prepare.rs` / `stop.rs` / `ps.rs` / `rm.rs` / `logs.rs`）の
+/// シグネチャに波及するため、ここでは検証したい 2 メソッドだけを
+/// 切り出す（全面 trait 化は Issue #73 として別管理）。
+///
+/// Rust 1.75 で安定化済みの `async fn in trait` を使い `async-trait` は
+/// 追加しない。この形は object safety を持たないため、呼び出し側は
+/// `dyn ContainerRegistry` ではなくジェネリクス（`R: ContainerRegistry`）
+/// で受ける。
+///
+/// trait を pub にせず crate 内部（`init` モジュール限定）に留めることで
+/// `clippy::async_fn_in_trait` の警告を避けている。
+trait ContainerRegistry {
+    async fn list_vibepod_containers(&self) -> Result<Vec<ContainerInfo>>;
+    async fn remove_container(&self, name: &str) -> Result<()>;
+}
+
+impl ContainerRegistry for DockerRuntime {
+    async fn list_vibepod_containers(&self) -> Result<Vec<ContainerInfo>> {
+        // 右辺はメソッド呼び出し構文の解決規則により inherent メソッド
+        // （`DockerRuntime::list_vibepod_containers`）が優先されるため、
+        // trait 経由の無限再帰にはならない。
+        self.list_vibepod_containers().await
+    }
+
+    async fn remove_container(&self, name: &str) -> Result<()> {
+        self.remove_container(name).await
+    }
+}
+
+/// ビルド前チェック（Issue #69）: 非対話かつコンテナが存在する場合に
+/// ビルドへ入る前に fail-fast させる。削除は行わない（判定のみ）。
+///
+/// `execute` から切り出すことで、fake `ContainerRegistry` を渡して
+/// 「非対話 + コンテナありでエラーになり、かつ削除が一切呼ばれない」
+/// ことをテストできるようにしている。
+async fn fail_fast_if_removal_would_abort<R: ContainerRegistry>(
+    registry: &R,
+    is_interactive: bool,
+) -> Result<()> {
+    let containers = registry.list_vibepod_containers().await?;
+    if let ContainerRemovalDecision::Abort =
+        container_removal_decision(is_interactive, containers.len())
+    {
+        let protected = containers
+            .iter()
+            .filter(|c| is_protected_state(&c.state))
+            .count();
+        bail!(non_interactive_abort_message(
+            containers.len(),
+            protected,
+            false
+        ));
+    }
+    Ok(())
+}
+
+/// 削除直前の再列挙・判定・実削除（TOCTOU 対策）。
+///
+/// `confirm`: 対話端末での確認結果を注入できるようにするためのクロージャ。
+/// 実 TTY を要求する `dialoguer::Confirm`（`prompts::confirm_remove_all_containers`）
+/// はテスト対象外とし、本番コードでは `execute()` からそのまま渡す。
+///
+/// 戻り値: `Ok(true)` は削除処理を終えて config 保存へ進んでよいこと
+/// （実際に削除した、またはコンテナが 0 件で no-op だった）を示す。
+/// `Ok(false)` はユーザーが確認を拒否し削除しなかったことを示し、
+/// `execute()` はこの場合 config を更新せず早期リターンする。
+async fn remove_existing_containers<R, F>(
+    registry: &R,
+    is_interactive: bool,
+    confirm: F,
+) -> Result<bool>
+where
+    R: ContainerRegistry,
+    F: FnOnce(usize, usize) -> Result<bool>,
+{
+    let containers = registry.list_vibepod_containers().await?;
+    if containers.is_empty() {
+        return Ok(true);
+    }
+
+    let protected_count = containers
+        .iter()
+        .filter(|c| is_protected_state(&c.state))
+        .count();
+
+    let should_remove = match container_removal_decision(is_interactive, containers.len()) {
+        ContainerRemovalDecision::Remove => true,
+        ContainerRemovalDecision::Confirm => confirm(containers.len(), protected_count)?,
+        ContainerRemovalDecision::Abort => {
+            bail!(non_interactive_abort_message(
+                containers.len(),
+                protected_count,
+                true
+            ));
+        }
+    };
+
+    if should_remove {
+        println!("  Removing {} existing container(s)...", containers.len());
+        for container in &containers {
+            registry.remove_container(&container.name).await?;
+        }
+        println!("  Removed {} container(s).", containers.len());
+        Ok(true)
+    } else {
+        eprintln!(
+            "  Skipping config update: existing containers were not removed. \
+             Re-run `vibepod init` and remove containers to apply the new image."
+        );
+        Ok(false)
+    }
+}
+
 /// `rebuild`: pass `--pull --no-cache` to `docker build` so the image is
 /// reconstructed from scratch. Needed to pick up a newer Claude Code, since
 /// the `install.sh` layer is otherwise served from cache forever.
@@ -411,22 +529,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
     // ここでは Abort 分岐だけを見る。Remove（コンテナ 0 件）や Confirm
     // （対話 + コンテナあり）は、実際の削除判断をビルド後の再チェック
     // （TOCTOU 対策、下記 5.）に委ねるため、ここでは何もしない。
-    {
-        let containers = runtime.list_vibepod_containers().await?;
-        if let ContainerRemovalDecision::Abort =
-            container_removal_decision(is_interactive, containers.len())
-        {
-            let protected = containers
-                .iter()
-                .filter(|c| is_protected_state(&c.state))
-                .count();
-            bail!(non_interactive_abort_message(
-                containers.len(),
-                protected,
-                false
-            ));
-        }
-    }
+    fail_fast_if_removal_would_abort(&runtime, is_interactive).await?;
 
     // 4. Build image
     let image_name = format!("vibepod-{}:latest", agent);
@@ -520,48 +623,15 @@ pub async fn execute(rebuild: bool) -> Result<()> {
     //    コンテナが 1 件以上ある場合、対話端末なら確認プロンプトを表示し、
     //    非対話なら確認が取れないため削除せずエラー終了する（稼働中・停止中
     //    を問わない。停止中コンテナにも resume 可能な状態が残るため）。
-    let containers = runtime.list_vibepod_containers().await?;
-    if !containers.is_empty() {
-        let protected_count = containers
-            .iter()
-            .filter(|c| is_protected_state(&c.state))
-            .count();
-
-        let should_remove = match container_removal_decision(is_interactive, containers.len()) {
-            ContainerRemovalDecision::Remove => true,
-            ContainerRemovalDecision::Confirm => {
-                // インタラクティブ + コンテナあり: 確認プロンプト
-                prompts::confirm_remove_all_containers(containers.len(), protected_count)?
-            }
-            ContainerRemovalDecision::Abort => {
-                // 非インタラクティブ + コンテナあり: `list_vibepod_containers()` は
-                // プロジェクト横断で全 vibepod コンテナを返すため、ここで確認なしに
-                // 削除すると他プロジェクトのコンテナ（停止中の resume 可能な状態を
-                // 含む）を巻き込んで壊しうる。確認を取れない以上、削除せずエラーで
-                // 中断する。この時点ではイメージビルドが既に完了しているため、
-                // その旨をメッセージに含める。
-                bail!(non_interactive_abort_message(
-                    containers.len(),
-                    protected_count,
-                    true
-                ));
-            }
-        };
-
-        if should_remove {
-            println!("  Removing {} existing container(s)...", containers.len());
-            for container in &containers {
-                runtime.remove_container(&container.name).await?;
-            }
-            println!("  Removed {} container(s).", containers.len());
-        } else {
-            // ユーザーがコンテナ削除を拒否 → config を更新しない（旧コンテナが旧イメージのまま残る）
-            eprintln!(
-                "  Skipping config update: existing containers were not removed. \
-                 Re-run `vibepod init` and remove containers to apply the new image."
-            );
-            return Ok(());
-        }
+    let should_continue =
+        remove_existing_containers(&runtime, is_interactive, |total, protected| {
+            // インタラクティブ + コンテナあり: 確認プロンプト
+            prompts::confirm_remove_all_containers(total, protected)
+        })
+        .await?;
+    if !should_continue {
+        // ユーザーがコンテナ削除を拒否 → config を更新しない（旧コンテナが旧イメージのまま残る）
+        return Ok(());
     }
 
     // 6. Save config（コンテナ削除後に保存することで、削除キャンセル時に旧イメージが残ったまま
@@ -682,5 +752,148 @@ mod tests {
                 state
             );
         }
+    }
+
+    // --- Issue #71: ContainerRegistry を介した統合テスト ---
+    //
+    // 上の純関数テストは `container_removal_decision` / `is_protected_state`
+    // 自体の仕様を固定している。ここからは、実際に安全性を担っている
+    // 呼び出し側（`fail_fast_if_removal_would_abort` /
+    // `remove_existing_containers`）が、その判定を無視して削除を呼んで
+    // しまう回帰（例: 非対話環境から他プロジェクトの停止中コンテナを
+    // 無確認削除してしまう）を検出する。
+
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    /// テスト用 fake `ContainerRegistry`。
+    ///
+    /// `list_vibepod_containers` は呼び出しごとに `responses` から 1 件ずつ
+    /// 消費して返す（ビルド前後で異なる一覧を返す必要があるテスト用）。
+    /// `remove_container` は呼ばれた名前を記録するだけで、実際には何もしない。
+    struct FakeRegistry {
+        responses: Mutex<VecDeque<Vec<ContainerInfo>>>,
+        removed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FakeRegistry {
+        fn new(responses: Vec<Vec<ContainerInfo>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                removed: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn removed_names(&self) -> Vec<String> {
+            self.removed.lock().unwrap().clone()
+        }
+    }
+
+    impl ContainerRegistry for FakeRegistry {
+        async fn list_vibepod_containers(&self) -> Result<Vec<ContainerInfo>> {
+            let mut responses = self.responses.lock().unwrap();
+            Ok(responses.pop_front().unwrap_or_default())
+        }
+
+        async fn remove_container(&self, name: &str) -> Result<()> {
+            self.removed.lock().unwrap().push(name.to_string());
+            Ok(())
+        }
+    }
+
+    fn container(name: &str, state: &str) -> ContainerInfo {
+        ContainerInfo {
+            name: name.to_string(),
+            state: state.to_string(),
+            status: state.to_string(),
+        }
+    }
+
+    /// 呼ばれたら test を fail させる confirm クロージャ。
+    /// 「確認プロンプトへ進むはずがない」分岐（Remove / Abort）で
+    /// 誤って confirm が呼ばれていないことを検証するために使う。
+    fn confirm_must_not_be_called(_total: usize, _protected: usize) -> Result<bool> {
+        panic!("confirm should not be called on this path");
+    }
+
+    // 項目1: 非対話 + コンテナ1件以上（停止中のみ）→ エラーになり、
+    // remove_container が一度も呼ばれない。
+    #[tokio::test]
+    async fn non_interactive_with_stopped_container_aborts_without_removing() {
+        let registry = FakeRegistry::new(vec![vec![container("vibepod-other-a", "exited")]]);
+        let result = fail_fast_if_removal_would_abort(&registry, false).await;
+        assert!(result.is_err());
+        assert!(registry.removed_names().is_empty());
+
+        // 削除直前チェック側（TOCTOU 対策の再列挙）でも同じ入力で同じ結果になる
+        // ことを確認する。Abort 分岐では confirm を呼ばない。
+        let registry = FakeRegistry::new(vec![vec![container("vibepod-other-a", "exited")]]);
+        let result = remove_existing_containers(&registry, false, confirm_must_not_be_called).await;
+        assert!(result.is_err());
+        assert!(registry.removed_names().is_empty());
+    }
+
+    // 項目2: 非対話 + ビルド前0件 + ビルド後1件 → ビルド後の判定
+    // （`remove_existing_containers` の再列挙）で中断し、remove_container が
+    // 呼ばれない。ビルド前チェックの結果を使い回さず、再列挙の結果が
+    // 判定に使われていることを固定する（TOCTOU 対策の回帰検出）。
+    #[tokio::test]
+    async fn non_interactive_container_appearing_after_build_aborts_on_recheck() {
+        let registry = FakeRegistry::new(vec![
+            vec![],                                       // ビルド前: 0 件
+            vec![container("vibepod-other-b", "exited")], // ビルド後: 1 件
+        ]);
+
+        let pre_build = fail_fast_if_removal_would_abort(&registry, false).await;
+        assert!(pre_build.is_ok(), "ビルド前は 0 件なので通過するはず");
+
+        let post_build =
+            remove_existing_containers(&registry, false, confirm_must_not_be_called).await;
+        assert!(
+            post_build.is_err(),
+            "ビルド後の再列挙で 1 件見つかり中断するはず"
+        );
+        assert!(registry.removed_names().is_empty());
+    }
+
+    // 項目3: コンテナ0件 → remove_container が呼ばれない。
+    #[tokio::test]
+    async fn no_containers_never_calls_remove() {
+        let registry = FakeRegistry::new(vec![vec![]]);
+        let result = remove_existing_containers(&registry, true, confirm_must_not_be_called).await;
+        assert!(result.unwrap());
+        assert!(registry.removed_names().is_empty());
+    }
+
+    // 項目4: 対話 + コンテナ1件以上 + 確認拒否 → remove_container が
+    // 呼ばれない。
+    #[tokio::test]
+    async fn interactive_confirm_declined_does_not_remove() {
+        let registry = FakeRegistry::new(vec![vec![
+            container("vibepod-other-c", "exited"),
+            container("vibepod-other-d", "running"),
+        ]]);
+        let result = remove_existing_containers(&registry, true, |_total, _protected| Ok(false))
+            .await
+            .unwrap();
+        assert!(!result);
+        assert!(registry.removed_names().is_empty());
+    }
+
+    // 項目5: 対話 + コンテナ1件以上 + 確認承認 → 列挙されたすべての
+    // コンテナに対して remove_container が呼ばれる。
+    #[tokio::test]
+    async fn interactive_confirm_approved_removes_all_listed_containers() {
+        let registry = FakeRegistry::new(vec![vec![
+            container("vibepod-other-e", "exited"),
+            container("vibepod-other-f", "running"),
+        ]]);
+        let result = remove_existing_containers(&registry, true, |_total, _protected| Ok(true))
+            .await
+            .unwrap();
+        assert!(result);
+        let mut removed = registry.removed_names();
+        removed.sort();
+        assert_eq!(removed, vec!["vibepod-other-e", "vibepod-other-f"]);
     }
 }
