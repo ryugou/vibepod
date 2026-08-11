@@ -474,15 +474,17 @@ trait ContainerRegistry {
 }
 
 impl ContainerRegistry for DockerRuntime {
+    // 委譲は UFCS（完全修飾構文）で書く。`self.list_vibepod_containers()` の
+    // メソッド呼び出し構文でも解決規則により inherent メソッドが優先されるため
+    // 現状は無限再帰しないが、将来 inherent 側がリネーム・削除されると解決先が
+    // この trait メソッド自身へ移り、**コンパイルは通ったまま実行時に無限再帰**
+    // する。UFCS なら同じ変更がコンパイルエラーになる（Copilot 指摘、PR #74）。
     async fn list_vibepod_containers(&self) -> Result<Vec<ContainerInfo>> {
-        // 右辺はメソッド呼び出し構文の解決規則により inherent メソッド
-        // （`DockerRuntime::list_vibepod_containers`）が優先されるため、
-        // trait 経由の無限再帰にはならない。
-        self.list_vibepod_containers().await
+        DockerRuntime::list_vibepod_containers(self).await
     }
 
     async fn remove_container(&self, name: &str) -> Result<()> {
-        self.remove_container(name).await
+        DockerRuntime::remove_container(self, name).await
     }
 }
 
