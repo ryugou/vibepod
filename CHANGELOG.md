@@ -5,6 +5,25 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-08-11
+
+### Changed
+
+- **Behavior change:** `vibepod init` no longer removes existing containers without asking. Previously it deleted every VibePod container across every project without confirmation whenever no container happened to be running. Stopped containers hold resumable session state, so that path silently destroyed other projects' work. From this release, if even one VibePod container exists — running or stopped, no state is treated as "safe to delete" — an interactive terminal gets a confirmation prompt and a non-interactive one aborts without touching anything. Only a completely empty container list proceeds unprompted. **This will make `vibepod init` fail in CI or scripts whenever any VibePod container exists**; run it from an interactive terminal, or remove the containers deliberately first. The abort message names `vibepod ps` so you can see what exists before deciding
+- **Behavior change:** container state is now read from Docker's machine-readable `{{.State}}` instead of the human-facing `{{.Status}}` string. The old heuristic (`starts_with("Up") || contains("running")`) failed to recognize `Restarting (...)`, so a container that was effectively live could be force-removed. Only `exited`, `created`, and `dead` are treated as safe to remove; everything else — including states Docker may add in the future — is protected
+- **Behavior change:** `vibepod login` now requires an interactive terminal on both stdin and stderr, and checks this before doing any work. It previously only guarded the "overwrite existing token?" prompt, so a run without an existing token reached `docker exec -it` and died on Docker's opaque `the input device is not a TTY`. stdin is genuinely required by the OAuth flow; stderr is only strictly needed for the overwrite prompt, but the check does not branch on token presence — keeping the command's precondition simple is a deliberate product decision, and the error message says so rather than claiming a technical necessity that isn't there
+- **BREAKING:** `DockerRuntime::list_vibepod_containers` now returns `Vec<ContainerInfo>` (a struct with `name`, `state`, and `status`) instead of `Vec<(String, String)>`. `runtime` is re-exported from the crate root, so this affects anyone using VibePod as a library. The extra field is what makes state-based protection possible
+
+### Fixed
+
+- `vibepod init`, `vibepod run`, and `vibepod restore` crashed with `IO error: not a terminal` in non-interactive environments. dialoguer prompts on `Term::stderr()`, and none of these commands checked for a terminal before reaching one. Each is now handled according to what the prompt actually decides: `init` falls back to the default agent (announced on stderr), `run` auto-registers an unregistered project (matching what `--prompt` / `--prompt-file` / `--resume` already did), and `restore` refuses up front — picking a session and confirming a destructive restore are not decisions to make on the user's behalf
+- `vibepod stop --all` skipped containers in the `restarting` state, reporting no running containers while leaving live ones untouched. It now selects by `state` (`running` and `restarting`); `paused` is deliberately excluded, since silently unpausing what a user explicitly paused is not what `stop` should do
+- A malformed line from `docker ps` was silently discarded. If every line failed to parse, callers saw an empty list — indistinguishable from "no containers" and, in the removal path, the one value that means "proceed without asking." Parse failures are now propagated as errors; the message reports field counts only, never the line contents or a container name
+
+### Added
+
+- Integration tests covering the container-removal path, not just the pure decision functions. A minimal `ContainerRegistry` trait (list and remove only) allows a fake to record whether removal was actually called. The tests pin that removal never happens on a non-interactive abort, a declined confirmation, an empty list, or a listing failure; that a container appearing mid-build still aborts on the pre-removal recheck; and that a mid-sequence removal failure stops the loop. `vibepod init` and the tests now share one orchestration function, so dropping the pre-removal recheck from the production path is a test failure rather than a silent regression
+
 ## [1.8.2] - 2026-08-10
 
 ### Added
