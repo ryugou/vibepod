@@ -355,6 +355,31 @@ fn test_prepare_plugins_data_mount_creates_host_dir_and_empty_stage() {
 }
 
 #[test]
+#[cfg(unix)]
+fn test_prepare_plugins_data_mount_sets_stage_permissions_to_0700() {
+    // codex plugin のジョブ状態（プロンプト・レビュー出力＝ソースコード断片を
+    // 含みうる）が書き込まれる領域のため、他ユーザーから読めないよう
+    // 0700 を強制する（`sync_codex_entries_into` の codex ステージと同じ
+    // パターン）。
+    use std::os::unix::fs::PermissionsExt;
+
+    let home_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home_dir.path().join(".claude/plugins")).unwrap();
+
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
+    let stage = result.expect("should return Some(stage) when ~/.claude/plugins exists");
+    let stage_path = std::path::PathBuf::from(&stage);
+
+    let mode = std::fs::metadata(&stage_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o700,
+        "plugins/data stage must be 0700 (found {:o})",
+        mode
+    );
+}
+
+#[test]
 fn test_prepare_plugins_data_mount_does_not_copy_existing_host_files() {
     let home_dir = tempfile::tempdir().unwrap();
     let runtime_dir = tempfile::tempdir().unwrap();

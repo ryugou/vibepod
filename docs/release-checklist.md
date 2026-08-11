@@ -69,6 +69,16 @@
 - [ ] `~/.claude/skills/` が存在する場合、コンテナ内で `/home/vibepod/.claude/skills/` が読める
 - [ ] `~/.claude/agents/` が存在する場合、コンテナ内で `/home/vibepod/.claude/agents/` が読める
 
+### plugins/data の per-container rw ステージ（親 ro マウント内の子 rw マウント）
+
+親 ro マウント（`~/.claude/plugins/`）の内側に子 rw マウント（`plugins/data/` ステージ）を
+重ねる構成はコンテナランタイム依存で、壊れてもユニットテストでは検知できないため、
+実機で毎回確認する。
+
+- [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/data/.probe` が成功する（親 ro マウント内の子 rw マウントが機能している）
+- [ ] `docker exec <container> ls /home/vibepod/.claude/plugins/data` にホストの `~/.claude/plugins/data` の内容（他プロジェクトの codex job 履歴等）が見えない
+- [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/.probe` が read-only で失敗する（親の ro が維持されている）
+
 ### ps / logs
 
 - [ ] `vibepod ps` — コンテナ一覧が表示される（CONTAINER / PROJECT / ELAPSED / LAST OUTPUT / STATUS の列が正しい）

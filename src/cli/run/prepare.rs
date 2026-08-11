@@ -734,26 +734,35 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     let plugins_data_stage = super::prepare_plugins_data_mount(&home, &runtime_dir)?;
 
     if let Some(stored_labels) = stored_labels_opt {
-        let mut mounts_parts: Vec<String> = Vec::new();
-        for arg in &opts.mount {
-            if let Ok((h, c)) = parse_mount_arg(arg) {
-                mounts_parts.push(format!("{}:{}", h, c));
-            }
-        }
-        for (h, c) in &claude_config_mounts {
-            mounts_parts.push(format!("{}:{}", h, c));
-        }
-        // Sanitized settings: include only container destination in the label so
-        // regenerated host-side runtime files do not trigger a spurious recreate.
-        // Use a dedicated prefix (SANITIZED_SETTINGS_LABEL_MARKER) so this
-        // label-only marker cannot collide with a user-provided mount serialized
-        // as "{host}:{container}".
-        if host_settings_exists {
-            mounts_parts.push(super::SANITIZED_SETTINGS_LABEL_MARKER.to_string());
-        }
-        if plugins_data_stage.is_some() {
-            mounts_parts.push(super::PLUGINS_DATA_MOUNT_LABEL_MARKER.to_string());
-        }
+        // 9b: 既存コンテナと比較する現在値の vibepod.mounts を組み立てる。
+        // ラベル組み立てロジック自体は `mounts_label_for_existing_container`
+        // （= `build_config_labels` が使う `mounts_label_parts` /
+        // `build_mounts_label` をそのまま呼ぶだけの薄いラッパー）に一本化
+        // されており、ここではその入力を用意するだけにする。二箇所が独立
+        // 実装のままズレる不具合（round 2、53ad645）の再発を防ぐため。
+        let user_mounts: Vec<(String, String)> = opts
+            .mount
+            .iter()
+            .filter_map(|arg| parse_mount_arg(arg).ok())
+            .collect();
+        let sanitized_settings_host = config_dir
+            .join("runtime")
+            .join(&container_name)
+            .join("settings.json");
+        let sanitized_settings_host_opt = if host_settings_exists {
+            Some(sanitized_settings_host.as_path())
+        } else {
+            None
+        };
+
+        let mounts_label = super::mounts_label_for_existing_container(
+            &user_mounts,
+            &claude_config_mounts,
+            sanitized_settings_host_opt,
+            plugins_data_stage.as_deref(),
+            &home,
+            host_codex_auth_exists,
+        );
 
         // Encode the FULL sorted lang_names set so reuse re-provisions
         // whenever any language is added or removed.
@@ -769,10 +778,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
         let mut current_labels = std::collections::HashMap::new();
 
-        current_labels.insert(
-            "vibepod.mounts".to_string(),
-            super::build_mounts_label(mounts_parts, host_codex_auth_exists),
-        );
+        current_labels.insert("vibepod.mounts".to_string(), mounts_label);
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert(

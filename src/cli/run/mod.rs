@@ -761,16 +761,31 @@ pub fn plugins_data_mount_entries(
 ///    これは Claude Code 自身が作る標準ディレクトリであり、空で作成しても
 ///    副作用がない。子ディレクトリへの bind mount は docker がホスト側に
 ///    実体ディレクトリを要求するため必須の準備。**失敗してもビルド全体は
-///    落とさない** — codex plugin 等が書き込みに失敗し得る旨を stderr に
-///    警告したうえで `Ok(None)` を返す（rw マウントを諦めるだけで run 自体は
-///    継続できるため。CLAUDE.md: エラーを握りつぶさず運用者が次の判断を
-///    できる情報を出す）。
-/// 3. per-container ステージ `runtime_dir/plugins-data` を作成する
-///    （**空のまま。ホストの内容はコピーしない**）。こちらは vibepod が
-///    書き込み権限を持つはずの領域（`runtime_dir` 配下）の準備であり、
-///    失敗を握りつぶすと以後の run 準備が不整合な状態のまま進んでしまうため、
-///    `?` でそのまま呼び出し元へ伝播する。
+///    落とさない** — codex plugin 等が書き込みに失敗し得る旨と復旧コマンドを
+///    stderr に警告したうえで `Ok(None)` を返す（rw マウントを諦めるだけで
+///    run 自体は継続できるため。CLAUDE.md: エラーを握りつぶさず運用者が
+///    次の判断をできる情報を出す）。
+/// 3. per-container ステージ `runtime_dir/plugins-data` を作成し、Unix では
+///    パーミッションを `0700` に設定する（**空のまま。ホストの内容はコピー
+///    しない**）。ここにはコンテナ内 codex plugin のジョブ状態（プロンプト・
+///    レビュー出力＝ソースコード断片を含みうる）が書き込まれるため、
+///    `sync_codex_entries_into` が codex ステージに対して行っているのと同じ
+///    パーミッション制御に揃えている。こちらは vibepod が書き込み権限を
+///    持つはずの領域（`runtime_dir` 配下）の準備であり、失敗を握りつぶすと
+///    以後の run 準備が不整合な状態のまま進んでしまうため、`?` でそのまま
+///    呼び出し元へ伝播する。
 /// 4. ステージの絶対パス文字列を `Ok(Some(..))` で返す。
+///
+/// **ライフサイクル**（実装は変えず、ここに明記する）:
+/// - ステージは作成時点では常に**空**。ホストの `plugins/data` の内容は
+///   一切コピーしない（上記の通り）。
+/// - **`--new` でコンテナを作り直しても、このステージ（`runtime_dir` 配下）
+///   自体は削除されない**。`--new` はコンテナのみを破棄して作り直す経路で
+///   あり、`runtime_dir` の削除は担わないため、前回 run までにステージへ
+///   書き込まれた内容（codex のジョブ状態等）はそのまま新しいコンテナに
+///   引き継がれる。「空のステージ」という説明は初回作成時のみを指す。
+/// - disposable な `--worktree` 実行では、実行終了時に `runtime_dir` ごと
+///   削除され、このステージも消える。
 pub fn prepare_plugins_data_mount(
     home: &std::path::Path,
     runtime_dir: &std::path::Path,
@@ -782,9 +797,21 @@ pub fn prepare_plugins_data_mount(
 
     let host_data_dir = plugins_dir.join("data");
     if let Err(e) = std::fs::create_dir_all(&host_data_dir) {
+        // 非 fatal: `~/.claude` が read-only な環境（codex を使わないユーザー
+        // 等）で `vibepod run` 自体まで壊さないための判断（spec で明示的に
+        // 維持することが求められている）。ただし黙って諦めると運用者が
+        // 気づけないため、復旧コマンドと「この修正前に作られた既存コンテナは
+        // 再作成しても改善しない」旨を明示する — マーカーがラベルに載らない
+        // ため `warn_config_changes` の構成差分検出も効かず、警告すら二度と
+        // 出なくなるのが本当に危険な点である。
         eprintln!(
             "warning: failed to create {} ({e}); ~/.claude/plugins/data will remain read-only \
-             in the container, so plugins that write there (e.g. codex) may fail to write",
+             in the container, so plugins that write there (e.g. codex) may fail to write.\n\
+             To fix: mkdir -p {}\n\
+             Note: while this directory cannot be created, no plugins_data_rw marker is added \
+             to this container's labels, so `vibepod run --new` will NOT detect or repair this \
+             — recreating the container will not help until the directory above exists.",
+            host_data_dir.display(),
             host_data_dir.display()
         );
         return Ok(None);
@@ -797,6 +824,15 @@ pub fn prepare_plugins_data_mount(
             stage_dir.display()
         )
     })?;
+    // codex plugin のジョブ状態（プロンプト・レビュー出力）等、機微になり
+    // 得るデータが書き込まれる領域のため、既存ディレクトリ再利用時も含めて
+    // 毎回 0700 を強制する（`sync_codex_entries_into` と同じパターン）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stage_dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to set permissions on {}", stage_dir.display()))?;
+    }
 
     Ok(Some(stage_dir.to_string_lossy().to_string()))
 }
@@ -2120,6 +2156,51 @@ fn mounts_label_parts(
     parts
 }
 
+/// `prepare.rs` 9b（既存コンテナとの設定差分検知）が呼ぶ、`vibepod.mounts`
+/// ラベルの「比較側」を組み立てる関数。
+///
+/// **これ自体が 9b の実装そのもの**である（9b はこの関数を 1 回呼ぶだけ）。
+/// `build_config_labels`（「書き込み側」）が最終的に組み立てる `extra_mounts`
+/// / `rw_mounts` 相当の Vec をここで再構築し、既存の `mounts_label_parts` +
+/// `build_mounts_label` へそのまま渡す — ラベル組み立てロジック自体は一切
+/// 重複させない。以前は 9b がこのロジックをインラインで独自に持っており、
+/// 二箇所が独立実装のままズレる不具合（round 2、および 53ad645 で修正した
+/// 再発）の温床になっていた。
+///
+/// `sanitized_settings_host` が `Some` のとき、`user_mounts` にユーザー自身の
+/// `--mount` がサニタイズ済み settings と完全に同じ host+container を含んで
+/// いても、この関数は書き込み側と同じ手順（両方のエントリを `extra_mounts`
+/// に積んでから `mounts_label_parts` に通す）を踏むため、両エントリとも
+/// マーカーへ置換され、書き込み側と一致する。以前のインライン実装は
+/// ユーザー分を生文字列のまま残していたため、このケースだけ恒久的に
+/// 不一致になっていた。
+pub(super) fn mounts_label_for_existing_container(
+    user_mounts: &[(String, String)],
+    claude_config_mounts: &[(String, String)],
+    sanitized_settings_host: Option<&std::path::Path>,
+    plugins_data_stage: Option<&str>,
+    home: &std::path::Path,
+    codex_present: bool,
+) -> String {
+    let mut extra_mounts: Vec<(String, String)> = Vec::new();
+    extra_mounts.extend_from_slice(user_mounts);
+    extra_mounts.extend_from_slice(claude_config_mounts);
+    if let Some(host) = sanitized_settings_host {
+        extra_mounts.push((
+            host.to_string_lossy().to_string(),
+            SANITIZED_SETTINGS_CONTAINER_PATH.to_string(),
+        ));
+    }
+
+    let rw_mounts: Vec<(String, String)> = match plugins_data_stage {
+        Some(stage) => plugins_data_mount_entries(stage, home),
+        None => Vec::new(),
+    };
+
+    let mount_parts = mounts_label_parts(&extra_mounts, &rw_mounts, sanitized_settings_host);
+    build_mounts_label(mount_parts, codex_present)
+}
+
 /// コンテナのラベルを生成する（設定変更の検知に使用）。
 pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap<String, String> {
     let mut labels = std::collections::HashMap::new();
@@ -2424,17 +2505,17 @@ mod tests {
     }
 
     #[test]
-    fn mounts_label_parts_matches_prepare_context_9b_construction() {
-        // 最重要: build_config_labels（mounts_label_parts 経由）が生成する
-        // vibepod.mounts と、prepare.rs 9b が独立に組み立てる vibepod.mounts
-        // が、同一の実行状態に対して完全一致することを確認する。9b はインライン
-        // 実装で直接呼べないため、ここで同じ手順を再現する
-        // （opts.mount → claude_config_mounts → SANITIZED marker →
-        // PLUGINS_DATA marker → build_mounts_label）。
+    fn mounts_label_for_existing_container_matches_build_config_labels_write_side() {
+        // 最重要: prepare.rs 9b が呼ぶ比較側の実装そのもの
+        // (mounts_label_for_existing_container) と、build_config_labels が
+        // 呼ぶ書き込み側 (mounts_label_parts + build_mounts_label) が、
+        // 同一の実行状態に対して完全一致することを確認する。9b 側の再実装は
+        // 一切持たず、実装そのものを呼ぶ（9b が将来変わってもこのテストは
+        // ドリフトしない）。
         let config_dir = std::path::PathBuf::from("/config");
         let container_name = "vibepod-proj-abc";
         let home = std::path::PathBuf::from("/Users/alice");
-        let opts_mount_entries = vec![(
+        let user_mounts = vec![(
             "/host/user-mount".to_string(),
             "/container/user-mount".to_string(),
         )];
@@ -2442,44 +2523,32 @@ mod tests {
             "/Users/alice/.claude/CLAUDE.md".to_string(),
             "/home/vibepod/.claude/CLAUDE.md".to_string(),
         )];
-        let host_settings_exists = true;
-        let plugins_data_stage = Some("/config/runtime/vibepod-proj-abc/plugins-data".to_string());
-        let host_codex_auth_exists = true;
-
-        // --- 9b 相当（比較側）の再現 ---
-        let mut mounts_parts_9b: Vec<String> = Vec::new();
-        for (h, c) in &opts_mount_entries {
-            mounts_parts_9b.push(format!("{}:{}", h, c));
-        }
-        for (h, c) in &claude_config_mounts {
-            mounts_parts_9b.push(format!("{}:{}", h, c));
-        }
-        if host_settings_exists {
-            mounts_parts_9b.push(SANITIZED_SETTINGS_LABEL_MARKER.to_string());
-        }
-        if plugins_data_stage.is_some() {
-            mounts_parts_9b.push(PLUGINS_DATA_MOUNT_LABEL_MARKER.to_string());
-        }
-        let label_9b = build_mounts_label(mounts_parts_9b, host_codex_auth_exists);
-
-        // --- build_config_labels 相当（書き込み側）の再現 ---
         let sanitized_settings_host = config_dir
             .join("runtime")
             .join(container_name)
             .join("settings.json");
+        let plugins_data_stage = "/config/runtime/vibepod-proj-abc/plugins-data".to_string();
+        let host_codex_auth_exists = true;
+
+        // --- 比較側: prepare.rs 9b が呼ぶ実装そのもの ---
+        let label_9b = mounts_label_for_existing_container(
+            &user_mounts,
+            &claude_config_mounts,
+            Some(sanitized_settings_host.as_path()),
+            Some(plugins_data_stage.as_str()),
+            &home,
+            host_codex_auth_exists,
+        );
+
+        // --- 書き込み側: build_config_labels 相当の再現 ---
         let mut extra_mounts: Vec<(String, String)> = Vec::new();
-        extra_mounts.extend(opts_mount_entries);
+        extra_mounts.extend(user_mounts);
         extra_mounts.extend(claude_config_mounts);
-        if host_settings_exists {
-            extra_mounts.push((
-                sanitized_settings_host.to_string_lossy().to_string(),
-                "/home/vibepod/.claude/settings.json".to_string(),
-            ));
-        }
-        let rw_mounts = match &plugins_data_stage {
-            Some(stage) => plugins_data_mount_entries(stage, &home),
-            None => Vec::new(),
-        };
+        extra_mounts.push((
+            sanitized_settings_host.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/settings.json".to_string(),
+        ));
+        let rw_mounts = plugins_data_mount_entries(&plugins_data_stage, &home);
         let parts_write_side = mounts_label_parts(
             &extra_mounts,
             &rw_mounts,
@@ -2489,9 +2558,68 @@ mod tests {
 
         assert_eq!(
             label_9b, label_write_side,
-            "build_config_labels and prepare.rs 9b must produce identical vibepod.mounts \
-             labels for the same run state, otherwise a freshly created container is \
-             immediately flagged as configuration-changed"
+            "mounts_label_for_existing_container and build_config_labels must produce \
+             identical vibepod.mounts labels for the same run state, otherwise a freshly \
+             created container is immediately flagged as configuration-changed"
+        );
+    }
+
+    #[test]
+    fn mounts_label_for_existing_container_matches_write_side_when_user_mount_collides_with_sanitized_settings(
+    ) {
+        // 回帰ケース（この入力は以前ドリフトしていた）: ユーザーが
+        // `--mount <sanitized settings の実パス>:/home/vibepod/.claude/settings.json`
+        // のように、サニタイズ済み settings と完全に同じ host+container を
+        // 指定した場合。
+        //
+        // 旧 9b インライン実装は opts.mount の各エントリを無条件で
+        // `format!("{host}:{container}")` の生文字列として積んでいたため、
+        // この一致ケースでもユーザー分は生文字列のまま残り、
+        // SANITIZED_SETTINGS_LABEL_MARKER が別途 1 個追加されるだけだった
+        // （= [生文字列, marker]）。一方 build_config_labels 側は実際の
+        // extra_mounts（ユーザー分 + synthetic 分の 2 エントリとも
+        // host+container が完全一致）を mounts_label_parts に通すため、
+        // 両方ともマーカーへ置換されていた（= [marker, marker]）。
+        // 要素数からして一致しようがなく、このユーザー構成では既存コンテナが
+        // 恒久的に「設定変更あり」と誤検知され続けていた。
+        let config_dir = std::path::PathBuf::from("/config");
+        let container_name = "vibepod-proj-abc";
+        let home = std::path::PathBuf::from("/Users/alice");
+        let sanitized_settings_host = config_dir
+            .join("runtime")
+            .join(container_name)
+            .join("settings.json");
+        let user_mounts = vec![(
+            sanitized_settings_host.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/settings.json".to_string(),
+        )];
+        let claude_config_mounts: Vec<(String, String)> = Vec::new();
+        let host_codex_auth_exists = false;
+
+        let label_9b = mounts_label_for_existing_container(
+            &user_mounts,
+            &claude_config_mounts,
+            Some(sanitized_settings_host.as_path()),
+            None,
+            &home,
+            host_codex_auth_exists,
+        );
+
+        let mut extra_mounts: Vec<(String, String)> = Vec::new();
+        extra_mounts.extend(user_mounts);
+        extra_mounts.extend(claude_config_mounts);
+        extra_mounts.push((
+            sanitized_settings_host.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/settings.json".to_string(),
+        ));
+        let parts_write_side =
+            mounts_label_parts(&extra_mounts, &[], Some(sanitized_settings_host.as_path()));
+        let label_write_side = build_mounts_label(parts_write_side, host_codex_auth_exists);
+
+        assert_eq!(
+            label_9b, label_write_side,
+            "a user --mount that exactly collides with the sanitized settings host+container \
+             must still produce identical labels on both sides"
         );
     }
 
