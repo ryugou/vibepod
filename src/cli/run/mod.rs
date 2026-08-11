@@ -552,6 +552,12 @@ pub fn validate_slack_channel_id(id: &str) -> bool {
 /// コンテナ内 Claude Code が `$HOME/.claude/plugins` として読むデフォルトパス。
 const DEFAULT_PLUGINS_CONTAINER_PATH: &str = "/home/vibepod/.claude/plugins";
 
+/// サニタイズ済み settings.json のコンテナ側マウント先。
+/// `prepare_sanitized_settings_mount` の実装と `build_config_labels`（`mounts_label_parts`
+/// 経由）のラベル判定の双方が参照する。値がずれるとラベル判定が実際のマウント先を
+/// 検出できなくなるため、リテラルの二重管理を避けて一箇所に集約している。
+const SANITIZED_SETTINGS_CONTAINER_PATH: &str = "/home/vibepod/.claude/settings.json";
+
 /// ラベル中で「サニタイズ済み settings.json が有効」であることを示すマーカー。
 /// 形式が `host:container` の通常マウント表現と衝突しないように
 /// 専用 prefix を付けている。
@@ -860,7 +866,7 @@ pub fn prepare_sanitized_settings_mount(
 
     Ok(Some((
         target.to_string_lossy().to_string(),
-        "/home/vibepod/.claude/settings.json".to_string(),
+        SANITIZED_SETTINGS_CONTAINER_PATH.to_string(),
     )))
 }
 
@@ -2055,16 +2061,82 @@ pub(super) fn build_mounts_label(mut base_parts: Vec<String>, codex_present: boo
     base_parts.join("|")
 }
 
+/// `build_config_labels` が `vibepod.mounts` ラベルへ渡す `mount_parts` を
+/// 組み立てる純関数。
+///
+/// `prepare.rs` 9b（既存コンテナとの設定差分検知）が独立に組み立てる
+/// `mounts_parts` と**完全に同じ文字列表現**を生成する必要がある。ここが
+/// ずれると、9b の比較が常に不一致になり、コンテナを再作成した直後でも
+/// 「設定が変更されました」という警告が永久に出続ける（実際に round 2 で
+/// 見つかった不具合の再発パターン）。9b 側は実パスの代わりにマーカーで
+/// 表現する箇所が2つあるため、こちらも同じ2箇所をマーカーへ置換／追加する:
+///
+/// - **sanitized settings**: `extra_mounts` 内のエントリのうち、ホスト側
+///   パスが `sanitized_settings_host`（= `prepare_sanitized_settings_mount`
+///   が書き出す実パス、通常 `<config_dir>/runtime/<container_name>/settings.json`）
+///   と一致し、**かつ**コンテナ側パスが `SANITIZED_SETTINGS_CONTAINER_PATH`
+///   であるものだけを `SANITIZED_SETTINGS_LABEL_MARKER` へ**置換**する
+///   （追加ではない — 元の実パス文字列は残さない）。コンテナ側パスだけで
+///   判定してはいけない: ユーザーが `--mount /foo:/home/vibepod/.claude/settings.json`
+///   を指定した場合に誤って置換され、設定変更の検知がマスクされてしまう
+///   （`prepare.rs` の `warn_config_changes` 内コメントが警告している既存の
+///   懸念と同じ理由）。
+/// - **plugins/data**: `rw_mounts` の中にコンテナ側パスが
+///   `DEFAULT_PLUGINS_DATA_CONTAINER_PATH` のエントリが1つ以上あれば、
+///   `PLUGINS_DATA_MOUNT_LABEL_MARKER` を**1つだけ** push する。`rw_mounts`
+///   はホスト HOME が `/home/vibepod` でない場合 `plugins_data_mount_entries`
+///   により2要素になるが、9b 側は `plugins_data_stage.is_some()` の有無
+///   だけで1つしか push しないため、要素数に関わらずマーカーは1つに揃える。
+///   `rw_mounts` の生の `host:container` 自体は `mount_parts` に含めない
+///   （ホスト側パスがコンテナ名に依存する per-container ステージのパスで、
+///   9b 側はマーカーしか持たないため一致しなくなる）。
+fn mounts_label_parts(
+    extra_mounts: &[(String, String)],
+    rw_mounts: &[(String, String)],
+    sanitized_settings_host: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut parts: Vec<String> = extra_mounts
+        .iter()
+        .map(|(host, container)| {
+            let is_sanitized_settings = container == SANITIZED_SETTINGS_CONTAINER_PATH
+                && sanitized_settings_host
+                    .map(|expected| expected == std::path::Path::new(host.as_str()))
+                    .unwrap_or(false);
+            if is_sanitized_settings {
+                SANITIZED_SETTINGS_LABEL_MARKER.to_string()
+            } else {
+                format!("{}:{}", host, container)
+            }
+        })
+        .collect();
+
+    if rw_mounts
+        .iter()
+        .any(|(_, container)| container == DEFAULT_PLUGINS_DATA_CONTAINER_PATH)
+    {
+        parts.push(PLUGINS_DATA_MOUNT_LABEL_MARKER.to_string());
+    }
+
+    parts
+}
+
 /// コンテナのラベルを生成する（設定変更の検知に使用）。
 pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap<String, String> {
     let mut labels = std::collections::HashMap::new();
 
-    // マウントパスをソートして結合
-    let mount_parts: Vec<String> = ctx
-        .extra_mounts
-        .iter()
-        .map(|(h, c)| format!("{}:{}", h, c))
-        .collect();
+    // マウントパスをソートして結合。sanitized settings / plugins-data の
+    // マーカー変換は `mounts_label_parts` に集約している（`prepare.rs` 9b
+    // との表現一致を保証するため、詳細はそちらの doc コメント参照）。
+    let sanitized_settings_host = ctx
+        .config_dir
+        .join("runtime")
+        .join(&ctx.container_name)
+        .join("settings.json");
+    let mount_parts = mounts_label_parts(
+        &ctx.extra_mounts,
+        &ctx.rw_mounts,
+        Some(sanitized_settings_host.as_path()),
+    );
     labels.insert(
         "vibepod.mounts".to_string(),
         build_mounts_label(mount_parts, ctx.codex_dir.is_some()),
@@ -2266,6 +2338,160 @@ mod tests {
         assert_eq!(
             build_mounts_label(base_order_1, false),
             build_mounts_label(base_order_2, false)
+        );
+    }
+
+    // --- mounts_label_parts: build_config_labels（書き込み側）が生成する
+    // mount_parts が、prepare.rs 9b（比較側）と同じ表現になることを保証する
+    // 純関数のテスト。round 2 で見つかった「二箇所が独立実装されてズレる」
+    // 不具合の再発防止。
+
+    #[test]
+    fn mounts_label_parts_replaces_sanitized_settings_real_path_with_marker() {
+        let sanitized_settings_host =
+            std::path::PathBuf::from("/config/runtime/vibepod-proj-abc/settings.json");
+        let extra_mounts = vec![(
+            sanitized_settings_host.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/settings.json".to_string(),
+        )];
+
+        let parts = mounts_label_parts(&extra_mounts, &[], Some(sanitized_settings_host.as_path()));
+
+        assert_eq!(parts, vec![SANITIZED_SETTINGS_LABEL_MARKER.to_string()]);
+        assert!(
+            !parts.iter().any(|p| p.contains("/config/runtime")),
+            "the real runtime-dir host path must not leak into the label: {:?}",
+            parts
+        );
+    }
+
+    #[test]
+    fn mounts_label_parts_does_not_replace_user_specified_mount_to_same_container_path() {
+        // ユーザーが `--mount /foo:/home/vibepod/.claude/settings.json` を
+        // 指定した場合、コンテナ側パスだけが一致してもホスト側パスが
+        // sanitized settings の実パスと異なるため置換されてはならない
+        // （置換すると設定変更の検知がマスクされる）。
+        let sanitized_settings_host =
+            std::path::PathBuf::from("/config/runtime/vibepod-proj-abc/settings.json");
+        let extra_mounts = vec![(
+            "/foo".to_string(),
+            "/home/vibepod/.claude/settings.json".to_string(),
+        )];
+
+        let parts = mounts_label_parts(&extra_mounts, &[], Some(sanitized_settings_host.as_path()));
+
+        assert_eq!(
+            parts,
+            vec!["/foo:/home/vibepod/.claude/settings.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn mounts_label_parts_pushes_single_marker_for_multi_entry_rw_mounts() {
+        // ホスト HOME が /home/vibepod でない場合、plugins_data_mount_entries
+        // は2要素返すが、マーカーは1つだけ push される（9b 側が
+        // plugins_data_stage.is_some() の有無だけで1つしか push しないため）。
+        let rw_mounts = vec![
+            (
+                "/config/runtime/vibepod-proj-abc/plugins-data".to_string(),
+                "/home/vibepod/.claude/plugins/data".to_string(),
+            ),
+            (
+                "/config/runtime/vibepod-proj-abc/plugins-data".to_string(),
+                "/Users/alice/.claude/plugins/data".to_string(),
+            ),
+        ];
+
+        let parts = mounts_label_parts(&[], &rw_mounts, None);
+
+        assert_eq!(parts, vec![PLUGINS_DATA_MOUNT_LABEL_MARKER.to_string()]);
+        assert!(
+            !parts.iter().any(|p| p.contains("plugins-data")),
+            "the raw rw_mounts host:container tuple must not leak into the label: {:?}",
+            parts
+        );
+    }
+
+    #[test]
+    fn mounts_label_parts_no_marker_when_rw_mounts_empty() {
+        let parts = mounts_label_parts(&[], &[], None);
+        assert!(
+            !parts.contains(&PLUGINS_DATA_MOUNT_LABEL_MARKER.to_string()),
+            "no plugins/data marker should appear when rw_mounts is empty: {:?}",
+            parts
+        );
+        assert!(parts.is_empty());
+    }
+
+    #[test]
+    fn mounts_label_parts_matches_prepare_context_9b_construction() {
+        // 最重要: build_config_labels（mounts_label_parts 経由）が生成する
+        // vibepod.mounts と、prepare.rs 9b が独立に組み立てる vibepod.mounts
+        // が、同一の実行状態に対して完全一致することを確認する。9b はインライン
+        // 実装で直接呼べないため、ここで同じ手順を再現する
+        // （opts.mount → claude_config_mounts → SANITIZED marker →
+        // PLUGINS_DATA marker → build_mounts_label）。
+        let config_dir = std::path::PathBuf::from("/config");
+        let container_name = "vibepod-proj-abc";
+        let home = std::path::PathBuf::from("/Users/alice");
+        let opts_mount_entries = vec![(
+            "/host/user-mount".to_string(),
+            "/container/user-mount".to_string(),
+        )];
+        let claude_config_mounts = vec![(
+            "/Users/alice/.claude/CLAUDE.md".to_string(),
+            "/home/vibepod/.claude/CLAUDE.md".to_string(),
+        )];
+        let host_settings_exists = true;
+        let plugins_data_stage = Some("/config/runtime/vibepod-proj-abc/plugins-data".to_string());
+        let host_codex_auth_exists = true;
+
+        // --- 9b 相当（比較側）の再現 ---
+        let mut mounts_parts_9b: Vec<String> = Vec::new();
+        for (h, c) in &opts_mount_entries {
+            mounts_parts_9b.push(format!("{}:{}", h, c));
+        }
+        for (h, c) in &claude_config_mounts {
+            mounts_parts_9b.push(format!("{}:{}", h, c));
+        }
+        if host_settings_exists {
+            mounts_parts_9b.push(SANITIZED_SETTINGS_LABEL_MARKER.to_string());
+        }
+        if plugins_data_stage.is_some() {
+            mounts_parts_9b.push(PLUGINS_DATA_MOUNT_LABEL_MARKER.to_string());
+        }
+        let label_9b = build_mounts_label(mounts_parts_9b, host_codex_auth_exists);
+
+        // --- build_config_labels 相当（書き込み側）の再現 ---
+        let sanitized_settings_host = config_dir
+            .join("runtime")
+            .join(container_name)
+            .join("settings.json");
+        let mut extra_mounts: Vec<(String, String)> = Vec::new();
+        extra_mounts.extend(opts_mount_entries);
+        extra_mounts.extend(claude_config_mounts);
+        if host_settings_exists {
+            extra_mounts.push((
+                sanitized_settings_host.to_string_lossy().to_string(),
+                "/home/vibepod/.claude/settings.json".to_string(),
+            ));
+        }
+        let rw_mounts = match &plugins_data_stage {
+            Some(stage) => plugins_data_mount_entries(stage, &home),
+            None => Vec::new(),
+        };
+        let parts_write_side = mounts_label_parts(
+            &extra_mounts,
+            &rw_mounts,
+            Some(sanitized_settings_host.as_path()),
+        );
+        let label_write_side = build_mounts_label(parts_write_side, host_codex_auth_exists);
+
+        assert_eq!(
+            label_9b, label_write_side,
+            "build_config_labels and prepare.rs 9b must produce identical vibepod.mounts \
+             labels for the same run state, otherwise a freshly created container is \
+             immediately flagged as configuration-changed"
         );
     }
 

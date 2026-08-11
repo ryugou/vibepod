@@ -146,6 +146,16 @@ fn path_hash_8(path: &str) -> String {
 /// で保存していた。v1.4.3 以降は `sanitized_settings=/home/vibepod/.claude/settings.json`
 /// という専用 prefix 形式に変更している。後方互換のため、比較前に旧形式を新形式へ
 /// 正規化する。
+///
+/// **この関数が扱うのは、上記のさらに古い「空 host」形式のみ**である。
+/// `build_config_labels`（`mounts_label_parts` 経由、`mod.rs`）は、実際に
+/// `docker run --label` へ書き込む段階で既に実パス形式の sanitized settings
+/// エントリを本関数と同じ専用 prefix マーカーへ置換して保存するため、
+/// v1.4.3 以降に作成されたコンテナの `stored` ラベルは元々マーカー形式で
+/// 保存されている。ここへ「実パス → マーカー」の正規化を追加してはならない
+/// — 本関数が変換すべきなのはこの「空 host」旧形式だけであり、実パス形式は
+/// 別の理由（ユーザー指定 `--mount` との衝突回避、判定条件は
+/// `mounts_label_parts` のドキュメント参照）で意図的に対象外にしている。
 fn normalize_mounts_label_legacy(raw: &str) -> String {
     raw.split('|')
         .map(|part| {
