@@ -103,6 +103,81 @@ pub fn profile_rebuild_decision(rebuild: bool, profile_image_exists: bool) -> bo
     rebuild && profile_image_exists
 }
 
+/// メインイメージのビルドと（`--rebuild` 時の）profile バリアント再ビルドを
+/// まとめて行う。`execute` から切り出すことで、`build_then_remove_containers`
+/// （Issue #71 条件1）へビルド処理を注入できるようにしている
+/// （本番はこの関数を渡し、テストはダミーの処理を渡す）。
+async fn build_images(runtime: &DockerRuntime, image_name: &str, rebuild: bool) -> Result<()> {
+    if rebuild {
+        println!(
+            "\n  Rebuilding Docker image from scratch: {} (--pull --no-cache)...",
+            image_name
+        );
+    } else {
+        println!("\n  Building Docker image: {}...", image_name);
+    }
+
+    if let Err(e) = build_image_for(runtime, image_name, rebuild, None).await {
+        eprintln!("\n  ✗ Build failed: {}", e);
+        eprintln!("    Check your network connection and try `vibepod init` again.");
+        if !rebuild {
+            eprintln!(
+                "    If the build succeeded but the image is stale, run `vibepod init --rebuild`."
+            );
+        }
+        return Err(e);
+    }
+
+    // `--rebuild` のときだけ、既に docker 上にある profile バリアントイメージも
+    // 同じ引数（rebuild=true, profile=<p>）で再ビルドする。`config::VALID_PROFILES`
+    // の各エントリについて存在確認し、存在するものだけを対象にする（未使用の
+    // profile を勝手にビルドし始めない）。`vibepod init`（rebuild なし）では
+    // default イメージのみをビルドする現行仕様を変えない
+    // （`profile_rebuild_decision` が守る不変条件）。
+    //
+    // `image_exists` の確認自体は付随処理として扱う: default イメージの
+    // ビルドは既にここまでで成功しているため、確認が docker daemon 不調・
+    // 権限エラー等（`Err`。イメージ未存在は `Ok(false)`）で失敗しても
+    // 致命的にはしない。
+    for profile in config::VALID_PROFILES {
+        let profile_image_name = config::image_for_profile(image_name, profile);
+        let profile_image_exists = if rebuild {
+            match runtime.image_exists(&profile_image_name).await {
+                Ok(exists) => exists,
+                Err(e) => {
+                    eprintln!(
+                        "  Warning: could not check whether the {profile} variant image '{}' \
+                         exists: {}. Skipping the {profile} variant rebuild check (the default \
+                         image was already rebuilt successfully). Run `vibepod init --rebuild` \
+                         again to retry.",
+                        profile_image_name, e
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if profile_rebuild_decision(rebuild, profile_image_exists) {
+            println!(
+                "\n  Rebuilding Docker image from scratch: {} (--pull --no-cache)...",
+                profile_image_name
+            );
+            if let Err(e) = build_image_for(runtime, &profile_image_name, true, Some(profile)).await
+            {
+                eprintln!("\n  ✗ Build failed: {}", e);
+                eprintln!(
+                    "    Check your network connection and try `vibepod init --rebuild` again."
+                );
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// 自動ビルドの同時実行を直列化するためのアドバイザリロック。
 ///
 /// 複数セッションから同時に `vibepod run` が走ると、同名イメージのビルドが
@@ -495,6 +570,39 @@ where
     }
 }
 
+/// コンテナ安全処理のオーケストレーション（Issue #71 条件1）。
+///
+/// 本番 `execute()` の接続順序（ビルド前チェック → イメージビルド →
+/// 削除直前チェック・削除）を 1 つの関数へ切り出し、本番とテストの両方が
+/// この関数を経由するようにする。これにより「テストはヘルパーを直接順番に
+/// 呼ぶだけで、`execute()` 側の接続が壊れても検出できない」という穴を防ぐ
+/// （テストは `build` にダミー処理を注入してこの関数を直接呼ぶ）。
+///
+/// `build`: ビルド処理を注入するためのクロージャ。本番は `build_images` を
+/// 渡し、テストは「何もしない」または「コンテナが増える状況をシミュレート
+/// する」処理を渡す。`FnOnce() -> Fut` という形は stable Rust に安定化済みの
+/// async closure を使わず、通常のクロージャに async block を返させることで
+/// 実現している。
+///
+/// 戻り値は `remove_existing_containers` と同じ意味を持つ
+/// （`Ok(true)`: 削除完了または no-op、`Ok(false)`: 確認拒否で未削除）。
+async fn build_then_remove_containers<R, B, Fut, F>(
+    registry: &R,
+    is_interactive: bool,
+    build: B,
+    confirm: F,
+) -> Result<bool>
+where
+    R: ContainerRegistry,
+    B: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+    F: FnOnce(usize, usize) -> Result<bool>,
+{
+    fail_fast_if_removal_would_abort(registry, is_interactive).await?;
+    build().await?;
+    remove_existing_containers(registry, is_interactive, confirm).await
+}
+
 /// `rebuild`: pass `--pull --no-cache` to `docker build` so the image is
 /// reconstructed from scratch. Needed to pick up a newer Claude Code, since
 /// the `install.sh` layer is otherwise served from cache forever.
@@ -514,121 +622,41 @@ pub async fn execute(rebuild: bool) -> Result<()> {
     // ではなく stderr で行う。stdin だけで判定すると、`vibepod init 2>&1 |
     // tee log` のように stdin は TTY でも stderr がパイプされているケースを
     // 対話と誤判定し、dialoguer が "IO error: not a terminal" でクラッシュ
-    // する。3. と 5. のコンテナ削除確認でも同じ理由でこの値を使い回す。
+    // する。3-5. のコンテナ削除確認でも同じ理由でこの値を使い回す。
     let is_interactive = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let agent = resolve_agent(is_interactive)?;
 
-    // 3. Pre-build container check（Issue #69）
+    // 3-5. ビルド前チェック → イメージビルド → 削除直前チェック・削除
     //
     // 非対話 CI で `--rebuild` を実行すると、`--pull --no-cache` を伴う
     // 数分〜十数分のビルドを完走してから、後段のコンテナ削除確認で必ず
     // 失敗していた（「ビルドは成功したのに init 全体は失敗し、しかも latest
     // タグだけ更新済み」という部分成功状態を残す）。abort になることが
-    // 事前に分かっている非対話ケースは、ビルドに入る前に fail fast させる。
+    // 事前に分かっている非対話ケースは、ビルドに入る前に fail fast させる
+    // （Issue #69）。
     //
-    // ここでは Abort 分岐だけを見る。Remove（コンテナ 0 件）や Confirm
-    // （対話 + コンテナあり）は、実際の削除判断をビルド後の再チェック
-    // （TOCTOU 対策、下記 5.）に委ねるため、ここでは何もしない。
-    fail_fast_if_removal_would_abort(&runtime, is_interactive).await?;
-
-    // 4. Build image
+    // ビルドには数分〜十数分かかることがあり、その間に別プロセスが
+    // `vibepod run` を開始してコンテナが増えている可能性があるため、ビルド後
+    // にもう一度列挙・判定し直す（TOCTOU 対策）。コンテナが 1 件以上ある場合、
+    // 対話端末なら確認プロンプトを表示し、非対話なら確認が取れないため削除
+    // せずエラー終了する（稼働中・停止中を問わない。停止中コンテナにも
+    // resume 可能な状態が残るため）。
+    //
+    // この 3 段（ビルド前チェック → ビルド → 削除直前チェック・削除）の接続
+    // 順序は `build_then_remove_containers`（Issue #71 条件1）に切り出して
+    // おり、テストも同じ関数を経由して固定している。ここで直接ヘルパーを
+    // 順番に呼ぶと、将来この接続が壊れてもテストで検出できない。
     let image_name = format!("vibepod-{}:latest", agent);
-
-    if rebuild {
-        println!(
-            "\n  Rebuilding Docker image from scratch: {} (--pull --no-cache)...",
-            image_name
-        );
-    } else {
-        println!("\n  Building Docker image: {}...", image_name);
-    }
-
-    match build_image_for(&runtime, &image_name, rebuild, None).await {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("\n  ✗ Build failed: {}", e);
-            eprintln!("    Check your network connection and try `vibepod init` again.");
-            if !rebuild {
-                eprintln!("    If the build succeeded but the image is stale, run `vibepod init --rebuild`.");
-            }
-            return Err(e);
-        }
-    }
-
-    // 4b. `--rebuild` のときだけ、既に docker 上にある profile バリアント
-    //     イメージも同じ引数（rebuild=true, profile=<p>）で再ビルドする。
-    //     `config::VALID_PROFILES` の各エントリについて存在確認し、存在する
-    //     ものだけを対象にする（未使用の profile を勝手にビルドし始めない）。
-    //     `vibepod init`（rebuild なし）では default イメージのみをビルドする
-    //     現行仕様を変えない（`profile_rebuild_decision` が守る不変条件）。
-    //
-    //     F7（フル再レビュー指摘）: 以前は "swift" 一つだけを決め打ちしており、
-    //     `VALID_PROFILES` に新しい profile を追加してもここが追随せず、
-    //     `vibepod init --rebuild` がその profile のイメージを再ビルドし忘れる
-    //     （古いイメージのまま使われ続ける）バグを生みかねなかった。
-    //     `VALID_PROFILES` をループする形に一般化し、profile 追加時の
-    //     rebuild 漏れを構造的に防ぐ。
-    //
-    //     `image_exists` の確認自体は付随処理として扱う: default イメージの
-    //     ビルドは既にここまでで成功しているため、確認が docker daemon 不調・
-    //     権限エラー等（`Err`。イメージ未存在は `Ok(false)`）で失敗しても
-    //     致命的にはしない。ここで異常終了すると、後段のコンテナ削除・
-    //     `save_global_config` に到達できず、真因が伝わらないまま
-    //     `~/.config/vibepod/config.toml` が更新されず後続の `vibepod run` が
-    //     「Config not found」で失敗する — ユーザーからは無関係に見える。
-    for profile in config::VALID_PROFILES {
-        let profile_image_name = config::image_for_profile(&image_name, profile);
-        let profile_image_exists = if rebuild {
-            match runtime.image_exists(&profile_image_name).await {
-                Ok(exists) => exists,
-                Err(e) => {
-                    eprintln!(
-                        "  Warning: could not check whether the {profile} variant image '{}' \
-                         exists: {}. Skipping the {profile} variant rebuild check (the default \
-                         image was already rebuilt successfully). Run `vibepod init --rebuild` \
-                         again to retry.",
-                        profile_image_name, e
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-        if profile_rebuild_decision(rebuild, profile_image_exists) {
-            println!(
-                "\n  Rebuilding Docker image from scratch: {} (--pull --no-cache)...",
-                profile_image_name
-            );
-            if let Err(e) =
-                build_image_for(&runtime, &profile_image_name, true, Some(profile)).await
-            {
-                eprintln!("\n  ✗ Build failed: {}", e);
-                eprintln!(
-                    "    Check your network connection and try `vibepod init --rebuild` again."
-                );
-                return Err(e);
-            }
-        }
-    }
-
-    // 5. イメージ再ビルド後に既存のコンテナを全削除する（config 保存前に行う）
-    //
-    //    3. のビルド前チェックとは別に、ここでもう一度列挙・判定し直す
-    //    （TOCTOU 対策）。ビルドには数分〜十数分かかることがあり、その間に別
-    //    プロセスが `vibepod run` を開始してコンテナが増えている可能性が
-    //    あるため、ビルド前の判定結果をそのまま使い回さない。
-    //
-    //    コンテナが 1 件以上ある場合、対話端末なら確認プロンプトを表示し、
-    //    非対話なら確認が取れないため削除せずエラー終了する（稼働中・停止中
-    //    を問わない。停止中コンテナにも resume 可能な状態が残るため）。
-    let should_continue =
-        remove_existing_containers(&runtime, is_interactive, |total, protected| {
+    let should_continue = build_then_remove_containers(
+        &runtime,
+        is_interactive,
+        || build_images(&runtime, &image_name, rebuild),
+        |total, protected| {
             // インタラクティブ + コンテナあり: 確認プロンプト
             prompts::confirm_remove_all_containers(total, protected)
-        })
-        .await?;
+        },
+    )
+    .await?;
     if !should_continue {
         // ユーザーがコンテナ削除を拒否 → config を更新しない（旧コンテナが旧イメージのまま残る）
         return Ok(());
@@ -764,39 +792,89 @@ mod tests {
     // 無確認削除してしまう）を検出する。
 
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     /// テスト用 fake `ContainerRegistry`。
     ///
     /// `list_vibepod_containers` は呼び出しごとに `responses` から 1 件ずつ
     /// 消費して返す（ビルド前後で異なる一覧を返す必要があるテスト用）。
-    /// `remove_container` は呼ばれた名前を記録するだけで、実際には何もしない。
+    /// `responses` が枯渇した状態で呼ばれた場合は `expect` で即座に panic
+    /// させる（Issue #71 条件2）: 実装の `list_vibepod_containers` は毎回
+    /// docker を実行するため「枯渇して空になる」挙動を持たず、fake が
+    /// 想定外の追加呼び出しを空一覧（無確認続行を意味する安全上重要な値）に
+    /// 変換してしまうと、fake の設定ミスや接続回数の回帰を握り潰してしまう。
+    ///
+    /// `remove_container` は呼ばれた名前を `removed` に記録する。
+    /// `fail_remove_on`（1-based）が指定されていれば、その回数目の呼び出しで
+    /// 記録せずエラーを返す（削除失敗の伝播をテストするため）。
     struct FakeRegistry {
-        responses: Mutex<VecDeque<Vec<ContainerInfo>>>,
+        responses: Mutex<VecDeque<Result<Vec<ContainerInfo>>>>,
         removed: Arc<Mutex<Vec<String>>>,
+        calls: AtomicUsize,
+        fail_remove_on: Option<usize>,
     }
 
     impl FakeRegistry {
         fn new(responses: Vec<Vec<ContainerInfo>>) -> Self {
+            Self::new_with_list_results(responses.into_iter().map(Ok).collect())
+        }
+
+        /// 列挙自体を失敗させたいテスト用に、`Result` を直接注入するコンストラクタ。
+        fn new_with_list_results(responses: Vec<Result<Vec<ContainerInfo>>>) -> Self {
             Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 removed: Arc::new(Mutex::new(Vec::new())),
+                calls: AtomicUsize::new(0),
+                fail_remove_on: None,
             }
+        }
+
+        /// `nth_call` 回目（1-based）の `remove_container` 呼び出しを失敗させる。
+        fn with_failing_remove_on(mut self, nth_call: usize) -> Self {
+            self.fail_remove_on = Some(nth_call);
+            self
         }
 
         fn removed_names(&self) -> Vec<String> {
             self.removed.lock().unwrap().clone()
         }
+
+        /// `build` クロージャと `remove_container` の両方から同じログへ
+        /// 書き込ませ、実行順序（ビルドが削除より先に完了しているか）を
+        /// 直接検証するためのハンドル（Issue #71 条件1）。
+        fn removed_handle(&self) -> Arc<Mutex<Vec<String>>> {
+            self.removed.clone()
+        }
+
+        /// `list_vibepod_containers` が呼ばれた回数。
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        /// 未消費の `responses` の件数（テストが用意した件数と実際の呼び出し
+        /// 回数の食い違いを検証できるようにする）。
+        fn remaining_responses(&self) -> usize {
+            self.responses.lock().unwrap().len()
+        }
     }
 
     impl ContainerRegistry for FakeRegistry {
         async fn list_vibepod_containers(&self) -> Result<Vec<ContainerInfo>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             let mut responses = self.responses.lock().unwrap();
-            Ok(responses.pop_front().unwrap_or_default())
+            responses
+                .pop_front()
+                .expect("unexpected list_vibepod_containers call")
         }
 
         async fn remove_container(&self, name: &str) -> Result<()> {
-            self.removed.lock().unwrap().push(name.to_string());
+            let mut removed = self.removed.lock().unwrap();
+            let call_index = removed.len() + 1;
+            if self.fail_remove_on == Some(call_index) {
+                bail!("fake remove_container failure for {}", name);
+            }
+            removed.push(name.to_string());
             Ok(())
         }
     }
@@ -833,27 +911,55 @@ mod tests {
         assert!(registry.removed_names().is_empty());
     }
 
-    // 項目2: 非対話 + ビルド前0件 + ビルド後1件 → ビルド後の判定
-    // （`remove_existing_containers` の再列挙）で中断し、remove_container が
-    // 呼ばれない。ビルド前チェックの結果を使い回さず、再列挙の結果が
-    // 判定に使われていることを固定する（TOCTOU 対策の回帰検出）。
+    // 項目2: 非対話 + ビルド前0件 + ビルド後1件（注入したビルド処理内で
+    // コンテナが増える状況をシミュレート）→ 注入処理は実行されるが、
+    // ビルド後の判定（`remove_existing_containers` の再列挙）で中断し、
+    // remove_container が呼ばれない。ビルド前チェックの結果を使い回さず、
+    // 再列挙の結果が判定に使われていることを固定する（TOCTOU 対策の回帰検出）。
+    //
+    // `execute()` 本番と同じ `build_then_remove_containers` を経由することで、
+    // ヘルパーを直接順番に呼ぶだけでは検出できない「本番の接続順序が壊れる」
+    // 回帰（削除直前チェックの除去・順序入れ替え・別の削除ループの追加）も
+    // 合わせて検出する（Issue #71 条件1）。列挙がちょうど 2 回（ビルド前・
+    // ビルド後）だけ行われたことも固定する（Issue #71 条件2）。
     #[tokio::test]
     async fn non_interactive_container_appearing_after_build_aborts_on_recheck() {
         let registry = FakeRegistry::new(vec![
             vec![],                                       // ビルド前: 0 件
             vec![container("vibepod-other-b", "exited")], // ビルド後: 1 件
         ]);
+        let build_called = Arc::new(Mutex::new(false));
+        let build_called_clone = build_called.clone();
 
-        let pre_build = fail_fast_if_removal_would_abort(&registry, false).await;
-        assert!(pre_build.is_ok(), "ビルド前は 0 件なので通過するはず");
+        let result = build_then_remove_containers(
+            &registry,
+            false,
+            move || {
+                let build_called_clone = build_called_clone.clone();
+                async move {
+                    *build_called_clone.lock().unwrap() = true;
+                    Ok(())
+                }
+            },
+            confirm_must_not_be_called,
+        )
+        .await;
 
-        let post_build =
-            remove_existing_containers(&registry, false, confirm_must_not_be_called).await;
         assert!(
-            post_build.is_err(),
+            result.is_err(),
             "ビルド後の再列挙で 1 件見つかり中断するはず"
         );
+        assert!(
+            *build_called.lock().unwrap(),
+            "ビルド前チェックは通過するので注入処理は実行されているはず"
+        );
         assert!(registry.removed_names().is_empty());
+        assert_eq!(
+            registry.call_count(),
+            2,
+            "列挙はビルド前・ビルド後の2回だけ行われるはず"
+        );
+        assert_eq!(registry.remaining_responses(), 0);
     }
 
     // 項目3: コンテナ0件 → remove_container が呼ばれない。
@@ -895,5 +1001,117 @@ mod tests {
         let mut removed = registry.removed_names();
         removed.sort();
         assert_eq!(removed, vec!["vibepod-other-e", "vibepod-other-f"]);
+    }
+
+    // --- Issue #71 条件1: 本番と同じ接続順序（ビルド前チェック → 注入した
+    // ビルド処理 → 削除直前チェック・削除）を `build_then_remove_containers`
+    // 経由で固定する。`execute()` はこの関数を呼ぶだけなので、ここで固定した
+    // 接続順序がそのまま本番の接続順序になる。
+
+    // 条件1 項目1: ビルド前チェックで abort する場合、注入したビルド処理は
+    // 実行されない（ビルドまで到達しない）。
+    #[tokio::test]
+    async fn build_then_remove_containers_aborts_before_build_when_precheck_fails() {
+        let registry = FakeRegistry::new(vec![vec![container("vibepod-other-k", "exited")]]);
+        let build_called = Arc::new(Mutex::new(false));
+        let build_called_clone = build_called.clone();
+
+        let result = build_then_remove_containers(
+            &registry,
+            false,
+            move || {
+                let build_called_clone = build_called_clone.clone();
+                async move {
+                    *build_called_clone.lock().unwrap() = true;
+                    Ok(())
+                }
+            },
+            confirm_must_not_be_called,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            !*build_called.lock().unwrap(),
+            "ビルド前チェックで abort するので注入処理は実行されないはず"
+        );
+        assert!(registry.removed_names().is_empty());
+        assert_eq!(
+            registry.call_count(),
+            1,
+            "ビルド前チェックの1回だけ列挙されるはず"
+        );
+    }
+
+    // 条件1 項目3: 正常系（対話 + 確認承認）で、注入したビルド処理が実行され、
+    // その後に削除が実行される。`removed_handle()` を使い、ビルド処理と削除
+    // 処理の両方に同じログへ書き込ませることで、順序そのものを検証する
+    // （単に両方が呼ばれたことだけを assert すると、順序が入れ替わる回帰を
+    // 見逃す）。
+    #[tokio::test]
+    async fn build_then_remove_containers_runs_build_before_removal_on_happy_path() {
+        let registry = FakeRegistry::new(vec![
+            vec![],                                       // ビルド前: 0 件
+            vec![container("vibepod-other-g", "exited")], // ビルド後: 1 件
+        ]);
+        let log = registry.removed_handle();
+        let build_log = log.clone();
+
+        let result = build_then_remove_containers(
+            &registry,
+            true,
+            move || {
+                let build_log = build_log.clone();
+                async move {
+                    build_log.lock().unwrap().push("build".to_string());
+                    Ok(())
+                }
+            },
+            |_total, _protected| Ok(true),
+        )
+        .await;
+
+        assert!(result.unwrap());
+        assert_eq!(
+            registry.removed_names(),
+            vec!["build".to_string(), "vibepod-other-g".to_string()],
+            "注入したビルド処理が削除より先に完了しているはず"
+        );
+        assert_eq!(registry.call_count(), 2);
+    }
+
+    // --- Issue #71 Suggestion: fake がエラー経路を表現できるようにし、
+    // 削除側の失敗伝播を固定する。
+
+    // 列挙が失敗した場合、削除が0回で呼び出し元へエラーが伝播する。
+    #[tokio::test]
+    async fn list_failure_propagates_without_removing() {
+        let registry =
+            FakeRegistry::new_with_list_results(vec![Err(anyhow::anyhow!("docker ps failed"))]);
+        let result = remove_existing_containers(&registry, true, confirm_must_not_be_called).await;
+        assert!(result.is_err());
+        assert!(registry.removed_names().is_empty());
+    }
+
+    // 削除が途中で失敗した場合、そのエラーが呼び出し元へ伝播し、後続の
+    // 削除（3件目以降）へ進まない。
+    #[tokio::test]
+    async fn remove_failure_stops_before_later_removals_and_propagates() {
+        let registry = FakeRegistry::new(vec![vec![
+            container("vibepod-other-h", "exited"),
+            container("vibepod-other-i", "exited"),
+            container("vibepod-other-j", "exited"),
+        ]])
+        .with_failing_remove_on(2);
+
+        let result =
+            remove_existing_containers(&registry, true, |_total, _protected| Ok(true)).await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            registry.removed_names().len(),
+            1,
+            "2件目の削除で失敗するので、1件目のみ削除済みのはず"
+        );
     }
 }
