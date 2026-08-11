@@ -108,9 +108,11 @@ fn ensure_interactive_terminal(stdin_is_terminal: bool, stderr_is_terminal: bool
         bail!(
             "vibepod login requires an interactive terminal.\n  \
              The OAuth token setup runs `claude setup-token` inside the container via \
-             `docker exec -it`, which needs a real terminal for both input (stdin) and \
-             output (stderr) regardless of whether an existing token is present, so this \
-             run is being aborted before starting the container.\n  \
+             `docker exec -it`, which requires stdin to be a real terminal. Confirming \
+             an existing token's overwrite uses a stderr-based prompt, which requires \
+             stderr to be a real terminal too. Both are required regardless of whether \
+             an existing token is present, so this run is being aborted before starting \
+             the container.\n  \
              Re-run `vibepod login` from an interactive terminal."
         )
     }

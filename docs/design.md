@@ -247,7 +247,7 @@ plugins の二重マウントは、`installed_plugins.json` の `installPath` �
 - 複数コンテナで同じトークンを同時使用可能
 - credentials ファイルのマウント不要
 
-**非対話環境での挙動：** `vibepod login` は OAuth フロー全体が対話端末を必要とするコマンドである。トークン取得は `docker exec -it` で `claude setup-token` をコンテナ内実行するため、既存トークンの有無にかかわらず非対話環境（stderr が TTY でない）では実行前にエラーで中断する。フォールバックはせず、対話端末から再実行する。
+**非対話環境での挙動：** `vibepod login` は OAuth フロー全体が対話端末を必要とするコマンドである。トークン取得は `docker exec -it` で `claude setup-token` をコンテナ内実行するため stdin が TTY であることを要求し、既存トークンがある場合の上書き確認は `dialoguer::Confirm`（`Term::stderr()`）を使うため stderr が TTY であることを要求する。既存トークンの有無にかかわらず、stdin と stderr のいずれかが TTY でない非対話環境では実行前にエラーで中断する。フォールバックはせず、対話端末から再実行する。
 
 `vibepod restore` もセッション選択と複数の破壊的操作の確認（ブランチ不一致・force restore・最終確認）を伴うため、同様に対話端末を前提とする。非対話環境（stderr が TTY でない）で実行した場合は、実際の復元処理に入る前の入口でエラーとなり中断する。フォールバックはせず、対話端末からの再実行を促す。
 
