@@ -15,9 +15,9 @@ pub async fn execute(name: Option<String>, all: bool) -> Result<()> {
             println!("No VibePod containers found.");
             return Ok(());
         }
-        for (container_name, _status) in &containers {
-            println!("Removing {}...", container_name);
-            runtime.remove_container(container_name).await?;
+        for container in &containers {
+            println!("Removing {}...", container.name);
+            runtime.remove_container(&container.name).await?;
         }
         println!("Removed {} container(s).", containers.len());
     } else if let Some(ref container_name) = name {

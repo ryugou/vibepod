@@ -17,6 +17,20 @@ pub enum ContainerStatus {
 /// Docker CLI ラッパー。docker コマンドを通じてコンテナ操作を行う。
 pub struct DockerRuntime;
 
+/// `list_vibepod_containers` が返すコンテナ情報。
+///
+/// タプルではなく構造体にしているのは、フィールドが増えたときに呼び出し元が
+/// `.0` / `.1` の位置ズレで壊れず、`.name` のように読みやすいまま拡張できるため。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerInfo {
+    pub name: String,
+    /// docker の `{{.State}}`（running / restarting / paused / exited / created / dead）。
+    /// 削除して安全かどうかの判定はこちらを使う（`status` は表示用）。
+    pub state: String,
+    /// docker の `{{.Status}}`（"Up 5 minutes" 等の表示用文字列）。
+    pub status: String,
+}
+
 /// コンテナ起動設定。`docker run` に渡す全パラメータを保持する。
 /// コンテナは常にアイドルエントリポイント（`tail -f /dev/null`）で起動し、
 /// Claude は `docker exec` で実行する。
@@ -339,7 +353,7 @@ impl DockerRuntime {
         Ok(None)
     }
 
-    pub async fn list_vibepod_containers(&self) -> Result<Vec<(String, String)>> {
+    pub async fn list_vibepod_containers(&self) -> Result<Vec<ContainerInfo>> {
         let output = Command::new("docker")
             .args([
                 "ps",
@@ -347,7 +361,7 @@ impl DockerRuntime {
                 "--filter",
                 "name=vibepod-",
                 "--format",
-                "{{.Names}}\t{{.Status}}",
+                "{{.Names}}\t{{.State}}\t{{.Status}}",
             ])
             .output()
             .await
@@ -363,13 +377,8 @@ impl DockerRuntime {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let mut result = Vec::new();
         for line in stdout.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((name, status)) = line.split_once('\t') {
-                if name.starts_with("vibepod-") {
-                    result.push((name.to_string(), status.to_string()));
-                }
+            if let Some(info) = parse_vibepod_container_line(line)? {
+                result.push(info);
             }
         }
         Ok(result)
@@ -509,6 +518,43 @@ impl DockerRuntime {
     }
 }
 
+/// `docker ps --format '{{.Names}}\t{{.State}}\t{{.Status}}'` の1行を
+/// `ContainerInfo` にパースする純関数。
+///
+/// - `Ok(None)`: 空行、または `vibepod-` プレフィックスを持たない行
+///   （フィルタ対象外であり、エラーではない）
+/// - `Ok(Some(info))`: `vibepod-` プレフィックスを持つ正常な行
+/// - `Err`: 空行ではないのにタブ区切りフィールドが3つ揃わない行。
+///   これを黙ってスキップすると `list_vibepod_containers` の戻り値が
+///   「該当コンテナなし」と区別つかなくなり、`container_removal_decision`
+///   （0件を無確認続行と判定する）への入力が fail-open になるため、
+///   呼び出し元へ伝播させる。
+fn parse_vibepod_container_line(line: &str) -> Result<Option<ContainerInfo>> {
+    if line.is_empty() {
+        return Ok(None);
+    }
+
+    let mut fields = line.splitn(3, '\t');
+    let (Some(name), Some(state), Some(status)) = (fields.next(), fields.next(), fields.next())
+    else {
+        anyhow::bail!(
+            "Failed to parse `docker ps` output line: expected 3 tab-separated fields \
+             (name, state, status), got {}",
+            line.splitn(3, '\t').count()
+        );
+    };
+
+    if !name.starts_with("vibepod-") {
+        return Ok(None);
+    }
+
+    Ok(Some(ContainerInfo {
+        name: name.to_string(),
+        state: state.to_string(),
+        status: status.to_string(),
+    }))
+}
+
 /// `docker top` 出力から claude プロセスを検出する。
 /// マッチ条件: コマンドラインのトークンに `claude` が単語として含まれる。
 /// `/.claude/` パス（マウントされた設定ディレクトリ）を誤検知しないよう、
@@ -523,4 +569,84 @@ pub fn parse_docker_top_for_claude(output: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_vibepod_container_line_parses_well_formed_line() {
+        let result = parse_vibepod_container_line("vibepod-myproj-abc123\trunning\tUp 5 minutes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result,
+            ContainerInfo {
+                name: "vibepod-myproj-abc123".to_string(),
+                state: "running".to_string(),
+                status: "Up 5 minutes".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_vibepod_container_line_filters_out_non_vibepod_prefix() {
+        let result =
+            parse_vibepod_container_line("some-other-container\trunning\tUp 5 minutes").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_vibepod_container_line_skips_empty_line() {
+        let result = parse_vibepod_container_line("").unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn parse_vibepod_container_line_errors_on_missing_fields() {
+        // name/state それぞれに、他のフィールドや構造情報の文言と偶然一致しない
+        // 固有の sentinel を使う。"running" のような実在の state 値だと、将来
+        // 「診断を改善する」目的でその値がエラーメッセージへ埋め込まれても、
+        // 別の理由（構造情報の文言との偶然の一致等）で assert がすり抜け、
+        // 回帰を検出できなくなるおそれがあるため。
+        let name = "vibepod-secretproject-abc123";
+        let state = "secret-state-value";
+        let line = format!("{name}\t{state}");
+
+        let err = parse_vibepod_container_line(&line).unwrap_err();
+        let message = err.to_string();
+
+        // 診断情報として期待フィールド数・実際のフィールド数は含んでよい。
+        assert!(
+            message.contains("expected 3 tab-separated fields"),
+            "error message should describe the expected field count, got: {:?}",
+            message
+        );
+        assert!(
+            message.contains("got 2"),
+            "error message should describe the actual field count, got: {:?}",
+            message
+        );
+        // 将来「入力行やフィールドを埋め込んで診断を改善する」変更が入っても、
+        // name・state 個々のフィールドや行全体（他プロジェクトの情報を含みうる）を
+        // 漏らさないことを固定する。行全体の非包含だけでは、フィールド単体の
+        // 混入（例: state だけをエラーに埋め込む変更）を検出できないため、
+        // 各フィールドを個別に検証する。
+        assert!(
+            !message.contains(name),
+            "error message must not embed the container name, got: {:?}",
+            message
+        );
+        assert!(
+            !message.contains(state),
+            "error message must not embed the state field, got: {:?}",
+            message
+        );
+        assert!(
+            !message.contains(line.as_str()),
+            "error message must not embed the raw input line, got: {:?}",
+            message
+        );
+    }
 }

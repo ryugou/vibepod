@@ -12,7 +12,7 @@ pub async fn execute(container: Option<String>, follow: bool, tail: String) -> R
         containers
             .into_iter()
             .next()
-            .map(|(name, _)| name)
+            .map(|c| c.name)
             .context("No VibePod containers found. Run `vibepod ps` to check.")?
     };
 
