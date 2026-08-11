@@ -190,6 +190,7 @@ image = "vibepod-claude:latest"
 |-----------|------|
 | `--resume` | 前回のセッションを引き継ぐ（Claude Code に渡す） |
 | `--prompt "..."` | 初期プロンプトを指定（Claude Code に `-p` フラグとして渡す） |
+| `--prompt-file <path>` | 初期プロンプトをファイルから読む。内容は無加工で `--prompt` と同じ経路へ渡る（`--prompt` と排他） |
 | `--no-network` | コンテナのネットワークを無効化する（`npm install` 等も不可になる点に注意） |
 | `--env KEY=VALUE` | コンテナに環境変数を渡す（複数指定可。例: `--env ANTHROPIC_API_KEY=sk-...`） |
 | `--env-file <path>` | 環境変数ファイル（`op://` 参照は 1Password CLI で解決） |

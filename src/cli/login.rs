@@ -139,9 +139,10 @@ mod tests {
     use super::*;
 
     // Issue #68 (W-A): stdin と stderr の両方が TTY のときだけ Ok。
-    // OAuth フローが stdin を使う `docker exec -it`（src/auth.rs）と、
-    // 上書き確認が stderr を使う `dialoguer::Confirm` の両方に依存する
-    // ため、4 象限すべてを固定する。
+    // stdin は OAuth フローの `docker exec -it`（src/auth.rs）が常に要求する
+    // 技術的制約。stderr は上書き確認（`dialoguer::Confirm`）が走るときだけ
+    // 技術的に必要だが、前提条件を単純に保つため常時要求する製品判断を採って
+    // いる。その契約を 4 象限すべてで固定する。
     #[test]
     fn ensure_interactive_terminal_both_tty_ok() {
         assert!(ensure_interactive_terminal(true, true).is_ok());
@@ -150,7 +151,8 @@ mod tests {
     #[test]
     fn ensure_interactive_terminal_stdin_only_errors() {
         // stdin=true, stderr=false: `vibepod login 2> login.log` に相当。
-        // 上書き確認の dialoguer::Confirm が stderr を使えないため Err。
+        // 既存トークンが無ければ上書き確認は走らないため技術的には完走できるが、
+        // 常時フル TTY を要求する製品契約により Err とする。
         assert!(ensure_interactive_terminal(true, false).is_err());
     }
 
