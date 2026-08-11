@@ -605,7 +605,28 @@ mod tests {
 
     #[test]
     fn parse_vibepod_container_line_errors_on_missing_fields() {
-        let result = parse_vibepod_container_line("vibepod-myproj-abc123\trunning");
-        assert!(result.is_err());
+        // 混入検出用に、他のテストでは使わない識別しやすいコンテナ名を使う。
+        let line = "vibepod-secretproject-abc123\trunning";
+        let err = parse_vibepod_container_line(line).unwrap_err();
+        let message = err.to_string();
+
+        // 診断情報としてフィールド数などの構造情報は含んでよい。
+        assert!(
+            message.contains("expected 3 tab-separated fields") && message.contains("got 2"),
+            "error message should describe the field-count mismatch, got: {:?}",
+            message
+        );
+        // 将来「入力行を埋め込んで診断を改善する」変更が入っても、行内容や
+        // コンテナ名（他プロジェクトの情報を含みうる）を漏らさないことを固定する。
+        assert!(
+            !message.contains(line),
+            "error message must not embed the raw input line, got: {:?}",
+            message
+        );
+        assert!(
+            !message.contains("vibepod-secretproject-abc123"),
+            "error message must not embed the container name, got: {:?}",
+            message
+        );
     }
 }

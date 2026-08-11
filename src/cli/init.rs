@@ -300,7 +300,7 @@ const REMOVABLE_STATES: &[&str] = &["exited", "created", "dead"];
 ///
 /// この判定結果は `container_removal_decision` の分岐そのものには使わない
 /// （分岐はコンテナの有無のみで決まる）。確認・abort メッセージに含める
-/// 「うち N 件が稼働中」の件数算出にのみ使う。
+/// 「うち N 件が保護対象」の件数算出にのみ使う。
 fn is_protected_state(state: &str) -> bool {
     !REMOVABLE_STATES.contains(&state.to_lowercase().as_str())
 }
@@ -354,7 +354,7 @@ fn container_removal_decision(
 /// `build_completed` が true（削除直前チェックでの abort）のときだけ、
 /// イメージビルドが既に完了し `latest` タグも更新済みである旨を含める
 /// （ビルド前チェックでの abort はビルド自体が走っていないため不要）。
-fn non_interactive_abort_message(total: usize, running: usize, build_completed: bool) -> String {
+fn non_interactive_abort_message(total: usize, protected: usize, build_completed: bool) -> String {
     let build_note = if build_completed {
         "\n  Note: the Docker image was already rebuilt and its `latest` tag updated \
          before this check ran — only the container removal step was aborted."
@@ -362,9 +362,10 @@ fn non_interactive_abort_message(total: usize, running: usize, build_completed: 
         ""
     };
     format!(
-        "{} VibePod container(s) found across projects ({} of them currently running), but \
-         this session is non-interactive (stderr is not a terminal) so a removal confirmation \
-         cannot be obtained. Aborting without touching them.{}\n  \
+        "{} VibePod container(s) found across projects ({} of them protected: running, \
+         restarting, paused, or unknown state), but this session is non-interactive (stderr is \
+         not a terminal) so a removal confirmation cannot be obtained. Aborting without \
+         touching them.{}\n  \
          `vibepod init` removes ALL VibePod containers across every project once it proceeds — \
          including stopped ones holding other sessions' resumable state — so a confirmation is \
          required whenever at least one container exists, running or not.\n  \
@@ -372,7 +373,7 @@ fn non_interactive_abort_message(total: usize, running: usize, build_completed: 
          Re-run `vibepod init` from an interactive terminal to get a confirmation prompt, or \
          remove the containers yourself first (e.g. `vibepod rm --all` from an interactive \
          terminal) so none remain.",
-        total, running, build_note
+        total, protected, build_note
     )
 }
 
@@ -415,13 +416,13 @@ pub async fn execute(rebuild: bool) -> Result<()> {
         if let ContainerRemovalDecision::Abort =
             container_removal_decision(is_interactive, containers.len())
         {
-            let running = containers
+            let protected = containers
                 .iter()
                 .filter(|c| is_protected_state(&c.state))
                 .count();
             bail!(non_interactive_abort_message(
                 containers.len(),
-                running,
+                protected,
                 false
             ));
         }
@@ -521,7 +522,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
     //    を問わない。停止中コンテナにも resume 可能な状態が残るため）。
     let containers = runtime.list_vibepod_containers().await?;
     if !containers.is_empty() {
-        let running_count = containers
+        let protected_count = containers
             .iter()
             .filter(|c| is_protected_state(&c.state))
             .count();
@@ -530,7 +531,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
             ContainerRemovalDecision::Remove => true,
             ContainerRemovalDecision::Confirm => {
                 // インタラクティブ + コンテナあり: 確認プロンプト
-                prompts::confirm_remove_all_containers(containers.len(), running_count)?
+                prompts::confirm_remove_all_containers(containers.len(), protected_count)?
             }
             ContainerRemovalDecision::Abort => {
                 // 非インタラクティブ + コンテナあり: `list_vibepod_containers()` は
@@ -541,7 +542,7 @@ pub async fn execute(rebuild: bool) -> Result<()> {
                 // その旨をメッセージに含める。
                 bail!(non_interactive_abort_message(
                     containers.len(),
-                    running_count,
+                    protected_count,
                     true
                 ));
             }
