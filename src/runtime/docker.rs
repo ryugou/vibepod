@@ -605,27 +605,47 @@ mod tests {
 
     #[test]
     fn parse_vibepod_container_line_errors_on_missing_fields() {
-        // 混入検出用に、他のテストでは使わない識別しやすいコンテナ名を使う。
-        let line = "vibepod-secretproject-abc123\trunning";
-        let err = parse_vibepod_container_line(line).unwrap_err();
+        // name/state それぞれに、他のフィールドや構造情報の文言と偶然一致しない
+        // 固有の sentinel を使う。"running" のような実在の state 値だと、将来
+        // 「診断を改善する」目的でその値がエラーメッセージへ埋め込まれても、
+        // 別の理由（構造情報の文言との偶然の一致等）で assert がすり抜け、
+        // 回帰を検出できなくなるおそれがあるため。
+        let name = "vibepod-secretproject-abc123";
+        let state = "secret-state-value";
+        let line = format!("{name}\t{state}");
+
+        let err = parse_vibepod_container_line(&line).unwrap_err();
         let message = err.to_string();
 
-        // 診断情報としてフィールド数などの構造情報は含んでよい。
+        // 診断情報として期待フィールド数・実際のフィールド数は含んでよい。
         assert!(
-            message.contains("expected 3 tab-separated fields") && message.contains("got 2"),
-            "error message should describe the field-count mismatch, got: {:?}",
-            message
-        );
-        // 将来「入力行を埋め込んで診断を改善する」変更が入っても、行内容や
-        // コンテナ名（他プロジェクトの情報を含みうる）を漏らさないことを固定する。
-        assert!(
-            !message.contains(line),
-            "error message must not embed the raw input line, got: {:?}",
+            message.contains("expected 3 tab-separated fields"),
+            "error message should describe the expected field count, got: {:?}",
             message
         );
         assert!(
-            !message.contains("vibepod-secretproject-abc123"),
+            message.contains("got 2"),
+            "error message should describe the actual field count, got: {:?}",
+            message
+        );
+        // 将来「入力行やフィールドを埋め込んで診断を改善する」変更が入っても、
+        // name・state 個々のフィールドや行全体（他プロジェクトの情報を含みうる）を
+        // 漏らさないことを固定する。行全体の非包含だけでは、フィールド単体の
+        // 混入（例: state だけをエラーに埋め込む変更）を検出できないため、
+        // 各フィールドを個別に検証する。
+        assert!(
+            !message.contains(name),
             "error message must not embed the container name, got: {:?}",
+            message
+        );
+        assert!(
+            !message.contains(state),
+            "error message must not embed the state field, got: {:?}",
+            message
+        );
+        assert!(
+            !message.contains(line.as_str()),
+            "error message must not embed the raw input line, got: {:?}",
             message
         );
     }
