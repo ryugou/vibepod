@@ -718,6 +718,11 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         .iter()
         .any(|(_, name)| *name == "auth.json");
 
+    // `~/.claude/plugins/data` を per-container の書き込み可能ステージへ
+    // 差し替える準備。ラベル計算（直後の 9b ブロック）より前に済ませておく
+    // 必要がある — マーカーの有無をラベルの mounts_parts へ混ぜ込むため。
+    let plugins_data_stage = super::prepare_plugins_data_mount(&home, &runtime_dir)?;
+
     if let Some(stored_labels) = stored_labels_opt {
         let mut mounts_parts: Vec<String> = Vec::new();
         for arg in &opts.mount {
@@ -735,6 +740,9 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         // as "{host}:{container}".
         if host_settings_exists {
             mounts_parts.push(super::SANITIZED_SETTINGS_LABEL_MARKER.to_string());
+        }
+        if plugins_data_stage.is_some() {
+            mounts_parts.push(super::PLUGINS_DATA_MOUNT_LABEL_MARKER.to_string());
         }
 
         // Encode the FULL sorted lang_names set so reuse re-provisions
@@ -841,6 +849,14 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         extra_mounts.push((host, container));
     }
 
+    // `~/.claude/plugins/data` の rw ステージ。`extra_mounts` は
+    // `to_create_args()` で一律 `:ro` になるため、書き込みが必要なこちらは
+    // 別枠の `rw_mounts` に積む（9b で用意した `plugins_data_stage` を使う）。
+    let mut rw_mounts = Vec::new();
+    if let Some(ref stage) = plugins_data_stage {
+        rw_mounts.extend(super::plugins_data_mount_entries(stage, &home));
+    }
+
     // Normalize lang_names before storing in RunContext so downstream
     // consumers (build_config_labels, future readers) can trust the
     // invariant without re-normalizing. See RunContext field doc.
@@ -872,6 +888,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         store,
         deferred_session,
         extra_mounts,
+        rw_mounts,
         container_status,
         is_disposable,
         no_network: opts.no_network,

@@ -1,7 +1,7 @@
 use vibepod::cli::run::{
     build_claude_config_mounts, detect_languages, get_lang_install_cmd, parse_mount_arg,
-    plugins_mount_entries, prepare_sanitized_settings_mount, sanitize_settings_json,
-    validate_slack_channel_id,
+    plugins_data_mount_entries, plugins_mount_entries, prepare_plugins_data_mount,
+    prepare_sanitized_settings_mount, sanitize_settings_json, validate_slack_channel_id,
 };
 
 // --- detect_languages ---
@@ -254,6 +254,127 @@ fn test_claude_config_mounts_includes_plugins_via_helper() {
         2,
         "tempdir home should produce two plugin mounts, got {:?}",
         plugin_entries
+    );
+}
+
+// --- plugins_data_mount_entries ---
+//
+// `~/.claude/plugins` は read-only でマウントされるが、その内側の `data/`
+// サブディレクトリだけを per-container の書き込み可能ステージへ差し替える。
+// `plugins_mount_entries` と完全に対称な実装であるべきなので、同じ観点
+// （二重マウント / dedup）でテストする。
+
+#[test]
+fn test_plugins_data_mount_entries_non_colliding_home_returns_two() {
+    let home = std::path::PathBuf::from("/Users/alice");
+    let entries = plugins_data_mount_entries("/staged/plugins-data", &home);
+    assert_eq!(entries.len(), 2, "expected two entries, got {:?}", entries);
+    assert_eq!(
+        entries[0],
+        (
+            "/staged/plugins-data".to_string(),
+            "/home/vibepod/.claude/plugins/data".to_string(),
+        )
+    );
+    assert_eq!(
+        entries[1],
+        (
+            "/staged/plugins-data".to_string(),
+            "/Users/alice/.claude/plugins/data".to_string(),
+        )
+    );
+}
+
+#[test]
+fn test_plugins_data_mount_entries_colliding_home_dedupes_to_one() {
+    // ホスト HOME が /home/vibepod のとき、(1)(2) のコンテナ側パスが一致する
+    // ため 1 本だけ返す（docker run -v が同一マウント先を拒否するのを避ける）。
+    let home = std::path::PathBuf::from("/home/vibepod");
+    let entries = plugins_data_mount_entries("/staged/plugins-data", &home);
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected dedup to 1 entry, got {:?}",
+        entries
+    );
+    assert_eq!(
+        entries[0],
+        (
+            "/staged/plugins-data".to_string(),
+            "/home/vibepod/.claude/plugins/data".to_string(),
+        )
+    );
+}
+
+// --- prepare_plugins_data_mount ---
+//
+// ホストの plugins/data の内容はコピーしない（他プロジェクトの codex job
+// 履歴等を持ち込まないため）。ステージは常に空で作られる。
+
+#[test]
+fn test_prepare_plugins_data_mount_returns_none_when_plugins_dir_missing() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    // ~/.claude/plugins が存在しない（plugins 自体をマウントしないケース）
+
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
+
+    assert!(
+        result.is_none(),
+        "should return None when ~/.claude/plugins is absent"
+    );
+}
+
+#[test]
+fn test_prepare_plugins_data_mount_creates_host_dir_and_empty_stage() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home_dir.path().join(".claude/plugins")).unwrap();
+
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
+    let stage = result.expect("should return Some(stage) when ~/.claude/plugins exists");
+
+    let host_data_dir = home_dir.path().join(".claude/plugins/data");
+    assert!(
+        host_data_dir.is_dir(),
+        "host plugins/data mountpoint should be created (docker requires a real host dir \
+         to bind-mount into)"
+    );
+
+    let stage_path = std::path::PathBuf::from(&stage);
+    assert!(
+        stage_path.is_dir(),
+        "returned stage path must be a directory"
+    );
+    assert_eq!(stage_path, runtime_dir.path().join("plugins-data"));
+    assert_eq!(
+        std::fs::read_dir(&stage_path).unwrap().count(),
+        0,
+        "stage must be created empty (host content is not copied)"
+    );
+}
+
+#[test]
+fn test_prepare_plugins_data_mount_does_not_copy_existing_host_files() {
+    let home_dir = tempfile::tempdir().unwrap();
+    let runtime_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = home_dir.path().join(".claude/plugins/data");
+    std::fs::create_dir_all(host_data_dir.join("codex-openai-codex/state")).unwrap();
+    std::fs::write(
+        host_data_dir.join("codex-openai-codex/state/other-project-job.json"),
+        "SECRET_OTHER_PROJECT_DATA",
+    )
+    .unwrap();
+
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
+    let stage = result.expect("should return Some(stage)");
+    let stage_path = std::path::PathBuf::from(&stage);
+
+    assert_eq!(
+        std::fs::read_dir(&stage_path).unwrap().count(),
+        0,
+        "stage must not copy existing host plugins/data content (e.g. other projects' codex \
+         job history)"
     );
 }
 

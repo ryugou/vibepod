@@ -5,6 +5,12 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `~/.claude/plugins/data/` is now replaced by a per-container empty, writable stage instead of being carried in read-only. `~/.claude/plugins` is bind-mounted `:ro`, so plugins that write job/state data under `plugins/data/` (e.g. the codex plugin creating `data/codex-openai-codex/state/<workspace>/jobs`) always failed with `Read-only file system`, making in-container `codex` review unusable. The fix layers a read-write bind mount for `plugins/data/` inside the read-only `plugins/` mount (nested bind mounts can override their parent's mode); the writable directory is a fresh, empty per-container stage — host `plugins/data/` content (which may include other projects' codex job history) is never copied in, and container writes never propagate back to the host. Existing containers created before this fix are unaffected until recreated (`--new`); a new `vibepod.mounts` label marker ensures they are flagged as out of date rather than silently reused without the fix
+
 ## [1.9.0] - 2026-08-11
 
 ### Changed

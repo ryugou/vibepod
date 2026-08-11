@@ -461,6 +461,12 @@ pub(super) struct RunContext {
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
+    /// `~/.claude/plugins/data` の per-container 書き込み可能ステージ等、
+    /// `:ro` を付けずにマウントする必要があるエントリ。`extra_mounts` とは
+    /// 別枠で持つ（`extra_mounts` は `to_create_args()` で一律 `:ro` になる
+    /// ため）。`build_container_config` がそのまま `ContainerConfig.rw_mounts`
+    /// へ渡す。
+    pub(super) rw_mounts: Vec<(String, String)>,
     /// 既存コンテナの状態（prepare.rs で検出）
     pub(super) container_status: ContainerStatus,
     /// ワークツリーモード：実行後にコンテナを削除する
@@ -560,6 +566,17 @@ pub(super) const SANITIZED_SETTINGS_LABEL_MARKER: &str =
 /// 表現と衝突しないように専用 prefix を付けている
 /// （`SANITIZED_SETTINGS_LABEL_MARKER` と同じパターン）。
 pub(super) const CODEX_MOUNT_LABEL_MARKER: &str = "codex=/home/vibepod/.codex";
+
+/// ラベル中で「`~/.claude/plugins/data` を per-container の書き込み可能
+/// ステージへ差し替えている」ことを示すマーカー。bind mount はコンテナ
+/// 作成時に固定されるため、これをラベルに含めないと、この修正前に作られた
+/// 既存コンテナが「構成に差分なし」と判定され、rw マウントが無いまま
+/// 再利用されてしまう（既存コンテナは plugins/data が親の ro マウント内に
+/// 閉じたままで、codex plugin 等がコンテナ内で書き込みに失敗し続ける）。
+/// 形式が `host:container` の通常マウント表現と衝突しないように専用 prefix
+/// を付けている（`SANITIZED_SETTINGS_LABEL_MARKER` と同じパターン）。
+pub(super) const PLUGINS_DATA_MOUNT_LABEL_MARKER: &str =
+    "plugins_data_rw=/home/vibepod/.claude/plugins/data";
 
 /// `~/.claude/` 配下のグローバル設定ファイル・ディレクトリのマウント定義を構築する。
 /// 存在するもののみ含まれる。read-only でマウントされる。
@@ -677,6 +694,105 @@ pub fn plugins_mount_entries(plugins_host: &str, home: &std::path::Path) -> Vec<
         ));
     }
     entries
+}
+
+/// コンテナ内 Claude Code が `$HOME/.claude/plugins/data` として読むデフォルトパス。
+const DEFAULT_PLUGINS_DATA_CONTAINER_PATH: &str = "/home/vibepod/.claude/plugins/data";
+
+/// `~/.claude/plugins/data` に対応する rw マウントエントリを返す（ホスト側
+/// ステージの用意は呼び出し側 `prepare_plugins_data_mount` の責務）。
+///
+/// 親の `~/.claude/plugins` は read-only でマウントされる
+/// (`plugins_mount_entries`) が、codex plugin 等はその内側の `data/` 配下に
+/// ジョブ状態ディレクトリを作ろうとして必ず失敗する。この関数は `data/`
+/// サブディレクトリだけを per-container の書き込み可能ステージへ差し替える
+/// ためのマウントエントリを返す。`plugins_mount_entries` と完全に対称な実装
+/// にしている（二重マウントが必要な理由も同じ）:
+///
+/// 1. `/home/vibepod/.claude/plugins/data` — Claude Code が $HOME 経由で読む先
+/// 2. `<host_home>/.claude/plugins/data` — `installed_plugins.json` の
+///    `installPath` フィールドがホスト絶対パスを持つため、同じ絶対パスに
+///    再マウントして解決する
+///
+/// ホスト HOME が `/home/vibepod` の場合、(1) と (2) のコンテナ側パスが一致する
+/// ため (2) を追加せず 1 本だけ返す（docker run -v が同一マウント先を拒否する）。
+pub fn plugins_data_mount_entries(
+    stage_host: &str,
+    home: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut entries = Vec::with_capacity(2);
+    entries.push((
+        stage_host.to_string(),
+        DEFAULT_PLUGINS_DATA_CONTAINER_PATH.to_string(),
+    ));
+    let absolute_container = home.join(".claude").join("plugins").join("data");
+    if absolute_container != std::path::Path::new(DEFAULT_PLUGINS_DATA_CONTAINER_PATH) {
+        entries.push((
+            stage_host.to_string(),
+            absolute_container.to_string_lossy().to_string(),
+        ));
+    }
+    entries
+}
+
+/// `~/.claude/plugins/data` を per-container の空の書き込み可能ステージへ
+/// 差し替えるための準備を行う。
+///
+/// **背景**: `~/.claude/plugins` は read-only でコンテナへマウントされる
+/// (`build_claude_config_mounts` / `plugins_mount_entries`) が、codex plugin
+/// 等は `plugins/data/<...>/state/<workspace>/jobs` のようなジョブ状態
+/// ディレクトリを作ろうとして常に失敗する（親が ro のため）。かといって
+/// ホストの `plugins/data` 配下をそのまま rw でマウントすると、他プロジェクト
+/// の codex job 履歴等がそのままコンテナへ持ち込まれてしまう
+/// （`HOST_CLAUDE_ALLOWLIST` が `sessions/` `projects/` を意図的に除外して
+/// いるのと同じ理由で避けたい）。そこで、ホスト内容は一切コピーせず、
+/// per-container の**空の**ステージを用意してそこへ書き込ませる。
+///
+/// **挙動**:
+/// 1. `home/.claude/plugins` がディレクトリでなければ `Ok(None)`
+///    （plugins 自体をマウントしないケースであり、data の rw ステージも不要）。
+/// 2. ホスト側 mountpoint `home/.claude/plugins/data` を（無ければ）作成する。
+///    これは Claude Code 自身が作る標準ディレクトリであり、空で作成しても
+///    副作用がない。子ディレクトリへの bind mount は docker がホスト側に
+///    実体ディレクトリを要求するため必須の準備。**失敗してもビルド全体は
+///    落とさない** — codex plugin 等が書き込みに失敗し得る旨を stderr に
+///    警告したうえで `Ok(None)` を返す（rw マウントを諦めるだけで run 自体は
+///    継続できるため。CLAUDE.md: エラーを握りつぶさず運用者が次の判断を
+///    できる情報を出す）。
+/// 3. per-container ステージ `runtime_dir/plugins-data` を作成する
+///    （**空のまま。ホストの内容はコピーしない**）。こちらは vibepod が
+///    書き込み権限を持つはずの領域（`runtime_dir` 配下）の準備であり、
+///    失敗を握りつぶすと以後の run 準備が不整合な状態のまま進んでしまうため、
+///    `?` でそのまま呼び出し元へ伝播する。
+/// 4. ステージの絶対パス文字列を `Ok(Some(..))` で返す。
+pub fn prepare_plugins_data_mount(
+    home: &std::path::Path,
+    runtime_dir: &std::path::Path,
+) -> anyhow::Result<Option<String>> {
+    let plugins_dir = home.join(".claude").join("plugins");
+    if !plugins_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let host_data_dir = plugins_dir.join("data");
+    if let Err(e) = std::fs::create_dir_all(&host_data_dir) {
+        eprintln!(
+            "warning: failed to create {} ({e}); ~/.claude/plugins/data will remain read-only \
+             in the container, so plugins that write there (e.g. codex) may fail to write",
+            host_data_dir.display()
+        );
+        return Ok(None);
+    }
+
+    let stage_dir = runtime_dir.join("plugins-data");
+    std::fs::create_dir_all(&stage_dir).with_context(|| {
+        format!(
+            "Failed to create plugins/data stage directory {}",
+            stage_dir.display()
+        )
+    })?;
+
+    Ok(Some(stage_dir.to_string_lossy().to_string()))
 }
 
 /// ホストの `~/.claude/settings.json` を読み、コンテナに持ち込めない
@@ -1918,6 +2034,7 @@ pub(super) fn build_container_config(
         env_vars: ctx.resolved_env_vars.clone(),
         network_disabled: no_network,
         extra_mounts: ctx.extra_mounts.clone(),
+        rw_mounts: ctx.rw_mounts.clone(),
         labels: build_config_labels(ctx),
     }
 }

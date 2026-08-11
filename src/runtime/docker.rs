@@ -50,7 +50,19 @@ pub struct ContainerConfig {
     /// ユーザー環境変数（認証トークンを除く）
     pub env_vars: Vec<String>,
     pub network_disabled: bool,
+    /// `docker run -v host:container:ro` として付与するマウント。
+    /// `to_create_args()` が一律 `:ro` を付けるため、書き込みが必要な
+    /// マウントはここに入れず `rw_mounts` を使うこと。
     pub extra_mounts: Vec<(String, String)>,
+    /// `docker run -v host:container`（`:ro` なし）として付与する、
+    /// 書き込み可能なマウント。用途は per-container の書き込み可能ステージ
+    /// （例: `~/.claude/plugins/data`。親の `~/.claude/plugins` 自体は
+    /// `extra_mounts` 経由で read-only マウントされるが、その内側の
+    /// `data/` サブディレクトリだけをこちらで rw マウントして重ねることで、
+    /// codex plugin 等がジョブ状態ディレクトリを書き込めるようにする）。
+    /// `to_create_args()` で `extra_mounts` の**直後**に付与する。親（ro）→
+    /// 子（rw）の順序を守らないと、ネストしたマウントが正しく重ならない。
+    pub rw_mounts: Vec<(String, String)>,
     /// コンテナ作成時に付与するラベル（設定変更の検知に使用）
     pub labels: HashMap<String, String>,
 }
@@ -73,6 +85,14 @@ impl ContainerConfig {
         for (host, container) in &self.extra_mounts {
             args.push("-v".to_string());
             args.push(format!("{}:{}:ro", host, container));
+        }
+
+        // extra_mounts（親の ro マウント）の直後に付与する。ro マウントの
+        // 内側へ rw マウントを重ねる構成（plugins/data ステージ等）を想定
+        // しており、順序が逆だと重ならない。
+        for (host, container) in &self.rw_mounts {
+            args.push("-v".to_string());
+            args.push(format!("{}:{}", host, container));
         }
 
         if let Some(ref claude_json) = self.claude_json {

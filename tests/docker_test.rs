@@ -30,6 +30,7 @@ fn base_config() -> ContainerConfig {
         env_vars: vec![],
         network_disabled: false,
         extra_mounts: vec![],
+        rw_mounts: vec![],
         labels: HashMap::new(),
     }
 }
@@ -95,6 +96,38 @@ fn test_to_create_args_labels() {
     assert!(args.contains(&"--label".to_string()));
     let label_idx = args.iter().position(|a| a == "--label").unwrap();
     assert_eq!(args[label_idx + 1], "vibepod.lang=rust");
+}
+
+#[test]
+fn test_to_create_args_rw_mounts_no_ro_suffix_and_after_extra_mounts() {
+    // plugins/data の per-container rw ステージ用: `rw_mounts` は `:ro` を
+    // 付けず、かつ `extra_mounts`（親の ro マウント）より後ろに並ぶ必要が
+    // ある（「親 ro → 子 rw」の順序を保つため。子が先だと親の ro マウントが
+    // 後から重なって rw が隠れてしまう）。
+    let mut config = base_config();
+    config.extra_mounts = vec![("/host/ro".to_string(), "/container/ro".to_string())];
+    config.rw_mounts = vec![("/host/rw".to_string(), "/container/rw".to_string())];
+    let args = config.to_create_args();
+
+    let ro_idx = args
+        .iter()
+        .position(|a| a == "/host/ro:/container/ro:ro")
+        .expect("ro mount should be present with :ro suffix");
+    let rw_idx = args
+        .iter()
+        .position(|a| a == "/host/rw:/container/rw")
+        .expect("rw mount should be present without :ro suffix");
+
+    assert!(
+        !args.contains(&"/host/rw:/container/rw:ro".to_string()),
+        "rw_mounts entries must not be suffixed with :ro: {:?}",
+        args
+    );
+    assert!(
+        rw_idx > ro_idx,
+        "rw_mounts must be appended after extra_mounts (parent ro before child rw): {:?}",
+        args
+    );
 }
 
 #[test]
