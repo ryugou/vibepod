@@ -8,15 +8,19 @@ pub async fn execute() -> Result<()> {
     println!("\n  ┌  VibePod Login");
     println!("  │");
 
-    // `vibepod login` は対話ストリームを 2 つ必要とする。stdin は
-    // `auth::run_setup_token`（`src/auth.rs`）が `docker exec -it` で
-    // OAuth フローを実行する際にホストの端末へ接続するために使い、
-    // stderr は既存トークンの上書き確認 `dialoguer::Confirm`
-    // （`Term::stderr()` を使う）が使う。どちらか一方でも非 TTY だと、
-    // stdin 側は `docker exec -it` が `the input device is not a TTY` で
-    // 落ち、stderr 側は確認プロンプトが出せない。両方を満たさない限り
-    // このコマンドは完走できないため、コマンド全体の前提条件として
-    // ここで 1 回だけ AND 条件で判定する。
+    // `vibepod login` は対話コマンドとして、常に対話端末（stdin と stderr の
+    // 両方が TTY であること）を要求する（製品判断）。
+    //
+    // 技術的な必要性は非対称: stdin は `auth::run_setup_token`
+    // （`src/auth.rs`）が `docker exec -it` で OAuth フローを実行する際に
+    // ホストの端末へ接続するため常に必要。stderr は既存の有効なトークンが
+    // ある場合の上書き確認 `dialoguer::Confirm`（`Term::stderr()` を使う）
+    // でのみ技術的に必要になり、トークンが無い・期限切れの場合はこの
+    // プロンプト自体が実行されない。
+    //
+    // それでもここでは既存トークンの有無で判定を分岐せず、常に両方を
+    // AND 条件で要求する。前提条件を単純に保つための意図的な選択であり、
+    // 詳細と理由は `ensure_interactive_terminal` の doc コメントを参照。
     ensure_interactive_terminal(
         std::io::IsTerminal::is_terminal(&std::io::stdin()),
         std::io::IsTerminal::is_terminal(&std::io::stderr()),
@@ -87,15 +91,26 @@ pub async fn execute() -> Result<()> {
 ///
 /// `login` だけは stdin と stderr の**両方**が TTY であることを AND 条件
 /// で要求する。他のコマンド（`init.rs` / `restore.rs`）が stderr のみを
-/// 判定しているのとは異なる特殊なケースであり、理由は次のとおり：
+/// 判定しているのとは異なる特殊なケースである。
 ///
-/// - stdin: `auth::run_setup_token`（`src/auth.rs`）が OAuth フローを
-///   `docker exec -it` で実行する際、ホストの `stdin` をコンテナへ接続する
-///   （`.stdin(Stdio::inherit())`）。stdin が非 TTY だと `docker exec -it`
-///   が `the input device is not a TTY` で失敗する。
-/// - stderr: 既存トークンの上書き確認に使う `dialoguer::Confirm` は
-///   `Term::stderr()` を使って対話する。stderr が非 TTY だと確認プロンプト
-///   を出せない。
+/// 技術的な必要性は次のとおり非対称:
+///
+/// - stdin: 常に必要。`auth::run_setup_token`（`src/auth.rs`）が OAuth
+///   フローを `docker exec -it` で実行する際、ホストの `stdin` をコンテナ
+///   へ接続する（`.stdin(Stdio::inherit())`）。stdin が非 TTY だと
+///   `docker exec -it` が `the input device is not a TTY` で失敗する。
+/// - stderr: 有効な既存トークンがあり、上書き確認 `dialoguer::Confirm`
+///   （`Term::stderr()` を使う）を実行するときにだけ技術的に必要になる。
+///   トークンが無い、または期限切れの場合は Confirm 自体が実行されない
+///   ため、stderr が非 TTY でも OAuth フローは技術的には完走できる。
+///
+/// にもかかわらずこの関数は既存トークンの有無で判定を分岐せず、常に
+/// 両方を要求する。これは技術的制約ではなく製品判断である。
+/// `vibepod login` は対話コマンドという前提を単純に保ち、
+/// 「上書き確認が必要か」を判定入力に混ぜて分岐とテストを倍増させない
+/// 選択をしている。`vibepod login 2>login.log`（ブラウザで OAuth 認証
+/// しながら stderr だけリダイレクトする）のような運用は実運用でほぼ
+/// 発生せず、判定を分岐する複雑さに見合わないため。
 ///
 /// `init.rs` / `restore.rs` は `dialoguer` のみを使い `docker exec -it` を
 /// 使わないため stderr のみの判定で正しい。`login` を書き換える際にこの
@@ -107,12 +122,13 @@ fn ensure_interactive_terminal(stdin_is_terminal: bool, stderr_is_terminal: bool
     } else {
         bail!(
             "vibepod login requires an interactive terminal.\n  \
-             The OAuth token setup runs `claude setup-token` inside the container via \
-             `docker exec -it`, which requires stdin to be a real terminal. Confirming \
-             an existing token's overwrite uses a stderr-based prompt, which requires \
-             stderr to be a real terminal too. Both are required regardless of whether \
-             an existing token is present, so this run is being aborted before starting \
-             the container.\n  \
+             `vibepod login` is an interactive command by design. The OAuth token setup \
+             runs `claude setup-token` inside the container via `docker exec -it`, which \
+             always requires stdin to be a real terminal. Confirming an existing token's \
+             overwrite uses a stderr-based prompt, which is only technically needed when \
+             a valid token already exists -- but this command intentionally requires both \
+             stdin and stderr to be real terminals regardless, to keep its precondition \
+             simple. This run is being aborted before starting the container.\n  \
              Re-run `vibepod login` from an interactive terminal."
         )
     }
