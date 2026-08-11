@@ -182,12 +182,15 @@ image = "vibepod-claude:latest"
    - **running**: そのまま `docker exec` で Claude 起動（並行 exec）
 5. Ctrl+C で exec セッション終了（コンテナは停止せず保持。`vibepod stop` / `vibepod rm` で明示的に管理）
 
+> **プロジェクト登録の非対話時の挙動（手順 3）：** 未登録のプロジェクトで `vibepod run` を実行した場合、対話端末では登録確認プロンプトを表示する。非対話環境（stderr が TTY でない、または `--prompt` / `--prompt-file` / `--resume` 指定時）では確認を出せないため、自動的に登録して続行する。自動登録時に stderr への警告出力を行うかどうかは経路によって異なる：`--prompt` / `--prompt-file` / `--resume` 指定時はそもそもプロンプトを出さない経路であり、従来どおり警告なしで自動登録する（`--prompt-file` は `execute()` 冒頭（`src/cli/run/mod.rs`）で読み込まれ `opts.prompt` に変換されるため、以降は `--prompt` と同一経路を通る）。`--prompt` / `--prompt-file` / `--resume` を指定しておらず、かつ stderr が TTY でない場合は、本来プロンプトを出すはずだった経路のため、自動登録したことを stderr へ 1 行出力して可視化する。
+
 **CLI オプション：**
 
 | オプション | 説明 |
 |-----------|------|
 | `--resume` | 前回のセッションを引き継ぐ（Claude Code に渡す） |
 | `--prompt "..."` | 初期プロンプトを指定（Claude Code に `-p` フラグとして渡す） |
+| `--prompt-file <path>` | 初期プロンプトをファイルから読む。内容は無加工で `--prompt` と同じ経路へ渡る（`--prompt` と排他） |
 | `--no-network` | コンテナのネットワークを無効化する（`npm install` 等も不可になる点に注意） |
 | `--env KEY=VALUE` | コンテナに環境変数を渡す（複数指定可。例: `--env ANTHROPIC_API_KEY=sk-...`） |
 | `--env-file <path>` | 環境変数ファイル（`op://` 参照は 1Password CLI で解決） |
@@ -244,6 +247,10 @@ plugins の二重マウントは、`installed_plugins.json` の `installPath` �
 - ホスト側の OAuth セッションとは独立したトークン（競合しない）
 - 複数コンテナで同じトークンを同時使用可能
 - credentials ファイルのマウント不要
+
+**非対話環境での挙動：** `vibepod login` は対話コマンドであり、常に対話端末（stdin と stderr の両方が TTY であること）を要求する。技術的な必要性は非対称で、stdin は `docker exec -it` で `claude setup-token` をコンテナ内実行するため常に必要だが、stderr は既存の有効なトークンがある場合の上書き確認（`dialoguer::Confirm` / `Term::stderr()`）でのみ必要になり、トークンが無い・期限切れの場合はこのプロンプト自体が実行されない。それでも判定はトークンの有無で分岐させず、常に両方の TTY を要求する — コマンドの前提条件を単純に保つための意図的な製品判断であり、`login 2>login.log` のように stderr だけを非対話化する運用は実運用でほぼ発生しないため、分岐の複雑さに見合わない。stdin と stderr のいずれかが TTY でない非対話環境では実行前にエラーで中断する。フォールバックはせず、対話端末から再実行する。
+
+`vibepod restore` もセッション選択と複数の破壊的操作の確認（ブランチ不一致・force restore・最終確認）を伴うため、同様に対話端末を前提とする。非対話環境（stderr が TTY でない）で実行した場合は、実際の復元処理に入る前の入口でエラーとなり中断する。フォールバックはせず、対話端末からの再実行を促す。
 
 マウントしないもの（セキュリティ）：
 

@@ -106,6 +106,34 @@ pub fn build_claude_args(
     claude_args
 }
 
+/// 非対話環境でも `vibepod run` を落とさないための、プロジェクト登録確認の
+/// 判定。`src/cli/init.rs` の `resolve_agent` / `container_removal_decision`
+/// と同じパターンで、docker を呼ばず TTY 判定と登録状態だけに依存する分岐を
+/// `prepare_context` から切り出してユニットテストできるようにしている。
+#[derive(Debug, PartialEq, Eq)]
+enum ProjectRegistrationDecision {
+    /// 既に登録済みなので何もしない。
+    Skip,
+    /// `dialoguer::Confirm` で確認を取ってから決める。
+    Confirm,
+    /// 確認を出せない（非対話、または stderr が TTY でない）ため自動登録する。
+    AutoRegister,
+}
+
+fn project_registration_decision(
+    already_registered: bool,
+    interactive: bool,
+    stderr_is_terminal: bool,
+) -> ProjectRegistrationDecision {
+    if already_registered {
+        ProjectRegistrationDecision::Skip
+    } else if interactive && stderr_is_terminal {
+        ProjectRegistrationDecision::Confirm
+    } else {
+        ProjectRegistrationDecision::AutoRegister
+    }
+}
+
 /// プロジェクトパスの SHA256 先頭 8 文字（hex）を返す。
 fn path_hash_8(path: &str) -> String {
     let hash = Sha256::digest(path.as_bytes());
@@ -529,16 +557,38 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     };
 
     // 6. Project registration
+    //
+    // dialoguer の `Confirm` は `Term::stderr()` を使って対話するため
+    // （`src/cli/init.rs` の `execute` と同じ理由）、`interactive`（UX 上の
+    // フラグ。`!opts.resume && opts.prompt.is_none()`）だけでなく stderr の
+    // TTY 判定も見る。`interactive` が true でも stderr が TTY でない環境
+    // （CI・パイプ経由の `vibepod run` 等）では確認プロンプトを出さず、
+    // 既存の非対話パス（自動登録）へ倒す。
+    let stderr_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let mut projects = config::load_projects(&config_dir)?;
-    let should_register = if !config::is_project_registered(&projects, &cwd_str) {
-        if interactive {
-            prompts::confirm_project_registration(&project_name)?
-        } else {
-            true // Auto-register in non-interactive mode
-        }
-    } else {
-        false
-    };
+    let already_registered = config::is_project_registered(&projects, &cwd_str);
+    let should_register =
+        match project_registration_decision(already_registered, interactive, stderr_is_terminal) {
+            ProjectRegistrationDecision::Skip => false,
+            ProjectRegistrationDecision::Confirm => {
+                prompts::confirm_project_registration(&project_name)?
+            }
+            ProjectRegistrationDecision::AutoRegister => {
+                // `interactive` は true（対話プロンプトを出す想定）だったのに
+                // stderr が TTY でないために黙って自動登録へ倒した場合だけ警告する。
+                // `interactive` が最初から false（`--resume` / `--prompt` 指定）の
+                // 場合は元々確認プロンプトを出さない設計であり、新たな挙動変更では
+                // ないため警告しない。
+                if interactive && !stderr_is_terminal {
+                    eprintln!(
+                        "  Warning: No interactive terminal detected; auto-registering project \
+                     '{}' (non-interactive mode).",
+                        project_name
+                    );
+                }
+                true
+            }
+        };
     if should_register {
         config::register_project(
             &mut projects,
@@ -834,6 +884,52 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #68: 非対話（`--resume` / `--prompt` 指定）かつ未登録なら自動登録する。
+    #[test]
+    fn project_registration_decision_non_interactive_unregistered_auto_registers() {
+        assert_eq!(
+            project_registration_decision(false, false, true),
+            ProjectRegistrationDecision::AutoRegister
+        );
+        assert_eq!(
+            project_registration_decision(false, false, false),
+            ProjectRegistrationDecision::AutoRegister
+        );
+    }
+
+    // Issue #68: 対話（`interactive` = true）かつ stderr が TTY かつ未登録なら
+    // プロンプトへ進む。
+    #[test]
+    fn project_registration_decision_interactive_tty_unregistered_confirms() {
+        assert_eq!(
+            project_registration_decision(false, true, true),
+            ProjectRegistrationDecision::Confirm
+        );
+    }
+
+    // Issue #68: `interactive` = true でも stderr が TTY でなければ
+    // （dialoguer がクラッシュするため）プロンプトを出さず自動登録へ倒す。
+    #[test]
+    fn project_registration_decision_interactive_non_tty_unregistered_auto_registers() {
+        assert_eq!(
+            project_registration_decision(false, true, false),
+            ProjectRegistrationDecision::AutoRegister
+        );
+    }
+
+    // 登録済みなら interactive / TTY の組み合わせによらず何もしない。
+    #[test]
+    fn project_registration_decision_already_registered_skips_regardless() {
+        for interactive in [true, false] {
+            for stderr_is_terminal in [true, false] {
+                assert_eq!(
+                    project_registration_decision(true, interactive, stderr_is_terminal),
+                    ProjectRegistrationDecision::Skip
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_normalize_mounts_label_legacy_rewrites_old_marker() {

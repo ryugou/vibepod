@@ -6,6 +6,17 @@ use crate::report;
 use crate::session::SessionStore;
 
 pub fn execute() -> Result<()> {
+    // 0. Interactive terminal check
+    //
+    // dialoguer の `Select`/`Confirm` は `Term::stderr()` を使って対話する
+    // （`src/cli/init.rs` の `execute` と同じ理由）ため、実際の復元処理へ
+    // 入る前に stderr の TTY を 1 回だけ確認する。`restore` はセッション選択
+    // （どのセッションを復元するか）と複数の破壊的操作の確認（ブランチ不一致
+    // ・force restore・最終確認）を伴い、いずれも非対話で自動的に決めてよい
+    // 性質のものではないため、フォールバックはせずここで中断する。4 箇所の
+    // 呼び出し点それぞれに判定を散らさず、入口で 1 回だけ判定する。
+    ensure_interactive(std::io::IsTerminal::is_terminal(&std::io::stderr()))?;
+
     let cwd = std::env::current_dir()?;
 
     // 1. Git repo check
@@ -186,4 +197,43 @@ pub fn execute() -> Result<()> {
     println!("  └\n");
 
     Ok(())
+}
+
+/// 対話端末が必要かどうかの判定。docker や dialoguer を呼ばず TTY 判定だけに
+/// 依存する分岐なので、`execute` から切り出してユニットテストできるように
+/// している（`src/cli/init.rs` の `auto_build_decision` と同じパターン）。
+/// stderr が TTY でなければ、4 箇所ある `dialoguer` の呼び出し（セッション
+/// 選択・ブランチ不一致確認・force restore 確認・最終確認）のいずれにも
+/// 到達させず、ここで中断する。
+fn ensure_interactive(stderr_is_terminal: bool) -> Result<()> {
+    if stderr_is_terminal {
+        Ok(())
+    } else {
+        bail!(
+            "vibepod restore requires an interactive terminal: it needs to prompt for which \
+             session to restore and to confirm potentially destructive actions (branch \
+             mismatch, force restore, and the final overwrite confirmation), but stderr is not \
+             a terminal.\n  \
+             Re-run `vibepod restore` from an interactive terminal."
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Issue #68: 非 TTY はエラーで中断する。
+    #[test]
+    fn ensure_interactive_non_terminal_errors() {
+        assert!(ensure_interactive(false).is_err());
+    }
+
+    #[test]
+    fn ensure_interactive_terminal_ok() {
+        assert!(ensure_interactive(true).is_ok());
+    }
+
+    // `dialoguer` を実際に呼ぶ 4 箇所（セッション選択・各種確認）は対話端末が
+    // 前提のためユニットテスト不可であり、対象外とする。
 }
