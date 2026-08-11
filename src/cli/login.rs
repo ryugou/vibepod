@@ -8,6 +8,16 @@ pub async fn execute() -> Result<()> {
     println!("\n  ┌  VibePod Login");
     println!("  │");
 
+    // トークン取得の実体である `auth::run_setup_token`（`src/auth.rs`）は、
+    // OAuth フローを `docker exec -it` で実行し、`stdin` もホストの端末へ
+    // 接続する（`src/auth.rs` の該当箇所）。`docker exec -it` は TTY が無い
+    // 環境では `the input device is not a TTY` で失敗するため、既存トークン
+    // の有無にかかわらずこのコマンドは非 TTY 環境では完走できない。上書き
+    // 確認だけをガードしても、トークンが無い場合は docker 由来の分かりにくい
+    // エラーで落ちてしまうため、コマンド全体の前提条件としてここで 1 回だけ
+    // 判定する。
+    ensure_interactive_terminal(std::io::IsTerminal::is_terminal(&std::io::stderr()))?;
+
     let runtime = DockerRuntime::new()
         .await
         .context("Docker is not running. Please start Docker Desktop or OrbStack.")?;
@@ -32,14 +42,6 @@ pub async fn execute() -> Result<()> {
                     .map(|dt| dt.format("%Y-%m-%d").to_string())
                     .unwrap_or_else(|_| existing.expires_at.clone())
             );
-            // dialoguer の `Confirm` は `Term::stderr()` を使って対話するため
-            // （`src/cli/init.rs` の `execute` と同じ理由）、上書き確認を出す前に
-            // stderr の TTY を確認する。`vibepod login` は OAuth フローで対話が
-            // 本質的に必要なコマンドであり、自動で「はい」と答えてトークンを
-            // 上書きするのは許容できないため、非 TTY ではフォールバックせず
-            // エラーで中断する。既存トークンが無い経路にはこの確認プロンプトが
-            // 無いため、この関数は呼ばれず非 TTY でも問題なく完走する。
-            ensure_overwrite_confirmable(std::io::IsTerminal::is_terminal(&std::io::stderr()))?;
             if !dialoguer::Confirm::new()
                 .with_prompt("  Overwrite?")
                 .default(false)
@@ -74,23 +76,24 @@ pub async fn execute() -> Result<()> {
     Ok(())
 }
 
-/// 既存トークンの上書き確認を出せるかどうかの判定。docker や dialoguer を
-/// 呼ばず TTY 判定だけに依存する分岐なので、`execute` から切り出して
-/// ユニットテストできるようにしている（`src/cli/init.rs` の
-/// `auto_build_decision` と同じパターン）。stderr が TTY でなければ
-/// `dialoguer::Confirm` を呼ばずにここで中断する。
-fn ensure_overwrite_confirmable(stderr_is_terminal: bool) -> Result<()> {
+/// `vibepod login` 全体の前提条件（対話端末が必要）の判定。docker や
+/// dialoguer を呼ばず TTY 判定だけに依存する分岐なので、`execute` から
+/// 切り出してユニットテストできるようにしている（`src/cli/init.rs` の
+/// `auto_build_decision` と同じパターン）。stderr が TTY でなければ、
+/// 上書き確認の `dialoguer::Confirm` はもちろん、その先にある
+/// `auth::run_setup_token`（`docker exec -it` で OAuth フローを実行する）
+/// にも到達させず、ここで中断する。
+fn ensure_interactive_terminal(stderr_is_terminal: bool) -> Result<()> {
     if stderr_is_terminal {
         Ok(())
     } else {
         bail!(
-            "vibepod login requires an interactive terminal to confirm overwriting the \
-             existing token.\n  \
-             An existing token was found, and overwriting it requires a confirmation that \
-             cannot be obtained because stderr is not a terminal, so this run is being \
-             aborted without touching the existing token.\n  \
-             Re-run `vibepod login` from an interactive terminal, or run `vibepod logout` \
-             first to remove the existing token and then re-run `vibepod login`."
+            "vibepod login requires an interactive terminal.\n  \
+             The OAuth token setup runs `claude setup-token` inside the container via \
+             `docker exec -it`, which needs a real terminal for both input and output \
+             regardless of whether an existing token is present, so this run is being \
+             aborted before starting the container.\n  \
+             Re-run `vibepod login` from an interactive terminal."
         )
     }
 }
@@ -99,20 +102,15 @@ fn ensure_overwrite_confirmable(stderr_is_terminal: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    // Issue #68: 非 TTY かつ既存トークンあり（＝この関数が呼ばれる経路）は
-    // エラーで中断する。
+    // Issue #68: 非 TTY はエラーで中断する（既存トークンの有無に関係なく、
+    // OAuth フロー自体が `docker exec -it` を使うため）。
     #[test]
-    fn ensure_overwrite_confirmable_non_terminal_errors() {
-        assert!(ensure_overwrite_confirmable(false).is_err());
+    fn ensure_interactive_terminal_non_terminal_errors() {
+        assert!(ensure_interactive_terminal(false).is_err());
     }
 
     #[test]
-    fn ensure_overwrite_confirmable_terminal_ok() {
-        assert!(ensure_overwrite_confirmable(true).is_ok());
+    fn ensure_interactive_terminal_terminal_ok() {
+        assert!(ensure_interactive_terminal(true).is_ok());
     }
-
-    // 非 TTY かつ既存トークンなしのケース: `execute` はこの関数を一切呼ばず、
-    // 確認プロンプトの無い経路をそのまま通るため正常継続する。この経路は
-    // `dialoguer` を実際に呼ぶ分岐ではなくトークン読み込み結果（`AuthManager`
-    // 経由でファイルI/Oが絡む）に依存するため、ユニットテストの対象外とする。
 }
