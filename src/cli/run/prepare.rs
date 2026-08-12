@@ -731,7 +731,20 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // `~/.claude/plugins/data` を per-container の書き込み可能ステージへ
     // 差し替える準備。ラベル計算（直後の 9b ブロック）より前に済ませておく
     // 必要がある — マーカーの有無をラベルの mounts_parts へ混ぜ込むため。
-    let plugins_data_stage = super::prepare_plugins_data_mount(&home, &runtime_dir)?;
+    //
+    // `reset_stage` は「これからコンテナを新規作成するか」を
+    // `container_status == ContainerStatus::None`（4. で `--new` の処理まで
+    // 済ませた後の最終値）で判定する。`--new` も `vibepod rm` も「コンテナを
+    // 消す」だけで `runtime/<container>/` を残すため、`--new` フラグそのもの
+    // ではなく「コンテナが存在しない＝これから作る」という状態で判定すると、
+    // 両経路と初回作成をまとめて正しく扱える。逆に既存コンテナを再利用する
+    // run では、コンテナ内のプラグインが書いたジョブ状態を消してはならない
+    // （実行中の状態を壊すため）ので false になる。
+    let plugins_data_stage = super::prepare_plugins_data_mount(
+        &home,
+        &runtime_dir,
+        container_status == ContainerStatus::None,
+    )?;
 
     if let Some(stored_labels) = stored_labels_opt {
         // 9b: 既存コンテナと比較する現在値の vibepod.mounts を組み立てる。

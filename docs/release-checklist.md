@@ -76,8 +76,11 @@
 実機で毎回確認する。
 
 - [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/data/.probe` が成功する（親 ro マウント内の子 rw マウントが機能している）
-- [ ] `docker exec <container> ls /home/vibepod/.claude/plugins/data` にホストの `~/.claude/plugins/data` の内容（他プロジェクトの codex job 履歴等）が見えない
+- [ ] `docker exec <container> touch <ホストの $HOME>/.claude/plugins/data/.probe` も成功する（`plugins_data_mount_entries` が返すもう一方のマウント先＝ホスト絶対パス側でも rw になっている）
+- [ ] 事前にホスト側 `~/.claude/plugins/data/` に一意な名前のファイル（例: `vibepod-host-sentinel-<日付>`）を作っておき、`docker exec <container> ls /home/vibepod/.claude/plugins/data` にそれが**現れない**（ホストの `~/.claude/plugins/data` の内容、他プロジェクトの codex job 履歴等が見えない）
+- [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/data/vibepod-container-write-probe` の後、ホストの `~/.claude/plugins/data/` に `vibepod-container-write-probe` が**現れない**（コンテナ内の書き込みがホストへ汚染しない）
 - [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/.probe` が read-only で失敗する（親の ro が維持されている）
+- [ ] コンテナを新規作成（`vibepod run --new`）した直後、`docker exec <container> ls -A /home/vibepod/.claude/plugins/data` が空である（per-container ステージは新規作成のたびに必ず空という不変条件の確認）
 
 ### ps / logs
 

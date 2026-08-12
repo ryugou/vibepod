@@ -765,30 +765,41 @@ pub fn plugins_data_mount_entries(
 ///    stderr に警告したうえで `Ok(None)` を返す（rw マウントを諦めるだけで
 ///    run 自体は継続できるため。CLAUDE.md: エラーを握りつぶさず運用者が
 ///    次の判断をできる情報を出す）。
-/// 3. per-container ステージ `runtime_dir/plugins-data` を作成し、Unix では
-///    パーミッションを `0700` に設定する（**空のまま。ホストの内容はコピー
-///    しない**）。ここにはコンテナ内 codex plugin のジョブ状態（プロンプト・
-///    レビュー出力＝ソースコード断片を含みうる）が書き込まれるため、
-///    `sync_codex_entries_into` が codex ステージに対して行っているのと同じ
-///    パーミッション制御に揃えている。こちらは vibepod が書き込み権限を
-///    持つはずの領域（`runtime_dir` 配下）の準備であり、失敗を握りつぶすと
-///    以後の run 準備が不整合な状態のまま進んでしまうため、`?` でそのまま
-///    呼び出し元へ伝播する。
-/// 4. ステージの絶対パス文字列を `Ok(Some(..))` で返す。
+/// 3. `reset_stage` が `true` かつ `runtime_dir/plugins-data` が既に存在する
+///    場合、`create_dir_all` の前にそれを丸ごと `remove_dir_all` する（詳細は
+///    下記「ライフサイクル」）。これも vibepod が書き込み権限を持つはずの
+///    領域の操作であり、失敗を握りつぶさず `?` で呼び出し元へ伝播する。
+/// 4. per-container ステージ `runtime_dir/plugins-data` を作成し、Unix では
+///    パーミッションを `0700` に設定する。ここにはコンテナ内 codex plugin
+///    のジョブ状態（プロンプト・レビュー出力＝ソースコード断片を含みうる）
+///    が書き込まれるため、`sync_codex_entries_into` が codex ステージに
+///    対して行っているのと同じパーミッション制御に揃えている（既存ディレクトリ
+///    再利用時、すなわち `reset_stage = false` のときも毎回矯正する）。
+///    こちらも vibepod が書き込み権限を持つはずの領域（`runtime_dir` 配下）の
+///    準備であり、失敗を握りつぶすと以後の run 準備が不整合な状態のまま
+///    進んでしまうため、`?` でそのまま呼び出し元へ伝播する。
+/// 5. ステージの絶対パス文字列を `Ok(Some(..))` で返す。
 ///
-/// **ライフサイクル**（実装は変えず、ここに明記する）:
-/// - ステージは作成時点では常に**空**。ホストの `plugins/data` の内容は
-///   一切コピーしない（上記の通り）。
-/// - **`--new` でコンテナを作り直しても、このステージ（`runtime_dir` 配下）
-///   自体は削除されない**。`--new` はコンテナのみを破棄して作り直す経路で
-///   あり、`runtime_dir` の削除は担わないため、前回 run までにステージへ
-///   書き込まれた内容（codex のジョブ状態等）はそのまま新しいコンテナに
-///   引き継がれる。「空のステージ」という説明は初回作成時のみを指す。
+/// **ライフサイクル**:
+/// - **不変条件: per-container ステージは、コンテナが新規作成されるときは
+///   必ず空である。** `reset_stage` 引数がこれを担う — `true` のときは
+///   `create_dir_all` の前に既存ステージを丸ごと削除してから作り直し、
+///   `false` のときは既存内容を保持したまま（無ければ新規作成して）返す。
+///   `--new` はコンテナのみを破棄して `runtime_dir` は残し、`vibepod rm`
+///   も同様にコンテナだけを消して `runtime/<container>/` を残すため、
+///   「`--new` フラグそのもの」では判定できない。呼び出し側
+///   (`prepare_context`)は「コンテナが存在しない＝これから新規作成する」
+///   （`ContainerStatus::None`）を条件に `reset_stage` を決めており、これで
+///   `--new` 経由の再作成・`rm` 後の再作成・初回作成のすべてを一つの判定に
+///   まとめて正しく扱える。既存コンテナを再利用する run では `reset_stage`
+///   が `false` になり、コンテナ内のプラグインが書いたジョブ状態（実行中の
+///   状態）を消さない。
 /// - disposable な `--worktree` 実行では、実行終了時に `runtime_dir` ごと
 ///   削除され、このステージも消える。
 pub fn prepare_plugins_data_mount(
     home: &std::path::Path,
     runtime_dir: &std::path::Path,
+    reset_stage: bool,
 ) -> anyhow::Result<Option<String>> {
     let plugins_dir = home.join(".claude").join("plugins");
     if !plugins_dir.is_dir() {
@@ -818,6 +829,21 @@ pub fn prepare_plugins_data_mount(
     }
 
     let stage_dir = runtime_dir.join("plugins-data");
+    // 不変条件「ステージはコンテナ新規作成時に必ず空」を守る: 新規作成が
+    // 確定している呼び出し（`reset_stage == true`）でのみ、既存ステージを
+    // 丸ごと消してから作り直す。`stage_dir` は `runtime_dir` 配下＝vibepod
+    // 自身が所有する領域のため、削除に失敗するのは異常事態であり、握り
+    // つぶさず `?` で伝播する（CLAUDE.md: エラーを握りつぶさず運用者が
+    // 次の判断をできる情報を出す）。
+    if reset_stage && stage_dir.exists() {
+        std::fs::remove_dir_all(&stage_dir).with_context(|| {
+            format!(
+                "Failed to remove stale plugins/data stage directory {} before creating a new \
+                 container",
+                stage_dir.display()
+            )
+        })?;
+    }
     std::fs::create_dir_all(&stage_dir).with_context(|| {
         format!(
             "Failed to create plugins/data stage directory {}",
