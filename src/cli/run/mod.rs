@@ -819,8 +819,9 @@ pub fn prepare_plugins_data_mount(
         // 維持することが求められている）。ただし黙って諦めると運用者が
         // 気づけないため、復旧コマンドと「この修正前に作られた既存コンテナは
         // 再作成しても改善しない」旨を明示する — マーカーがラベルに載らない
-        // ため `warn_config_changes` の構成差分検出も効かず、警告すら二度と
-        // 出なくなるのが本当に危険な点である。ユーザー向けメッセージでは、
+        // ため、この修正より前に作られたコンテナについては `warn_config_changes`
+        // の構成差分検出も効かず、警告すら二度と出なくなるのが本当に危険な
+        // 点である。ユーザー向けメッセージでは、
         // 「`--new` が壊れている」と誤読されないよう、`--new` 自体は機能する
         // が前提条件（ホスト側ディレクトリの存在）が満たされていないために
         // 効かない、という因果関係を伝える。
@@ -831,9 +832,9 @@ pub fn prepare_plugins_data_mount(
              To fix: mkdir -p {}, then run vibepod again.\n\
              Note: recreating the container with `vibepod run --new` does not help by itself — \
              the writable stage can only be mounted once the host directory above exists. \
-             Because the `plugins_data_rw` marker is never recorded on the container's label \
-             in this state, vibepod's configuration-change detection cannot surface this \
-             problem either — this warning is the only place you will learn about it.",
+             No `plugins_data_rw` marker is recorded on the container's label while the \
+             directory is missing, so a container created before this fix will not be \
+             reported as configuration-changed either — this warning may be your only signal.",
             host_data_dir.display(),
             host_data_dir.display()
         );
