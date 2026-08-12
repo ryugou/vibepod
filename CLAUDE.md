@@ -5,6 +5,33 @@
 - コミット前に必ず `cargo fmt` を実行すること。CI で `cargo fmt --check` が走るため、フォーマットが崩れていると CI が落ちる
 - `cargo clippy` の警告も解消すること
 
+## 開発フロー（vibepod 専用）
+
+グローバルのレビューフロー（kaneko 実装 → reviewer 一次レビュー → codex → PR 作成 → CI + Copilot レビュー）に加え、
+**Copilot レビューの指摘をすべて解消した後、実機での動作確認を必ず行う**。
+
+vibepod は Docker マウント・TTY・認証注入など「ユニットテストで検証できない層」に不具合が集中する。
+`cargo test` と CI が green でも実機で壊れている事例が繰り返し発生しているため、この工程を省略しない。
+「マウント定義を 1 行変えただけ」も例外としない。
+
+### 手順
+
+1. Copilot レビューの指摘対応が完了し、CI が全て green であることを確認する
+2. `cargo build --release` でバイナリを作る
+3. Dockerfile / イメージ内容に変更がある場合のみ `./target/release/vibepod init --rebuild` を実行する
+4. **修正対象の症状を実機で再現・解消確認する**。修正前に失敗していた操作を、修正後のバイナリで実行して成功することを確かめる
+   （例: マウント権限の修正なら、`docker exec <container> ...` で該当パスへの書き込みが通ること）
+5. `docs/release-checklist.md` のうち、変更が影響しうる項目をスモークテストとして実行する
+6. 実行したコマンドとその出力を evidence として完了報告に含める
+
+### 完了宣言の条件
+
+- reviewer の最終判定（PASS / CONDITIONAL PASS）
+- CI 全 green
+- **上記 4〜6 の実機 evidence**
+
+この 3 点が揃わないうちは「完了」「修正済み」と報告しない。マージを提案しない。
+
 ## エラーハンドリング
 
 - `unwrap()` および `expect()` の使用を原則禁止とする。代わりに `?` 演算子や `match`、`if let` を使って適切にエラーを伝播または処理すること
