@@ -808,14 +808,20 @@ pub fn prepare_plugins_data_mount(
         // 気づけないため、復旧コマンドと「この修正前に作られた既存コンテナは
         // 再作成しても改善しない」旨を明示する — マーカーがラベルに載らない
         // ため `warn_config_changes` の構成差分検出も効かず、警告すら二度と
-        // 出なくなるのが本当に危険な点である。
+        // 出なくなるのが本当に危険な点である。ユーザー向けメッセージでは、
+        // 「`--new` が壊れている」と誤読されないよう、`--new` 自体は機能する
+        // が前提条件（ホスト側ディレクトリの存在）が満たされていないために
+        // 効かない、という因果関係を伝える。
         eprintln!(
-            "warning: failed to create {} ({e}); ~/.claude/plugins/data will remain read-only \
-             in the container, so plugins that write there (e.g. codex) may fail to write.\n\
-             To fix: mkdir -p {}\n\
-             Note: while this directory cannot be created, no plugins_data_rw marker is added \
-             to this container's labels, so `vibepod run --new` will NOT detect or repair this \
-             — recreating the container will not help until the directory above exists.",
+            "warning: failed to create {} ({e}); the container will start without a writable \
+             ~/.claude/plugins/data, so plugins that write job/state data there (e.g. codex) \
+             will fail.\n\
+             To fix: mkdir -p {}, then run vibepod again.\n\
+             Note: recreating the container with `vibepod run --new` does not help by itself — \
+             the writable stage can only be mounted once the host directory above exists. \
+             Because the `plugins_data_rw` marker is never recorded on the container's label \
+             in this state, vibepod's configuration-change detection cannot surface this \
+             problem either — this warning is the only place you will learn about it.",
             host_data_dir.display(),
             host_data_dir.display()
         );
