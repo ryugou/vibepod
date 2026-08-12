@@ -461,6 +461,18 @@ pub(super) struct RunContext {
     pub(super) store: SessionStore,
     pub(super) deferred_session: crate::session::Session,
     pub(super) extra_mounts: Vec<(String, String)>,
+    /// サニタイズ済み settings.json を実際にマウントした場合のホスト側実パス。
+    /// マウントしなかった場合（ホストに `~/.claude/settings.json` が存在
+    /// しない場合）は `None`。
+    ///
+    /// `build_config_labels` はこの値をそのまま `mounts_label_parts` へ渡す。
+    /// パスを毎回再構築して常に `Some` を渡すと、ホストに `settings.json` が
+    /// 無いときに比較側（`prepare.rs` 9b、`None` を渡す）とだけ挙動が食い違い、
+    /// ユーザーが `--mount` でこのパスと同じ host+container を明示指定した
+    /// 場合にラベルが恒久的に不一致になる（Copilot 指摘、PR #77）。
+    /// 「実際にマウントしたか」を `extra_mounts` 組み立て時にそのまま記録して
+    /// 持ち回ることで、書き込み側と比較側の判定条件を構造的に一致させる。
+    pub(super) sanitized_settings_host: Option<std::path::PathBuf>,
     /// `~/.claude/plugins/data` の per-container 書き込み可能ステージ等、
     /// `:ro` を付けずにマウントする必要があるエントリ。`extra_mounts` とは
     /// 別枠で持つ（`extra_mounts` は `to_create_args()` で一律 `:ro` になる
@@ -931,6 +943,25 @@ pub fn sanitize_settings_json(input: &str) -> anyhow::Result<String> {
     serde_json::to_string_pretty(&value).context("Failed to serialize sanitized settings.json")
 }
 
+/// サニタイズ済み settings.json の出力先（ホスト側実パス）を組み立てる。
+///
+/// このパスは書き込み側（`prepare_sanitized_settings_mount`）と比較側
+/// （`build_config_labels` / `prepare.rs` 9b の `mounts_label_for_existing_container`）
+/// の双方が参照するため、リテラルの二重管理を避けて一箇所に集約している
+/// （`SANITIZED_SETTINGS_CONTAINER_PATH` と同じ理由）。以前は両者が
+/// `config_dir.join("runtime").join(container_name).join("settings.json")` を
+/// それぞれ独自に再構築しており、片方だけ変更すると黙って不一致になる
+/// リスクがあった。
+pub(super) fn sanitized_settings_target_path(
+    config_dir: &std::path::Path,
+    container_name: &str,
+) -> std::path::PathBuf {
+    config_dir
+        .join("runtime")
+        .join(container_name)
+        .join("settings.json")
+}
+
 /// ホストの `~/.claude/settings.json` をサニタイズしたコピーを生成し、
 /// コンテナにマウントするためのマウントエントリを返す。
 ///
@@ -956,7 +987,7 @@ pub fn prepare_sanitized_settings_mount(
     std::fs::create_dir_all(&runtime_dir)
         .with_context(|| format!("Failed to create {}", runtime_dir.display()))?;
 
-    let target = runtime_dir.join("settings.json");
+    let target = sanitized_settings_target_path(config_dir, container_name);
     std::fs::write(&target, sanitized)
         .with_context(|| format!("Failed to write {}", target.display()))?;
 
@@ -2281,15 +2312,14 @@ pub(super) fn build_config_labels(ctx: &RunContext) -> std::collections::HashMap
     // マウントパスをソートして結合。sanitized settings / plugins-data の
     // マーカー変換は `mounts_label_parts` に集約している（`prepare.rs` 9b
     // との表現一致を保証するため、詳細はそちらの doc コメント参照）。
-    let sanitized_settings_host = ctx
-        .config_dir
-        .join("runtime")
-        .join(&ctx.container_name)
-        .join("settings.json");
+    // `ctx.sanitized_settings_host` はパスを再構築せず、`prepare.rs` が
+    // `prepare_sanitized_settings_mount` の戻り値から記録した「実際に
+    // マウントしたか」をそのまま使う（`RunContext::sanitized_settings_host`
+    // の doc コメント参照）。
     let mount_parts = mounts_label_parts(
         &ctx.extra_mounts,
         &ctx.rw_mounts,
-        Some(sanitized_settings_host.as_path()),
+        ctx.sanitized_settings_host.as_deref(),
     );
     labels.insert(
         "vibepod.mounts".to_string(),
@@ -2694,6 +2724,98 @@ mod tests {
             "a user --mount that exactly collides with the sanitized settings host+container \
              must still produce identical labels on both sides"
         );
+    }
+
+    #[test]
+    fn mounts_label_for_existing_container_matches_write_side_when_sanitized_settings_not_mounted_but_user_mount_targets_same_path(
+    ) {
+        // 回帰ケース（Copilot 指摘、PR #77）: ホストに `~/.claude/settings.json`
+        // が存在せず sanitized settings がマウントされない状態で、ユーザーが
+        // `--mount <sanitized settings の実パス>:/home/vibepod/.claude/settings.json`
+        // を明示指定した場合。
+        //
+        // 修正前の `build_config_labels` は sanitized settings の実パスを毎回
+        // 自前で再構築しており、ホストに settings.json が無くても常に
+        // `Some(...)` を `mounts_label_parts` に渡していた。比較側
+        // （`prepare.rs` 9b）は `host_settings_exists` に基づいて `None` を
+        // 渡すため、このケースだけ書き込み側がユーザーの --mount エントリを
+        // マーカーへ置換し、比較側は生文字列のまま残す —— ラベルが恒久的に
+        // 不一致になっていた。現在は「実際にマウントしたか」を
+        // `RunContext::sanitized_settings_host` に記録して持ち回るため、
+        // 両側とも `None` を渡し、双方とも生文字列のまま一致する。
+        let config_dir = std::path::PathBuf::from("/config");
+        let container_name = "vibepod-proj-abc";
+        let home = std::path::PathBuf::from("/Users/alice");
+        let sanitized_settings_host = sanitized_settings_target_path(&config_dir, container_name);
+        let user_mounts = vec![(
+            sanitized_settings_host.to_string_lossy().to_string(),
+            "/home/vibepod/.claude/settings.json".to_string(),
+        )];
+        let claude_config_mounts: Vec<(String, String)> = Vec::new();
+        let host_codex_auth_exists = false;
+
+        // --- 比較側: prepare.rs 9b（host_settings_exists = false → None） ---
+        let label_9b = mounts_label_for_existing_container(
+            &user_mounts,
+            &claude_config_mounts,
+            None,
+            None,
+            &home,
+            host_codex_auth_exists,
+        );
+
+        // --- 書き込み側: ctx.sanitized_settings_host が None の状況を再現
+        // （sanitized settings はマウントされていないので extra_mounts には
+        // ユーザー分だけを積む） ---
+        let extra_mounts = user_mounts.clone();
+        let parts_write_side = mounts_label_parts(&extra_mounts, &[], None);
+        let label_write_side = build_mounts_label(parts_write_side, host_codex_auth_exists);
+
+        assert_eq!(
+            label_9b, label_write_side,
+            "when sanitized settings is not mounted, a user --mount that happens to target the \
+             same host+container as the (unmounted) sanitized settings path must still produce \
+             identical labels on both sides"
+        );
+
+        // 置換対象がそもそもマウントされていないため、ユーザー指定の
+        // host:container は生文字列のまま残り、マーカーへは変換されない。
+        assert!(
+            label_9b.contains(&sanitized_settings_host.to_string_lossy().to_string()),
+            "the user-specified mount must remain as a raw host:container string, not a \
+             marker: {}",
+            label_9b
+        );
+        assert!(
+            !label_9b.contains(SANITIZED_SETTINGS_LABEL_MARKER),
+            "no sanitized-settings marker should appear when it was never mounted: {}",
+            label_9b
+        );
+    }
+
+    #[test]
+    fn sanitized_settings_target_path_matches_prepare_sanitized_settings_mount_output() {
+        // sanitized_settings_target_path が返すパスは、
+        // prepare_sanitized_settings_mount が実際に書き出す先と完全に一致する
+        // 必要がある。一致しないと、パス生成の集約が意味をなさず、書き込み側
+        // と比較側がまたドリフトしうる。
+        let home_dir = tempfile::tempdir().expect("failed to create home tempdir");
+        let config_dir = tempfile::tempdir().expect("failed to create config tempdir");
+        let container_name = "vibepod-test-container";
+
+        let claude_dir = home_dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).expect("failed to create .claude dir");
+        std::fs::write(claude_dir.join("settings.json"), "{}")
+            .expect("failed to write settings.json");
+
+        let (actual_host, _container) =
+            prepare_sanitized_settings_mount(home_dir.path(), config_dir.path(), container_name)
+                .expect("prepare_sanitized_settings_mount should succeed")
+                .expect("settings.json exists on host, so a mount entry must be returned");
+
+        let expected = sanitized_settings_target_path(config_dir.path(), container_name);
+
+        assert_eq!(actual_host, expected.to_string_lossy().to_string());
     }
 
     #[test]

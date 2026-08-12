@@ -755,10 +755,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
             .iter()
             .filter_map(|arg| parse_mount_arg(arg).ok())
             .collect();
-        let sanitized_settings_host = config_dir
-            .join("runtime")
-            .join(&container_name)
-            .join("settings.json");
+        let sanitized_settings_host =
+            super::sanitized_settings_target_path(&config_dir, &container_name);
         let sanitized_settings_host_opt = if host_settings_exists {
             Some(sanitized_settings_host.as_path())
         } else {
@@ -869,11 +867,20 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // ホストの settings.json を hooks/statusLine 除去のうえマウントする。
-    if let Some((host, container)) =
-        super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
-    {
-        extra_mounts.push((host, container));
-    }
+    // 戻り値からホスト側実パスを `sanitized_settings_host` として記録し、
+    // `RunContext` 経由で `build_config_labels` に渡す。パスを後から
+    // 再構築せず「実際にマウントしたか」をそのまま持ち回ることで、9b の
+    // 比較側（`host_settings_exists` が false なら `None`）と判定条件を
+    // 構造的に一致させる（Copilot 指摘、PR #77）。
+    let sanitized_settings_host =
+        match super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)? {
+            Some((host, container)) => {
+                let host_path = std::path::PathBuf::from(&host);
+                extra_mounts.push((host, container));
+                Some(host_path)
+            }
+            None => None,
+        };
 
     // `~/.claude/plugins/data` の rw ステージ。`extra_mounts` は
     // `to_create_args()` で一律 `:ro` になるため、書き込みが必要なこちらは
@@ -914,6 +921,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         store,
         deferred_session,
         extra_mounts,
+        sanitized_settings_host,
         rw_mounts,
         container_status,
         is_disposable,
