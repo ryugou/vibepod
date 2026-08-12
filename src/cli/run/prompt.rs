@@ -11,6 +11,14 @@ use super::{
 /// コンテナを作成してセットアップを実行する（初回フロー）。
 /// セットアップ失敗時はコンテナを自動削除してエラーを返す。
 async fn create_and_setup(ctx: &RunContext, opts: &RunOptions) -> Result<()> {
+    // この関数はコンテナを実際に作る唯一の地点であり、初回作成・`--new` 後・
+    // `vibepod rm` 後・**setup marker 欠落による作り直し**のすべてがここを
+    // 通る。`prepare_context` の時点で `container_status` から「これから
+    // 新規作成するか」を予測すると、呼び出し側（この関数の呼び出し元）が
+    // 既存コンテナを削除してから作り直す marker 欠落の経路を取りこぼすため、
+    // 予測ではなく実際の作成地点でステージをリセットする。
+    super::reset_plugins_data_stage(&ctx.runtime_dir)?;
+
     let container_config =
         build_container_config(ctx, ctx.effective_image.clone(), opts.no_network);
     let create_args = container_config.to_create_args();

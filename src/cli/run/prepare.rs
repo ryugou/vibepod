@@ -146,6 +146,16 @@ fn path_hash_8(path: &str) -> String {
 /// で保存していた。v1.4.3 以降は `sanitized_settings=/home/vibepod/.claude/settings.json`
 /// という専用 prefix 形式に変更している。後方互換のため、比較前に旧形式を新形式へ
 /// 正規化する。
+///
+/// **この関数が扱うのは、上記のさらに古い「空 host」形式のみ**である。
+/// `build_config_labels`（`mounts_label_parts` 経由、`mod.rs`）は、実際に
+/// `docker run --label` へ書き込む段階で既に実パス形式の sanitized settings
+/// エントリを本関数と同じ専用 prefix マーカーへ置換して保存するため、
+/// v1.4.3 以降に作成されたコンテナの `stored` ラベルは元々マーカー形式で
+/// 保存されている。ここへ「実パス → マーカー」の正規化を追加してはならない
+/// — 本関数が変換すべきなのはこの「空 host」旧形式だけであり、実パス形式は
+/// 別の理由（ユーザー指定 `--mount` との衝突回避、判定条件は
+/// `mounts_label_parts` のドキュメント参照）で意図的に対象外にしている。
 fn normalize_mounts_label_legacy(raw: &str) -> String {
     raw.split('|')
         .map(|part| {
@@ -718,24 +728,49 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         .iter()
         .any(|(_, name)| *name == "auth.json");
 
+    // `~/.claude/plugins/data` を per-container の書き込み可能ステージへ
+    // 差し替える準備。ラベル計算（直後の 9b ブロック）より前に済ませておく
+    // 必要がある — マーカーの有無をラベルの mounts_parts へ混ぜ込むため。
+    //
+    // ここではステージを空にするかどうかの判断は行わない
+    // (`prepare_plugins_data_mount` はステージの存在と権限を保証するだけ)。
+    // 「コンテナが新規作成されるときは必ず空」という不変条件は、実際に
+    // コンテナを作る唯一の地点である `create_and_setup`
+    // (`interactive.rs` / `prompt.rs`) が呼ぶ `reset_plugins_data_stage` が
+    // 担う。ここで `container_status` から「これから新規作成するか」を
+    // 予測すると、setup marker 欠落によるコンテナ作り直し（`prepare_context`
+    // より後に発生する）を取りこぼすため、予測をやめて実際の作成地点へ
+    // 移した。
+    let plugins_data_stage = super::prepare_plugins_data_mount(&home, &runtime_dir)?;
+
     if let Some(stored_labels) = stored_labels_opt {
-        let mut mounts_parts: Vec<String> = Vec::new();
-        for arg in &opts.mount {
-            if let Ok((h, c)) = parse_mount_arg(arg) {
-                mounts_parts.push(format!("{}:{}", h, c));
-            }
-        }
-        for (h, c) in &claude_config_mounts {
-            mounts_parts.push(format!("{}:{}", h, c));
-        }
-        // Sanitized settings: include only container destination in the label so
-        // regenerated host-side runtime files do not trigger a spurious recreate.
-        // Use a dedicated prefix (SANITIZED_SETTINGS_LABEL_MARKER) so this
-        // label-only marker cannot collide with a user-provided mount serialized
-        // as "{host}:{container}".
-        if host_settings_exists {
-            mounts_parts.push(super::SANITIZED_SETTINGS_LABEL_MARKER.to_string());
-        }
+        // 9b: 既存コンテナと比較する現在値の vibepod.mounts を組み立てる。
+        // ラベル組み立てロジック自体は `mounts_label_for_existing_container`
+        // （= `build_config_labels` が使う `mounts_label_parts` /
+        // `build_mounts_label` をそのまま呼ぶだけの薄いラッパー）に一本化
+        // されており、ここではその入力を用意するだけにする。二箇所が独立
+        // 実装のままズレる不具合（round 2、53ad645）の再発を防ぐため。
+        let user_mounts: Vec<(String, String)> = opts
+            .mount
+            .iter()
+            .filter_map(|arg| parse_mount_arg(arg).ok())
+            .collect();
+        let sanitized_settings_host =
+            super::sanitized_settings_target_path(&config_dir, &container_name);
+        let sanitized_settings_host_opt = if host_settings_exists {
+            Some(sanitized_settings_host.as_path())
+        } else {
+            None
+        };
+
+        let mounts_label = super::mounts_label_for_existing_container(
+            &user_mounts,
+            &claude_config_mounts,
+            sanitized_settings_host_opt,
+            plugins_data_stage.as_deref(),
+            &home,
+            host_codex_auth_exists,
+        );
 
         // Encode the FULL sorted lang_names set so reuse re-provisions
         // whenever any language is added or removed.
@@ -751,10 +786,7 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
 
         let mut current_labels = std::collections::HashMap::new();
 
-        current_labels.insert(
-            "vibepod.mounts".to_string(),
-            super::build_mounts_label(mounts_parts, host_codex_auth_exists),
-        );
+        current_labels.insert("vibepod.mounts".to_string(), mounts_label);
         current_labels.insert("vibepod.network".to_string(), opts.no_network.to_string());
         current_labels.insert("vibepod.lang".to_string(), current_lang);
         current_labels.insert(
@@ -835,10 +867,27 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     }
 
     // ホストの settings.json を hooks/statusLine 除去のうえマウントする。
-    if let Some((host, container)) =
-        super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
-    {
-        extra_mounts.push((host, container));
+    // 戻り値からホスト側実パスを `sanitized_settings_host` として記録し、
+    // `RunContext` 経由で `build_config_labels` に渡す。パスを後から
+    // 再構築せず「実際にマウントしたか」をそのまま持ち回ることで、9b の
+    // 比較側（`host_settings_exists` が false なら `None`）と判定条件を
+    // 構造的に一致させる（Copilot 指摘、PR #77）。
+    let sanitized_settings_host =
+        match super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)? {
+            Some((host, container)) => {
+                let host_path = std::path::PathBuf::from(&host);
+                extra_mounts.push((host, container));
+                Some(host_path)
+            }
+            None => None,
+        };
+
+    // `~/.claude/plugins/data` の rw ステージ。`extra_mounts` は
+    // `to_create_args()` で一律 `:ro` になるため、書き込みが必要なこちらは
+    // 別枠の `rw_mounts` に積む（9b で用意した `plugins_data_stage` を使う）。
+    let mut rw_mounts = Vec::new();
+    if let Some(ref stage) = plugins_data_stage {
+        rw_mounts.extend(super::plugins_data_mount_entries(stage, &home));
     }
 
     // Normalize lang_names before storing in RunContext so downstream
@@ -872,6 +921,8 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
         store,
         deferred_session,
         extra_mounts,
+        sanitized_settings_host,
+        rw_mounts,
         container_status,
         is_disposable,
         no_network: opts.no_network,

@@ -1440,6 +1440,7 @@ fn container_mount_args_expose_stage_but_never_the_auth_store_path() {
         env_vars: Vec::new(),
         network_disabled: false,
         extra_mounts: Vec::new(),
+        rw_mounts: Vec::new(),
         labels: HashMap::new(),
     };
 
