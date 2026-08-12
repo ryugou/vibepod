@@ -81,6 +81,7 @@
 - [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/data/vibepod-container-write-probe` の後、ホストの `~/.claude/plugins/data/` に `vibepod-container-write-probe` が**現れない**（コンテナ内の書き込みがホストへ汚染しない）
 - [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/.probe` が read-only で失敗する（親の ro が維持されている）
 - [ ] コンテナを新規作成（`vibepod run --new`）した直後、`docker exec <container> ls -A /home/vibepod/.claude/plugins/data` が空である（per-container ステージは新規作成のたびに必ず空という不変条件の確認）
+- [ ] `docker exec <container> rm /home/vibepod/.vibepod-setup-done` でセットアップ完了マーカーを削除してから `vibepod run` を実行すると、コンテナが削除・再作成され、その直後 `docker exec <container> ls -A /home/vibepod/.claude/plugins/data` が空である（setup marker 欠落による作り直し経路でも不変条件が保たれることの確認）
 
 ### ps / logs
 

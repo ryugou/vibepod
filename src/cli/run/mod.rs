@@ -765,41 +765,35 @@ pub fn plugins_data_mount_entries(
 ///    stderr に警告したうえで `Ok(None)` を返す（rw マウントを諦めるだけで
 ///    run 自体は継続できるため。CLAUDE.md: エラーを握りつぶさず運用者が
 ///    次の判断をできる情報を出す）。
-/// 3. `reset_stage` が `true` かつ `runtime_dir/plugins-data` が既に存在する
-///    場合、`create_dir_all` の前にそれを丸ごと `remove_dir_all` する（詳細は
-///    下記「ライフサイクル」）。これも vibepod が書き込み権限を持つはずの
-///    領域の操作であり、失敗を握りつぶさず `?` で呼び出し元へ伝播する。
-/// 4. per-container ステージ `runtime_dir/plugins-data` を作成し、Unix では
-///    パーミッションを `0700` に設定する。ここにはコンテナ内 codex plugin
-///    のジョブ状態（プロンプト・レビュー出力＝ソースコード断片を含みうる）
-///    が書き込まれるため、`sync_codex_entries_into` が codex ステージに
-///    対して行っているのと同じパーミッション制御に揃えている（既存ディレクトリ
-///    再利用時、すなわち `reset_stage = false` のときも毎回矯正する）。
-///    こちらも vibepod が書き込み権限を持つはずの領域（`runtime_dir` 配下）の
-///    準備であり、失敗を握りつぶすと以後の run 準備が不整合な状態のまま
+/// 3. per-container ステージ `runtime_dir/plugins-data` の存在と権限
+///    （Unix で `0700`）を `ensure_plugins_data_stage_dir` で保証する。既存
+///    ディレクトリがあれば内容はそのまま、権限だけ毎回矯正する。ここには
+///    コンテナ内 codex plugin のジョブ状態（プロンプト・レビュー出力＝
+///    ソースコード断片を含みうる）が書き込まれるため、`sync_codex_entries_into`
+///    が codex ステージに対して行っているのと同じパーミッション制御に
+///    揃えている。失敗を握りつぶすと以後の run 準備が不整合な状態のまま
 ///    進んでしまうため、`?` でそのまま呼び出し元へ伝播する。
-/// 5. ステージの絶対パス文字列を `Ok(Some(..))` で返す。
+/// 4. ステージの絶対パス文字列を `Ok(Some(..))` で返す。
 ///
-/// **ライフサイクル**:
-/// - **不変条件: per-container ステージは、コンテナが新規作成されるときは
-///   必ず空である。** `reset_stage` 引数がこれを担う — `true` のときは
-///   `create_dir_all` の前に既存ステージを丸ごと削除してから作り直し、
-///   `false` のときは既存内容を保持したまま（無ければ新規作成して）返す。
-///   `--new` はコンテナのみを破棄して `runtime_dir` は残し、`vibepod rm`
-///   も同様にコンテナだけを消して `runtime/<container>/` を残すため、
-///   「`--new` フラグそのもの」では判定できない。呼び出し側
-///   (`prepare_context`)は「コンテナが存在しない＝これから新規作成する」
-///   （`ContainerStatus::None`）を条件に `reset_stage` を決めており、これで
-///   `--new` 経由の再作成・`rm` 後の再作成・初回作成のすべてを一つの判定に
-///   まとめて正しく扱える。既存コンテナを再利用する run では `reset_stage`
-///   が `false` になり、コンテナ内のプラグインが書いたジョブ状態（実行中の
-///   状態）を消さない。
-/// - disposable な `--worktree` 実行では、実行終了時に `runtime_dir` ごと
-///   削除され、このステージも消える。
+/// **ライフサイクル（重要: この関数はステージを空にする責務を持たない）**:
+/// 「per-container ステージは、コンテナが新規作成されるときは必ず空である」
+/// という不変条件は、この関数ではなく **[`reset_plugins_data_stage`]** が担う。
+/// この関数はステージの**存在と権限**を保証するだけであり、既存内容がある
+/// 場合は常に保持する（呼ばれる契機は既存コンテナの再利用も新規作成もすべて
+/// 含むため、この関数自身は「これから新規作成するか」を判断できない —
+/// 判断できない場所に判断ロジックを置くと誤りやすいため、意図的に持たせて
+/// いない）。実際の呼び出し順序は次のとおり:
+/// 1. `prepare_context`（`prepare.rs`）が**先に**この関数を呼び、ステージの
+///    存在と権限を保証する。ここでは既存内容を消さない。
+/// 2. その後、実際にコンテナを新規作成する場合のみ、`create_and_setup`
+///    （`interactive.rs` / `prompt.rs`）が呼ばれ、その**先頭で**
+///    [`reset_plugins_data_stage`] がステージを空にする。
+/// 3. [`reset_plugins_data_stage`] は自身の内部で `ensure_plugins_data_stage_dir`
+///    を呼ぶため、削除後の存在保証・`0700` 設定はこの関数を再度呼ばなくても
+///    そちらの中で完結している。
 pub fn prepare_plugins_data_mount(
     home: &std::path::Path,
     runtime_dir: &std::path::Path,
-    reset_stage: bool,
 ) -> anyhow::Result<Option<String>> {
     let plugins_dir = home.join(".claude").join("plugins");
     if !plugins_dir.is_dir() {
@@ -829,22 +823,23 @@ pub fn prepare_plugins_data_mount(
     }
 
     let stage_dir = runtime_dir.join("plugins-data");
-    // 不変条件「ステージはコンテナ新規作成時に必ず空」を守る: 新規作成が
-    // 確定している呼び出し（`reset_stage == true`）でのみ、既存ステージを
-    // 丸ごと消してから作り直す。`stage_dir` は `runtime_dir` 配下＝vibepod
-    // 自身が所有する領域のため、削除に失敗するのは異常事態であり、握り
-    // つぶさず `?` で伝播する（CLAUDE.md: エラーを握りつぶさず運用者が
-    // 次の判断をできる情報を出す）。
-    if reset_stage && stage_dir.exists() {
-        std::fs::remove_dir_all(&stage_dir).with_context(|| {
-            format!(
-                "Failed to remove stale plugins/data stage directory {} before creating a new \
-                 container",
-                stage_dir.display()
-            )
-        })?;
-    }
-    std::fs::create_dir_all(&stage_dir).with_context(|| {
+    ensure_plugins_data_stage_dir(&stage_dir)?;
+
+    Ok(Some(stage_dir.to_string_lossy().to_string()))
+}
+
+/// `plugins-data` ステージディレクトリの**存在と権限**を保証する内部ヘルパー。
+///
+/// `prepare_plugins_data_mount`（既存ステージを保持したまま権限だけ矯正）と
+/// `reset_plugins_data_stage`（削除してから作り直す）の両方が、この後半の
+/// 「作成 + 0700 化」処理を共有するために切り出している。既存内容の有無に
+/// 関する判断はここでは行わない — 呼び出し元が呼ぶ前にステージを消すか
+/// どうかを決める。
+///
+/// `stage_dir` は `runtime_dir` 配下＝vibepod 自身が書き込み権限を持つはずの
+/// 領域のため、失敗は異常事態として握りつぶさず `?` で伝播する。
+fn ensure_plugins_data_stage_dir(stage_dir: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(stage_dir).with_context(|| {
         format!(
             "Failed to create plugins/data stage directory {}",
             stage_dir.display()
@@ -856,11 +851,57 @@ pub fn prepare_plugins_data_mount(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stage_dir, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(stage_dir, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("Failed to set permissions on {}", stage_dir.display()))?;
     }
+    Ok(())
+}
 
-    Ok(Some(stage_dir.to_string_lossy().to_string()))
+/// `~/.claude/plugins/data` の per-container ステージ（`runtime_dir/plugins-data`）
+/// を空にする。
+///
+/// **不変条件: per-container ステージは、コンテナが新規作成されるときは
+/// 必ず空である。** この不変条件を守る唯一の地点として、コンテナを実際に
+/// 作る `create_and_setup`（`interactive.rs` / `prompt.rs`、docker のコンテナ
+/// 作成 = choke point）の先頭から呼ばれることを前提にしている。
+///
+/// 以前は呼び出し側 (`prepare_context`) が `container_status ==
+/// ContainerStatus::None` から「これから新規作成する」ことを**予測**して
+/// `prepare_plugins_data_mount` にリセットを指示していたが、この予測には
+/// 取りこぼす経路があった: `interactive.rs` / `prompt.rs` は、既存コンテナが
+/// `Running` / `Stopped` であっても setup marker
+/// (`/home/vibepod/.vibepod-setup-done`) が無ければコンテナを削除して
+/// 作り直す。この経路は `prepare_context` の予測より後に発生するため、
+/// `reset_stage = false` のまま新しいコンテナに古いステージ内容がそのまま
+/// マウントされ、不変条件が破れていた（codex レビューで指摘）。
+///
+/// この関数を予測ではなく実際の作成地点（choke point）から呼ぶことで、
+/// 初回作成・`--new` 後・`vibepod rm` 後・setup marker 欠落による作り直しの
+/// すべてが構造的にこの不変条件を満たすようになる。削除後の作り直しと
+/// `0700` 設定は、呼び出し元を待たずこの関数自身が
+/// `ensure_plugins_data_stage_dir` 経由で行い、この関数の中で完結している。
+///
+/// **挙動**:
+/// - `runtime_dir/plugins-data` が存在しなければ何もせず `Ok(())` を返す
+///   （`~/.claude/plugins` が無く、そもそもステージを使わない run でも
+///   空のステージディレクトリを作ってしまわないため）。
+/// - 存在する場合は `remove_dir_all` で丸ごと削除してから、
+///   `ensure_plugins_data_stage_dir` で作り直す（Unix では `0700`）。
+/// - 失敗は `runtime_dir` 配下＝vibepod 自身が書き込み権限を持つはずの
+///   領域の操作であり異常事態のため、握りつぶさず `?` で伝播する。
+pub(super) fn reset_plugins_data_stage(runtime_dir: &std::path::Path) -> anyhow::Result<()> {
+    let stage_dir = runtime_dir.join("plugins-data");
+    if !stage_dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&stage_dir).with_context(|| {
+        format!(
+            "Failed to remove stale plugins/data stage directory {} before creating a new \
+             container",
+            stage_dir.display()
+        )
+    })?;
+    ensure_plugins_data_stage_dir(&stage_dir)
 }
 
 /// ホストの `~/.claude/settings.json` を読み、コンテナに持ち込めない
@@ -2909,6 +2950,82 @@ mod tests {
             message.contains("permission denied"),
             "error message must retain the underlying io::Error via anyhow context chaining, \
              got: {message}"
+        );
+    }
+
+    // --- reset_plugins_data_stage ---
+    //
+    // 「per-container ステージは、コンテナが新規作成されるときは必ず空である」
+    // という不変条件を実際に守る関数。`create_and_setup`（コンテナ作成の
+    // choke point）から呼ばれる前提のため、docker には依存しない純粋な
+    // ファイルシステム操作のみをここで固定する。
+
+    #[test]
+    fn reset_plugins_data_stage_does_nothing_when_stage_absent() {
+        // `~/.claude/plugins` が無く、そもそも plugins/data の rw ステージを
+        // 使わない run では `runtime_dir/plugins-data` が作られない。この
+        // 関数がそのケースで空のステージディレクトリを新規作成してしまうと、
+        // マウントされない無駄なディレクトリが残るため、何もせず Ok を返す
+        // ことを固定する。
+        let runtime_dir = tempfile::tempdir().expect("failed to create runtime_dir tempdir");
+        let stage_dir = runtime_dir.path().join("plugins-data");
+
+        reset_plugins_data_stage(runtime_dir.path())
+            .expect("must succeed when there is nothing to reset");
+
+        assert!(
+            !stage_dir.exists(),
+            "must not create a stage directory when none existed before"
+        );
+    }
+
+    #[test]
+    fn reset_plugins_data_stage_clears_existing_content_before_new_container() {
+        // コンテナ新規作成の直前に呼ばれる想定のため、前回 run のステージに
+        // 何が残っていても必ず空から始まる。
+        let runtime_dir = tempfile::tempdir().expect("failed to create runtime_dir tempdir");
+        let stage_dir = runtime_dir.path().join("plugins-data");
+        std::fs::create_dir_all(&stage_dir).expect("failed to create stage dir");
+        std::fs::write(stage_dir.join("stale-job-from-previous-run.json"), "stale")
+            .expect("failed to write stale stage file");
+
+        reset_plugins_data_stage(runtime_dir.path()).expect("reset must succeed");
+
+        assert!(stage_dir.is_dir(), "stage directory must exist after reset");
+        assert_eq!(
+            std::fs::read_dir(&stage_dir)
+                .expect("failed to read stage dir")
+                .count(),
+            0,
+            "reset_plugins_data_stage must wipe pre-existing stage content before a new \
+             container is created"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reset_plugins_data_stage_creates_stage_with_0700_permissions() {
+        // 既存ステージが 0755 等の緩い権限だったとしても、削除して作り直した
+        // 後は必ず 0700 になる。
+        use std::os::unix::fs::PermissionsExt;
+
+        let runtime_dir = tempfile::tempdir().expect("failed to create runtime_dir tempdir");
+        let stage_dir = runtime_dir.path().join("plugins-data");
+        std::fs::create_dir_all(&stage_dir).expect("failed to create stage dir");
+        std::fs::set_permissions(&stage_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("failed to relax stage dir permissions");
+
+        reset_plugins_data_stage(runtime_dir.path()).expect("reset must succeed");
+
+        let mode = std::fs::metadata(&stage_dir)
+            .expect("failed to stat stage dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "plugins/data stage recreated by reset must be 0700 (found {:o})",
+            mode
         );
     }
 }

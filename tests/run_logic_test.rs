@@ -317,7 +317,7 @@ fn test_prepare_plugins_data_mount_returns_none_when_plugins_dir_missing() {
     let runtime_dir = tempfile::tempdir().unwrap();
     // ~/.claude/plugins が存在しない（plugins 自体をマウントしないケース）
 
-    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path(), true).unwrap();
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
 
     assert!(
         result.is_none(),
@@ -331,7 +331,7 @@ fn test_prepare_plugins_data_mount_creates_host_dir_and_empty_stage() {
     let runtime_dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home_dir.path().join(".claude/plugins")).unwrap();
 
-    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path(), true).unwrap();
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
     let stage = result.expect("should return Some(stage) when ~/.claude/plugins exists");
 
     let host_data_dir = home_dir.path().join(".claude/plugins/data");
@@ -367,7 +367,7 @@ fn test_prepare_plugins_data_mount_sets_stage_permissions_to_0700() {
     let runtime_dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home_dir.path().join(".claude/plugins")).unwrap();
 
-    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path(), true).unwrap();
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
     let stage = result.expect("should return Some(stage) when ~/.claude/plugins exists");
     let stage_path = std::path::PathBuf::from(&stage);
 
@@ -391,7 +391,7 @@ fn test_prepare_plugins_data_mount_does_not_copy_existing_host_files() {
     )
     .unwrap();
 
-    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path(), true).unwrap();
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
     let stage = result.expect("should return Some(stage)");
     let stage_path = std::path::PathBuf::from(&stage);
 
@@ -403,43 +403,18 @@ fn test_prepare_plugins_data_mount_does_not_copy_existing_host_files() {
     );
 }
 
-// --- prepare_plugins_data_mount: reset_stage 契約 ---
+// --- prepare_plugins_data_mount: 既存ステージの扱い ---
 //
-// 「per-container ステージは、コンテナが新規作成されるときは必ず空である」
-// という不変条件を守る。`reset_stage` は「これからコンテナを新規作成するか」
-// を呼び出し側が渡すフラグで、この関数自体は「新規作成」の意味を知らない
-// （呼び出し側の判断とこの関数の動作を分離するため、意図的に純粋な
-// on/off として実装している）。
+// この関数はステージの存在と権限を保証するだけで、空にする責務は持たない
+// （空にする責務は `reset_plugins_data_stage`、`src/cli/run/mod.rs` の
+// `mod tests` を参照）。
 
 #[test]
-fn test_prepare_plugins_data_mount_reset_stage_true_clears_existing_content() {
-    // コンテナ新規作成時（reset_stage = true）は、前回 run のステージに
-    // 何が残っていても必ず空から始まる。
-    let home_dir = tempfile::tempdir().unwrap();
-    let runtime_dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home_dir.path().join(".claude/plugins")).unwrap();
-
-    let stage_dir = runtime_dir.path().join("plugins-data");
-    std::fs::create_dir_all(&stage_dir).unwrap();
-    std::fs::write(stage_dir.join("stale-job-from-previous-run.json"), "stale").unwrap();
-
-    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path(), true).unwrap();
-    let stage = result.expect("should return Some(stage)");
-    let stage_path = std::path::PathBuf::from(&stage);
-
-    assert_eq!(
-        std::fs::read_dir(&stage_path).unwrap().count(),
-        0,
-        "reset_stage = true must wipe pre-existing stage content before a new container is \
-         created"
-    );
-}
-
-#[test]
-fn test_prepare_plugins_data_mount_reset_stage_false_preserves_existing_content() {
-    // 既存コンテナを再利用する run（reset_stage = false）では、コンテナ内の
-    // プラグインが前回までに書いたジョブ状態を消してはならない（実行中の
-    // 状態を壊すため）。
+fn test_prepare_plugins_data_mount_does_not_clear_existing_content() {
+    // この関数は既存コンテナの再利用・新規作成のどちらの経路からも呼ばれる
+    // ため、それ自体は「新規作成か」を判断できない。既存ステージの内容は
+    // 常に保持する（消すかどうかは呼び出し元が呼ぶ `reset_plugins_data_stage`
+    // の責務）。
     let home_dir = tempfile::tempdir().unwrap();
     let runtime_dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home_dir.path().join(".claude/plugins")).unwrap();
@@ -448,22 +423,22 @@ fn test_prepare_plugins_data_mount_reset_stage_false_preserves_existing_content(
     std::fs::create_dir_all(&stage_dir).unwrap();
     std::fs::write(stage_dir.join("in-progress-job.json"), "kept").unwrap();
 
-    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path(), false).unwrap();
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
     let stage = result.expect("should return Some(stage)");
     let stage_path = std::path::PathBuf::from(&stage);
 
     assert!(
         stage_path.join("in-progress-job.json").is_file(),
-        "reset_stage = false must preserve content written by a reused container"
+        "prepare_plugins_data_mount must preserve existing stage content"
     );
 }
 
 #[test]
 #[cfg(unix)]
-fn test_prepare_plugins_data_mount_reset_stage_false_still_corrects_permissions() {
-    // reset_stage = false（既存ステージを保持する経路）でも、パーミッションは
-    // 削除ではなく `set_permissions` で毎回 0700 に矯正される。既存ステージが
-    // 何らかの理由で 0755 になっていても、内容は残したまま権限だけを直す。
+fn test_prepare_plugins_data_mount_still_corrects_permissions() {
+    // 既存ステージを保持する経路でも、パーミッションは削除ではなく
+    // `set_permissions` で毎回 0700 に矯正される。既存ステージが何らかの
+    // 理由で 0755 になっていても、内容は残したまま権限だけを直す。
     use std::os::unix::fs::PermissionsExt;
 
     let home_dir = tempfile::tempdir().unwrap();
@@ -475,14 +450,14 @@ fn test_prepare_plugins_data_mount_reset_stage_false_still_corrects_permissions(
     std::fs::write(stage_dir.join("in-progress-job.json"), "kept").unwrap();
     std::fs::set_permissions(&stage_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path(), false).unwrap();
+    let result = prepare_plugins_data_mount(home_dir.path(), runtime_dir.path()).unwrap();
     let stage = result.expect("should return Some(stage)");
     let stage_path = std::path::PathBuf::from(&stage);
 
     let mode = std::fs::metadata(&stage_path).unwrap().permissions().mode() & 0o777;
     assert_eq!(
         mode, 0o700,
-        "existing 0755 stage must be corrected to 0700 even when reset_stage = false, found {:o}",
+        "existing 0755 stage must be corrected to 0700, found {:o}",
         mode
     );
     assert!(
