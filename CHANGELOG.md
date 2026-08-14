@@ -5,11 +5,16 @@ All notable changes to VibePod are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.9.1] - 2026-08-14
 
 ### Fixed
 
 - `~/.claude/plugins/data/` is now replaced by a per-container writable stage instead of being carried in read-only. `~/.claude/plugins` is bind-mounted `:ro`, so plugins that write job/state data under `plugins/data/` (e.g. the codex plugin creating `data/codex-openai-codex/state/<workspace>/jobs`) always failed with `Read-only file system`, making in-container `codex` review unusable. The fix layers a read-write bind mount for `plugins/data/` inside the read-only `plugins/` mount (nested bind mounts can override their parent's mode). The stage starts out fresh and empty every time its container is newly created (first run, after `--new`, or after `vibepod rm`); host `plugins/data/` content (which may include other projects' codex job history) is never copied in, container writes never propagate back to the host, and a run that reuses an existing container keeps whatever that container's stage already holds instead of wiping it. Existing containers created before this fix are unaffected until recreated (`--new`); a new `vibepod.mounts` label marker ensures they are flagged as out of date rather than silently reused without the fix
+- The container label written at creation time (`build_config_labels`) and the label the reuse check compares against no longer diverge. The write side emitted raw `host:container` strings for the sanitized `settings.json` mount while the comparison side emitted a marker, so anyone with a `~/.claude/settings.json` saw "Container configuration has changed" on every reuse, with no way to make it stop. Both sides now go through one function, and the path of the sanitized settings file is constructed in exactly one place instead of being rebuilt independently on each side
+
+### Changed
+
+- **Library users:** `runtime::ContainerConfig` gains a `rw_mounts: Vec<(String, String)>` field for mounts that must not receive `:ro`. Code that constructs `ContainerConfig` with a struct literal needs `rw_mounts: Vec::new()` added. The CLI is unaffected
 
 ## [1.9.0] - 2026-08-11
 
