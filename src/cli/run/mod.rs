@@ -2795,6 +2795,158 @@ mod tests {
     }
 
     #[test]
+    fn mounts_label_write_and_compare_sides_match_across_all_input_combinations() {
+        // 上の3件（build_config_labels_write_side / user_mount_collides /
+        // sanitized_settings_not_mounted）は手書きの回帰ケースであり、過去に
+        // 実際にドリフトした3つの入力組み合わせしか固定していない。だが
+        // 「書き込み側と比較側が別々の関数として存在し、入力の組み立てだけを
+        // 別々に行う」という構造自体は残っているため、手書きで拾えていない
+        // 別の入力組み合わせで再びズレても、この3件だけでは検出できない。
+        //
+        // ここでは以下5軸（すべて bool、2^5=32通り）を総当たりし、各組み合わせで
+        // 「prepare.rs が実際に extra_mounts/rw_mounts を組み立てる手順」を
+        // ここで再現したうえで mounts_label_parts + build_mounts_label
+        // （書き込み側）に通した結果と、mounts_label_for_existing_container
+        // （比較側の実装そのもの、9b が呼ぶのと同一関数）の結果を比較する。
+        //
+        // 9b 自体のロジック（マーカー置換やソート等）はここに複製しない —
+        // 複製すると mounts_label_parts / build_mounts_label が将来変わっても
+        // このテストが緑のままドリフトする（過去に実際にやらかした失敗パターン）。
+        // 複製するのは「prepare.rs が呼び出し前に extra_mounts/rw_mounts を
+        // どう組み立てるか」という配線だけであり、ラベル文字列を作る計算自体は
+        // 常に本物の mounts_label_parts / build_mounts_label を呼ぶ。
+        //
+        // 軸1: sanitized_settings_mounted — sanitized settings をマウントするか
+        // 軸2: plugins_data_present — plugins-data ステージがあるか
+        // 軸3: codex_present — codex マウントがあるか
+        // 軸4: user_mount_collides — ユーザーの --mount が sanitized settings と
+        //      同じ host+container を指すか（sanitized settings が未マウントの
+        //      場合でも「将来マウントされるはずだったパス」と衝突しうるため、
+        //      軸1とは独立に総当たりする — 既存の回帰テスト3件目がまさにこの
+        //      組み合わせ）
+        // 軸5: home_is_container_home — ホスト HOME が /home/vibepod（＝
+        //      plugins のマウント先が1本に縮退する）か /Users/alice か
+        let config_dir = std::path::PathBuf::from("/config");
+        let container_name = "vibepod-proj-abc";
+
+        for sanitized_settings_mounted in [false, true] {
+            for plugins_data_present in [false, true] {
+                for codex_present in [false, true] {
+                    for user_mount_collides in [false, true] {
+                        for home_is_container_home in [false, true] {
+                            let home = if home_is_container_home {
+                                std::path::PathBuf::from("/home/vibepod")
+                            } else {
+                                std::path::PathBuf::from("/Users/alice")
+                            };
+
+                            let sanitized_settings_host =
+                                sanitized_settings_target_path(&config_dir, container_name);
+                            let sanitized_settings_host_str =
+                                sanitized_settings_host.to_string_lossy().to_string();
+
+                            // 軸4: ユーザーの --mount が sanitized settings の
+                            // host+container と完全一致するか。衝突しない場合は
+                            // 無関係な通常マウントにする。
+                            let user_mounts: Vec<(String, String)> = if user_mount_collides {
+                                vec![(
+                                    sanitized_settings_host_str.clone(),
+                                    SANITIZED_SETTINGS_CONTAINER_PATH.to_string(),
+                                )]
+                            } else {
+                                vec![(
+                                    "/host/user-mount".to_string(),
+                                    "/container/user-mount".to_string(),
+                                )]
+                            };
+
+                            // claude_config_mounts は9b・書き込み側の両方に
+                            // そのまま同じ Vec を渡す入力であり、この不変条件の
+                            // 検証対象ではない（build_claude_config_mounts の
+                            // 出力形状を模した固定1件で足りる）。
+                            let claude_config_mounts: Vec<(String, String)> = vec![(
+                                home.join(".claude")
+                                    .join("CLAUDE.md")
+                                    .to_string_lossy()
+                                    .to_string(),
+                                "/home/vibepod/.claude/CLAUDE.md".to_string(),
+                            )];
+
+                            let plugins_data_stage: Option<String> = if plugins_data_present {
+                                Some(format!(
+                                    "{}/runtime/{}/plugins-data",
+                                    config_dir.display(),
+                                    container_name
+                                ))
+                            } else {
+                                None
+                            };
+
+                            let sanitized_settings_host_opt = if sanitized_settings_mounted {
+                                Some(sanitized_settings_host.as_path())
+                            } else {
+                                None
+                            };
+
+                            // --- 比較側: prepare.rs 9b が呼ぶ実装そのもの ---
+                            let label_9b = mounts_label_for_existing_container(
+                                &user_mounts,
+                                &claude_config_mounts,
+                                sanitized_settings_host_opt,
+                                plugins_data_stage.as_deref(),
+                                &home,
+                                codex_present,
+                            );
+
+                            // --- 書き込み側: prepare.rs が実際に extra_mounts /
+                            // rw_mounts を組み立てる手順（8b〜サニタイズ済み
+                            // settings 追加〜rw_mounts 追加）をそのまま再現する。
+                            let mut extra_mounts: Vec<(String, String)> = Vec::new();
+                            extra_mounts.extend(user_mounts.clone());
+                            extra_mounts.extend(claude_config_mounts.clone());
+                            if sanitized_settings_mounted {
+                                extra_mounts.push((
+                                    sanitized_settings_host_str.clone(),
+                                    SANITIZED_SETTINGS_CONTAINER_PATH.to_string(),
+                                ));
+                            }
+
+                            let mut rw_mounts: Vec<(String, String)> = Vec::new();
+                            if let Some(ref stage) = plugins_data_stage {
+                                rw_mounts.extend(plugins_data_mount_entries(stage, &home));
+                            }
+
+                            let parts_write_side = mounts_label_parts(
+                                &extra_mounts,
+                                &rw_mounts,
+                                sanitized_settings_host_opt,
+                            );
+                            let label_write_side =
+                                build_mounts_label(parts_write_side, codex_present);
+
+                            assert_eq!(
+                                label_9b,
+                                label_write_side,
+                                "mounts_label_for_existing_container (9b) と \
+                                 build_config_labels 相当の書き込み側が不一致: axes={:?} \
+                                 (sanitized_settings_mounted, plugins_data_present, \
+                                 codex_present, user_mount_collides, home_is_container_home)",
+                                (
+                                    sanitized_settings_mounted,
+                                    plugins_data_present,
+                                    codex_present,
+                                    user_mount_collides,
+                                    home_is_container_home,
+                                )
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn sanitized_settings_target_path_matches_prepare_sanitized_settings_mount_output() {
         // sanitized_settings_target_path が返すパスは、
         // prepare_sanitized_settings_mount が実際に書き出す先と完全に一致する
