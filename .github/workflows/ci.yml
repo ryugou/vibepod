@@ -46,6 +46,23 @@ jobs:
       - run: cargo clippy -- -D warnings
       - run: cargo fmt --check
 
+  docker-integration:
+    # `cargo test` alone never runs `#[ignore]` tests, so the docker-runtime
+    # invariants in tests/container_integration_test.rs (nested ro/rw mount
+    # stacking) and tests/docker_test.rs's ignored cases had never actually
+    # executed in CI before this job existed. Kept as a separate job (not
+    # folded into `test`, and not a `needs: test` dependency) so a docker
+    # hiccup on the runner can never fail or block the fast non-docker
+    # `test` job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+      - run: cargo test -- --ignored
+
   build:
     # Only run the multi-platform build matrix on push to main (post-merge),
     # not on every PR push. PR validation is handled by the `test` job above.
