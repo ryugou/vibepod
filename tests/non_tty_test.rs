@@ -17,10 +17,64 @@
 //! 到達しうるためこのファイルでは扱わない（docker 実機テスト側の担当範囲）。
 
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 fn vibepod_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_vibepod"))
+}
+
+/// `run_non_tty` が子プロセスの終了を待つ上限。TTY 判定は即座に bail する
+/// 現在の実装に対しては十分すぎるほど余裕がある（実測は数十ミリ秒オーダー）。
+const NON_TTY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `child` の終了を `timeout` まで待つ。待ちきれない場合は kill した上で、
+/// どのコマンドがハングしたかを含むメッセージで panic する。
+///
+/// 現在の `run_non_tty` は「stdin に何も書かず EOF を送る」ことで TTY 判定を
+/// 即座に bail させる前提に依存している。将来 TTY 判定より前に「EOF を見ない
+/// 待機処理」（例: 何らかの応答を待つ処理）が挟まると、この前提が崩れて
+/// 子プロセスが無言で待ち続け、CI のジョブ timeout（15分）まで原因不明の
+/// まま止まる。ここで明示的に timeout を切り、パニックメッセージにコマンド名
+/// を含めることで、CI ログから即座にハング箇所を特定できるようにする。
+///
+/// 実装は標準ライブラリのみを使う（新規依存を追加しない）: 別スレッドで
+/// `wait_with_output`（stdin を drop してから stdout/stderr を読み切る）を
+/// 実行し、`mpsc::Receiver::recv_timeout` で待つ。タイムアウトした場合は
+/// `child.id()` で控えておいた pid に対し OS の `kill` コマンドで SIGKILL を
+/// 送る（`Child::kill()` は `wait_with_output` に所有権を渡した別スレッド側
+/// にあるため、こちらのスレッドからは呼べない）。
+fn wait_with_timeout(child: Child, timeout: Duration, description: &str) -> Output {
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        // 受信側が timeout で先に panic して drop されている場合、send は
+        // Err を返すだけで無視してよい（プロセス自体は下の timeout 分岐で
+        // 既に kill 済み）。
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => {
+            result.unwrap_or_else(|e| panic!("failed to wait for `{}`: {}", description, e))
+        }
+        Err(_) => {
+            // kill の成否そのものは本質ではない（既に終了していれば失敗して
+            // 当然）。目的は次の panic で原因箇所を伝えることなので結果は
+            // 握りつぶしてよい。
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+            panic!(
+                "`{}` (pid={}) did not finish within {:?} — timeout in \
+                 non_tty_test.rs::wait_with_timeout. This means the process hung instead of \
+                 exiting on stdin EOF; check for new blocking I/O before the TTY check.",
+                description, pid, timeout
+            );
+        }
+    }
 }
 
 /// stdin/stdout/stderr をすべて `Stdio::piped()` にしてバイナリを起動する。
@@ -30,7 +84,8 @@ fn vibepod_bin() -> PathBuf {
 /// から見た stdin/stdout/stderr は常に非 TTY になることを保証する。stdin は
 /// 何も書き込まずにハンドルを drop するため、子プロセスからは即座に EOF が
 /// 見える（対話プロンプトが来ても入力を待ち続けて test がハングすることは
-/// ない）。
+/// ない）。万一 EOF だけでは終了しない経路が将来紛れ込んでも、
+/// `wait_with_timeout` が `NON_TTY_TIMEOUT` で打ち切る。
 fn run_non_tty(args: &[&str], current_dir: &std::path::Path) -> Output {
     let child = Command::new(vibepod_bin())
         .args(args)
@@ -40,12 +95,12 @@ fn run_non_tty(args: &[&str], current_dir: &std::path::Path) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn vibepod binary");
-    // `wait_with_output` は内部で stdin を先に drop してから stdout/stderr を
-    // 読み切る（何も書き込まないので子プロセスからは即座に EOF が見える）。
-    // そのため対話プロンプトが来ても入力待ちで test がハングすることはない。
-    child
-        .wait_with_output()
-        .expect("failed to wait for vibepod binary")
+
+    wait_with_timeout(
+        child,
+        NON_TTY_TIMEOUT,
+        &format!("vibepod {}", args.join(" ")),
+    )
 }
 
 #[test]
@@ -186,5 +241,63 @@ fn login_over_non_tty_stdio_fails_with_explicit_terminal_error_not_a_dialoguer_c
         !stderr.contains("Docker is not running"),
         "login must fail on the TTY check before reaching Docker, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn wait_with_timeout_kills_hung_process_and_panics_with_description() {
+    // `run_non_tty` が想定する「stdin EOF だけで終了する」前提が将来崩れた
+    // ケースを模す: `sleep 30` は EOF を見ても終了しない。timeout を短く
+    // 切って、実際にこの分岐を通ることを確認する（本物の vibepod バイナリの
+    // NON_TTY_TIMEOUT=30秒を毎回待つと test 自体が遅くなるため使わない）。
+    let child = Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn sleep(1) test double");
+
+    let started = std::time::Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        wait_with_timeout(child, Duration::from_millis(200), "sleep 30 (test double)")
+    }));
+    let elapsed = started.elapsed();
+
+    let panic_payload = result.expect_err("wait_with_timeout must panic when the process hangs");
+    let message = panic_payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .expect("panic payload should carry a string message");
+
+    assert!(
+        message.contains("sleep 30 (test double)"),
+        "panic message should name the command that hung so operators know where to look, got: {}",
+        message
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "wait_with_timeout should return promptly once the deadline passes instead of waiting \
+         for the natural exit, took {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn wait_with_timeout_returns_output_when_process_finishes_before_deadline() {
+    let child = Command::new("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn true(1) test double");
+
+    let output = wait_with_timeout(child, Duration::from_secs(5), "true (test double)");
+
+    assert!(
+        output.status.success(),
+        "expected the fast-exiting test double to succeed, got status={:?}",
+        output.status
     );
 }
