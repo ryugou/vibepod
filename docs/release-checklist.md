@@ -95,14 +95,19 @@ rw/ro 不変条件を検証しており、以下の項目のうち自動化済�
   （`ensure_plugins_data_stage_dir` が保証しているのは `0700` 権限であって、存在自体は
   docker が代わりに保証してしまうため意味が異なる）。
 
-- [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/data/.probe` が成功する（親 ro マウント内の子 rw マウントが機能している）（CI: `container_integration_test.rs::nested_child_mount_is_writable` で自動検証）
-- [ ] `docker exec <container> touch <ホストの $HOME>/.claude/plugins/data/.probe` も成功する（`plugins_data_mount_entries` が返すもう一方のマウント先＝ホスト絶対パス側でも rw になっている）（CI: `container_integration_test.rs::nested_mount_invariants_hold_for_absolute_host_path_entry` で自動検証。合成パス `/opt/vibepod-test-hosthome` を `container_home` として渡すことで、`home == /home/vibepod` では生成されない2本目のエントリを再現している）
-- [ ] 事前にホスト側 `~/.claude/plugins/data/` に一意な名前のファイル（例: `vibepod-host-sentinel-<日付>`）を作っておき、`docker exec <container> ls /home/vibepod/.claude/plugins/data` にそれが**現れない**（ホストの `~/.claude/plugins/data` の内容、他プロジェクトの codex job 履歴等が見えない）（CI: `container_integration_test.rs::host_parent_content_is_hidden_by_child_mount` で自動検証）
-- [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/data/vibepod-container-write-probe` の後、ホストの `~/.claude/plugins/data/` に `vibepod-container-write-probe` が**現れない**（コンテナ内の書き込みがホストへ汚染しない）（CI: `container_integration_test.rs::container_writes_do_not_leak_to_host_parent` で自動検証）
-- [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/.probe` が read-only で失敗する（親の ro が維持されている）（CI: `container_integration_test.rs::parent_mount_stays_read_only` で自動検証）
-- [ ] コンテナを新規作成（`vibepod run --new`）した直後、`docker exec <container> ls -A /home/vibepod/.claude/plugins/data` が空である（per-container ステージは新規作成のたびに必ず空という不変条件の確認）（手動のまま。`reset_plugins_data_stage` の呼び出しタイミングは `vibepod run` の実フローに依存するため、`docker run` を直接叩く統合テストの対象外）
-- [ ] `docker exec <container> rm /home/vibepod/.vibepod-setup-done` でセットアップ完了マーカーを削除してから `vibepod run` を実行すると、コンテナが削除・再作成され、その直後 `docker exec <container> ls -A /home/vibepod/.claude/plugins/data` が空である（setup marker 欠落による作り直し経路でも不変条件が保たれることの確認）（手動のまま。同上の理由）
-- [ ] （新規、CI 自動検証のみ・手動確認項目なし）親 ro マウントのホスト側ソースに `data/` サブディレクトリが存在しない状態で `docker run` すると、コンテナ作成自体が失敗する（`container_integration_test.rs::missing_nested_mount_target_fails_container_creation`）。`prepare_plugins_data_mount` の `create_dir_all(&host_data_dir)` が無いとユーザーのコンテナが起動すらしなくなることの回帰検知
+#### CI で自動検証済み（`cargo test -- --ignored` / CI の `docker-integration` ジョブが毎回実行。手動確認は不要）
+
+- `docker exec <container> touch /home/vibepod/.claude/plugins/data/.probe` が成功する（親 ro マウント内の子 rw マウントが機能している）（`container_integration_test.rs::nested_child_mount_is_writable`）
+- `docker exec <container> touch <ホストの $HOME>/.claude/plugins/data/.probe` も成功する（`plugins_data_mount_entries` が返すもう一方のマウント先＝ホスト絶対パス側でも rw になっている）（`container_integration_test.rs::nested_mount_invariants_hold_for_absolute_host_path_entry`。合成パス `/opt/vibepod-test-hosthome` を `container_home` として渡すことで、`home == /home/vibepod` では生成されない2本目のエントリを再現している）
+- 事前にホスト側 `~/.claude/plugins/data/` に一意な名前のファイル（例: `vibepod-host-sentinel-<日付>`）を作っておき、`docker exec <container> ls /home/vibepod/.claude/plugins/data` にそれが**現れない**（ホストの `~/.claude/plugins/data` の内容、他プロジェクトの codex job 履歴等が見えない）（`container_integration_test.rs::host_parent_content_is_hidden_by_child_mount`）
+- `docker exec <container> touch /home/vibepod/.claude/plugins/data/vibepod-container-write-probe` の後、ホストの `~/.claude/plugins/data/` に `vibepod-container-write-probe` が**現れない**（コンテナ内の書き込みがホストへ汚染しない）（`container_integration_test.rs::container_writes_do_not_leak_to_host_parent`）
+- `docker exec <container> touch /home/vibepod/.claude/plugins/.probe` が read-only で失敗する（親の ro が維持されている）（`container_integration_test.rs::parent_mount_stays_read_only`）
+- 親 ro マウントのホスト側ソースに `data/` サブディレクトリが存在しない状態で `docker run` すると、コンテナ作成自体が失敗する（`container_integration_test.rs::missing_nested_mount_target_fails_container_creation`）。`prepare_plugins_data_mount` の `create_dir_all(&host_data_dir)` が無いとユーザーのコンテナが起動すらしなくなることの回帰検知
+
+#### 手動で確認（実際の `vibepod run` フローに依存するため統合テストの対象外）
+
+- [ ] コンテナを新規作成（`vibepod run --new`）した直後、`docker exec <container> ls -A /home/vibepod/.claude/plugins/data` が空である（per-container ステージは新規作成のたびに必ず空という不変条件の確認）（`reset_plugins_data_stage` の呼び出しタイミングは `vibepod run` の実フローに依存するため、`docker run` を直接叩く統合テストの対象外）
+- [ ] `docker exec <container> rm /home/vibepod/.vibepod-setup-done` でセットアップ完了マーカーを削除してから `vibepod run` を実行すると、コンテナが削除・再作成され、その直後 `docker exec <container> ls -A /home/vibepod/.claude/plugins/data` が空である（setup marker 欠落による作り直し経路でも不変条件が保たれることの確認）（同上の理由）
 
 ### ps / logs
 
