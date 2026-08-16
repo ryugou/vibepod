@@ -60,8 +60,16 @@ pub struct ContainerConfig {
     /// `extra_mounts` 経由で read-only マウントされるが、その内側の
     /// `data/` サブディレクトリだけをこちらで rw マウントして重ねることで、
     /// codex plugin 等がジョブ状態ディレクトリを書き込めるようにする）。
-    /// `to_create_args()` で `extra_mounts` の**直後**に付与する。親（ro）→
-    /// 子（rw）の順序を守らないと、ネストしたマウントが正しく重ならない。
+    /// `to_create_args()` で `extra_mounts` の直後に付与している。これは
+    /// 引数列を読んだときに親子関係を追いやすくするための可読性上の配置で
+    /// あり、`-v` の指定順はネストの成立に影響しない（Docker/runc がマウント
+    /// 先パスの深さで解決するため、逆順でも正しく重なる）。ネストが成立する
+    /// ために必須なのは順序ではなく、コンテナ側 mountpoint の事前存在である。
+    /// 親が ro マウントのためコンテナ内で mountpoint を新規作成できず、
+    /// ホスト側に該当ディレクトリ（例: `~/.claude/plugins/data`）が無いと
+    /// `docker run` が `mkdirat ...: read-only file system` で失敗する。
+    /// これは `prepare_plugins_data_mount` の `create_dir_all(&host_data_dir)`
+    /// が保証している。
     pub rw_mounts: Vec<(String, String)>,
     /// コンテナ作成時に付与するラベル（設定変更の検知に使用）
     pub labels: HashMap<String, String>,
@@ -87,9 +95,12 @@ impl ContainerConfig {
             args.push(format!("{}:{}:ro", host, container));
         }
 
-        // extra_mounts（親の ro マウント）の直後に付与する。ro マウントの
-        // 内側へ rw マウントを重ねる構成（plugins/data ステージ等）を想定
-        // しており、順序が逆だと重ならない。
+        // extra_mounts（親の ro マウント）の直後に置いているのは、引数列を
+        // 読んだときに親子関係を追いやすくするための可読性上の配置であり、
+        // `-v` の指定順自体はネストの成立に影響しない（Docker/runc がマウント
+        // 先パスの深さで解決するため）。ネストに必須なのはコンテナ側
+        // mountpoint の事前存在で、親ディレクトリ配下の該当サブディレクトリ
+        // （plugins/data 等）は prepare_plugins_data_mount が事前に作成する。
         for (host, container) in &self.rw_mounts {
             args.push("-v".to_string());
             args.push(format!("{}:{}", host, container));
