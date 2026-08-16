@@ -26,6 +26,13 @@ on:
       - '.gitignore'
       - '.claudeignore'
 
+# すべてのジョブは checkout してビルド/テストするだけで、PR コメントの投稿・
+# リリース作成・パッケージ公開など GITHUB_TOKEN の書き込み権限を必要とする
+# 操作は行わない。release.yml（`contents: write`、タグ時のみ）と異なり、
+# ここでは読み取り専用に絞る。
+permissions:
+  contents: read
+
 # Cancel any in-progress run for the same branch when a new commit is pushed,
 # so back-to-back pushes don't pile up superseded runs (both the PR `test`
 # job and any post-merge `build` matrix runs benefit from this).
