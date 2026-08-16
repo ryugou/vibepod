@@ -75,10 +75,15 @@
 重ねる構成はコンテナランタイム依存で、壊れてもユニットテストでは検知できない。このうち
 「ネストした ro/rw マウント自体が docker 上で正しく重なるか」は
 `tests/container_integration_test.rs`（`cargo test -- --ignored` で実行、CI の
-`docker-integration` ジョブが毎回実行する）で自動検証されるようになった。以下の項目のうち
-自動化済みのものにはその旨を注記している。手動でしか確認できない項目
-（実際の `vibepod run` フロー・setup marker・実ホスト `$HOME` 経由のパス解決など）は
-引き続き手動で確認すること。
+`docker-integration` ジョブが毎回実行する）で自動検証されるようになった。`$HOME` 経由の
+コンテナ側パス（`/home/vibepod/.claude/plugins[/data]`）側だけでなく、
+`installed_plugins.json` のホスト絶対パス解決用に追加される「ホスト絶対パス側」の
+2本目のマウントエントリについても、`nested_mount_invariants_hold_for_absolute_host_path_entry`
+が合成パス（`/opt/vibepod-test-hosthome`。実ホストの `$HOME` は使わない）を使って同じ
+rw/ro 不変条件を検証しており、以下の項目のうち自動化済みのものにはその旨を注記している。
+手動でしか確認できないのは「コンテナ新規作成直後にステージが空であること」と
+「setup marker 欠落による作り直し後にステージが空であること」の2項目のみで、それぞれ
+実際の `vibepod run` フローに依存するため引き続き手動で確認すること。
 
 **用語の区別（重要）**: 「コンテナ側 mountpoint」と「マウント元（source）」は別物。
 - コンテナ側 mountpoint = 親 ro マウントの**ホスト側ソース**の中にある `data/`
@@ -91,7 +96,7 @@
   docker が代わりに保証してしまうため意味が異なる）。
 
 - [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/data/.probe` が成功する（親 ro マウント内の子 rw マウントが機能している）（CI: `container_integration_test.rs::nested_child_mount_is_writable` で自動検証）
-- [ ] `docker exec <container> touch <ホストの $HOME>/.claude/plugins/data/.probe` も成功する（`plugins_data_mount_entries` が返すもう一方のマウント先＝ホスト絶対パス側でも rw になっている）（手動のまま。CI 側は `home == /home/vibepod` を使い、2本目のエントリが生成されない構成で検証しているため、この「ホスト絶対パス側」分岐は対象外）
+- [ ] `docker exec <container> touch <ホストの $HOME>/.claude/plugins/data/.probe` も成功する（`plugins_data_mount_entries` が返すもう一方のマウント先＝ホスト絶対パス側でも rw になっている）（CI: `container_integration_test.rs::nested_mount_invariants_hold_for_absolute_host_path_entry` で自動検証。合成パス `/opt/vibepod-test-hosthome` を `container_home` として渡すことで、`home == /home/vibepod` では生成されない2本目のエントリを再現している）
 - [ ] 事前にホスト側 `~/.claude/plugins/data/` に一意な名前のファイル（例: `vibepod-host-sentinel-<日付>`）を作っておき、`docker exec <container> ls /home/vibepod/.claude/plugins/data` にそれが**現れない**（ホストの `~/.claude/plugins/data` の内容、他プロジェクトの codex job 履歴等が見えない）（CI: `container_integration_test.rs::host_parent_content_is_hidden_by_child_mount` で自動検証）
 - [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/data/vibepod-container-write-probe` の後、ホストの `~/.claude/plugins/data/` に `vibepod-container-write-probe` が**現れない**（コンテナ内の書き込みがホストへ汚染しない）（CI: `container_integration_test.rs::container_writes_do_not_leak_to_host_parent` で自動検証）
 - [ ] `docker exec <container> touch /home/vibepod/.claude/plugins/.probe` が read-only で失敗する（親の ro が維持されている）（CI: `container_integration_test.rs::parent_mount_stays_read_only` で自動検証）

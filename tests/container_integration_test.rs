@@ -52,7 +52,41 @@ struct ContainerGuard(String);
 
 impl Drop for ContainerGuard {
     fn drop(&mut self) {
-        let _ = Command::new("docker").args(["rm", "-f", &self.0]).output();
+        // Drop 中に panic すると、テスト失敗によるアンワインド中であれば
+        // 二重 panic でプロセスごと abort し、元の失敗理由（テスト名・assert
+        // メッセージ）が一切表示されなくなる。そのため unwrap/expect/assert
+        // は使わず、失敗はすべて eprintln で報告するに留める。
+        //
+        // 削除に失敗しても CI 上でコンテナが残ったまま無言で消えると、後から
+        // 「なぜ vibepod-test-* が残っているのか」を誰も追えなくなるため、
+        // spawn 失敗・非ゼロ終了のいずれも原因を出力する。ただし
+        // `missing_nested_mount_target_fails_container_creation` のように
+        // `docker run` 自体が失敗してコンテナが1つも作られなかったケースでは
+        // 毎回「No such container」が出て純粋なノイズになるため、これだけは
+        // 抑制する。
+        match Command::new("docker").args(["rm", "-f", &self.0]).output() {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("No such container") {
+                    eprintln!(
+                        "警告: テストコンテナ {} の削除 (`docker rm -f`) が失敗しました \
+                         (exit: {:?}). stderr: {}. 手動で `docker rm -f {}` を実行してください。",
+                        self.0,
+                        output.status.code(),
+                        stderr.trim(),
+                        self.0
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "警告: テストコンテナ {} の削除コマンド (`docker rm -f`) の起動自体に \
+                     失敗しました: {err}. 手動で `docker rm -f {}` を実行してください。",
+                    self.0, self.0
+                );
+            }
+        }
     }
 }
 
@@ -71,12 +105,21 @@ struct NestedMountFixture {
     /// 子 rw マウントのホスト側ソース（`runtime_dir/plugins-data` 相当）
     _stage: TempDir,
     container_name: String,
-    /// `plugins_mount_entries` が返したコンテナ側パス（例:
-    /// `/home/vibepod/.claude/plugins`）
+    /// `plugins_mount_entries` が返した1本目（`$HOME` 経由）のコンテナ側パス
+    /// （例: `/home/vibepod/.claude/plugins`）
     container_plugins_path: String,
-    /// `plugins_data_mount_entries` が返したコンテナ側パス（例:
-    /// `/home/vibepod/.claude/plugins/data`）
+    /// `plugins_data_mount_entries` が返した1本目（`$HOME` 経由）のコンテナ側
+    /// パス（例: `/home/vibepod/.claude/plugins/data`）
     container_plugins_data_path: String,
+    /// `plugins_mount_entries` が返した2本目（`installed_plugins.json` の
+    /// ホスト絶対パスを解決するための再マウント）のコンテナ側パス。
+    /// `container_home == /home/vibepod` の場合、1本目と重複するため
+    /// 2本目は生成されず `None` になる。
+    container_plugins_path_absolute: Option<String>,
+    /// `plugins_data_mount_entries` が返した2本目（ホスト絶対パス側）の
+    /// コンテナ側パス。`container_plugins_path_absolute` と同じ条件で
+    /// `None` になる。
+    container_plugins_data_path_absolute: Option<String>,
     /// `docker run -d ...`（`ContainerConfig::to_create_args()` の実行結果）
     run_output: Output,
 }
@@ -88,21 +131,23 @@ struct NestedMountFixture {
 ///   の mountpoint が存在しない状態を作れる（不変条件5の検証用）。
 /// - `seed_host_marker`: `seed_parent_data` が `true` の場合のみ有効。
 ///   `data/` の中に一意なマーカーファイルを事前に置く（不変条件3の検証用）。
-///
-/// `home`（コンテナ側 HOME）にはあえて `/home/vibepod`（コンテナのデフォルト
-/// HOME と同じ値）を渡している。`plugins_mount_entries` /
-/// `plugins_data_mount_entries` は、渡した `home` が
-/// `DEFAULT_PLUGINS_(DATA_)CONTAINER_PATH` と一致する場合、
-/// 「installed_plugins.json の絶対パス解決用」の2本目のエントリを追加しない
-/// （2本目を追加する分岐は `tests/docker_test.rs` 等が別途カバーする対象で、
-/// このファイルの関心はネストマウント自体の rw/ro 不変条件であり、
-/// エントリ本数の分岐ロジックではないため）。これにより
-/// `extra_mounts` / `rw_mounts` が確実に1本ずつになり、以降の assert が
-/// 「どのエントリを見ているか」で揺れない。
+/// - `container_home`: `plugins_mount_entries` / `plugins_data_mount_entries`
+///   に渡すコンテナ側 HOME。既存の不変条件1〜5は `/home/vibepod`
+///   （コンテナのデフォルト HOME と同じ値）を渡す前提で書かれており、その
+///   場合 `plugins_mount_entries` / `plugins_data_mount_entries` は
+///   「installed_plugins.json の絶対パス解決用」の2本目のエントリを追加せず
+///   1本だけ返す（1本目と2本目のコンテナ側パスが一致するため）。
+///   `/home/vibepod` 以外を渡すと2本目が追加され、そちらは
+///   `container_plugins_path_absolute` /
+///   `container_plugins_data_path_absolute` から取り出せる（不変条件6の
+///   検証用）。**ホストの実 `$HOME` は絶対に使わない**こと。テストの合否が
+///   実行環境に依存してしまうため、`/home/vibepod` 以外を渡す場合は合成パス
+///   （例: `/opt/vibepod-test-hosthome`）を使う。
 fn spawn_nested_mount_fixture(
     name_suffix: &str,
     seed_parent_data: bool,
     seed_host_marker: bool,
+    container_home: &Path,
 ) -> NestedMountFixture {
     let workspace = tempfile::tempdir().expect("failed to create workspace tempdir");
     let parent = tempfile::tempdir().expect("failed to create parent (plugins) tempdir");
@@ -120,25 +165,53 @@ fn spawn_nested_mount_fixture(
         }
     }
 
-    let container_home = Path::new("/home/vibepod");
     let extra_mounts = plugins_mount_entries(&parent.path().to_string_lossy(), container_home);
     let rw_mounts = plugins_data_mount_entries(&stage.path().to_string_lossy(), container_home);
+
+    // 期待エントリ本数は `container_home` に応じて変わる。本番の
+    // `plugins_mount_entries` / `plugins_data_mount_entries` は、`$HOME` 経由
+    // のコンテナ側パス（固定で `/home/vibepod/.claude/plugins[/data]`）と
+    // `installed_plugins.json` の絶対パス解決用パス（`container_home` 基準）
+    // が一致する場合にのみ2本目を省く。`container_home == /home/vibepod`
+    // ならこの2つが同一パスになるため1本、それ以外なら別パスになるため2本
+    // 返る。下記の `/home/vibepod` は本番の非 pub 定数
+    // `DEFAULT_PLUGINS_CONTAINER_PATH` / `DEFAULT_PLUGINS_DATA_CONTAINER_PATH`
+    // （src/cli/run/mod.rs）の値をテスト側にリテラルで書き写したものであり、
+    // 分岐条件そのものを再現しているわけではない。これらの定数はコンテナ側
+    // の内部実装パスであり、公開 API に広げたくないため `pub` にはせず、
+    // このテストでは意図的にリテラルを使っている。値が変わった場合に
+    // テストが自動追随することはなく、`extra_mounts.len()` /
+    // `rw_mounts.len()` が期待本数と一致しなくなり、直後の assert が失敗
+    // することで変更が検知される。
+    let expected_entry_count = if container_home == Path::new("/home/vibepod") {
+        1
+    } else {
+        2
+    };
     assert_eq!(
         extra_mounts.len(),
-        1,
-        "test setup assumption violated: expected plugins_mount_entries to return exactly \
-         one entry when container_home == DEFAULT_PLUGINS_CONTAINER_PATH, got {:?}",
+        expected_entry_count,
+        "test setup assumption violated: expected plugins_mount_entries to return {} \
+         entry/entries for container_home == {:?}, got {:?}",
+        expected_entry_count,
+        container_home,
         extra_mounts
     );
     assert_eq!(
         rw_mounts.len(),
-        1,
-        "test setup assumption violated: expected plugins_data_mount_entries to return \
-         exactly one entry when container_home == DEFAULT_PLUGINS_DATA_CONTAINER_PATH, got {:?}",
+        expected_entry_count,
+        "test setup assumption violated: expected plugins_data_mount_entries to return {} \
+         entry/entries for container_home == {:?}, got {:?}",
+        expected_entry_count,
+        container_home,
         rw_mounts
     );
     let container_plugins_path = extra_mounts[0].1.clone();
     let container_plugins_data_path = rw_mounts[0].1.clone();
+    let container_plugins_path_absolute =
+        extra_mounts.get(1).map(|(_, container)| container.clone());
+    let container_plugins_data_path_absolute =
+        rw_mounts.get(1).map(|(_, container)| container.clone());
 
     let container_name = format!(
         "vibepod-test-nested-mount-{}-{}",
@@ -174,6 +247,8 @@ fn spawn_nested_mount_fixture(
         container_name,
         container_plugins_path,
         container_plugins_data_path,
+        container_plugins_path_absolute,
+        container_plugins_data_path_absolute,
         run_output,
     }
 }
@@ -202,7 +277,7 @@ fn assert_container_started(fx: &NestedMountFixture) {
 #[test]
 #[ignore]
 fn nested_child_mount_is_writable() {
-    let fx = spawn_nested_mount_fixture("rw-child", true, false);
+    let fx = spawn_nested_mount_fixture("rw-child", true, false, Path::new("/home/vibepod"));
     assert_container_started(&fx);
 
     let path = format!("{}/rw_check.txt", fx.container_plugins_data_path);
@@ -218,7 +293,7 @@ fn nested_child_mount_is_writable() {
 #[test]
 #[ignore]
 fn parent_mount_stays_read_only() {
-    let fx = spawn_nested_mount_fixture("ro-parent", true, false);
+    let fx = spawn_nested_mount_fixture("ro-parent", true, false, Path::new("/home/vibepod"));
     assert_container_started(&fx);
 
     // data/ の外側、親マウント直下への書き込みは ro のため拒否されるはず。
@@ -240,7 +315,7 @@ fn parent_mount_stays_read_only() {
 #[test]
 #[ignore]
 fn host_parent_content_is_hidden_by_child_mount() {
-    let fx = spawn_nested_mount_fixture("hidden-marker", true, true);
+    let fx = spawn_nested_mount_fixture("hidden-marker", true, true, Path::new("/home/vibepod"));
     assert_container_started(&fx);
 
     let path = format!("{}/host_marker.txt", fx.container_plugins_data_path);
@@ -258,7 +333,7 @@ fn host_parent_content_is_hidden_by_child_mount() {
 #[test]
 #[ignore]
 fn container_writes_do_not_leak_to_host_parent() {
-    let fx = spawn_nested_mount_fixture("no-leak", true, false);
+    let fx = spawn_nested_mount_fixture("no-leak", true, false, Path::new("/home/vibepod"));
     assert_container_started(&fx);
 
     let container_path = format!("{}/from_container.txt", fx.container_plugins_data_path);
@@ -324,7 +399,7 @@ fn container_writes_do_not_leak_to_host_parent() {
 #[test]
 #[ignore]
 fn missing_nested_mount_target_fails_container_creation() {
-    let fx = spawn_nested_mount_fixture("missing-target", false, false);
+    let fx = spawn_nested_mount_fixture("missing-target", false, false, Path::new("/home/vibepod"));
 
     assert!(
         !fx.run_output.status.success(),
@@ -337,5 +412,90 @@ fn missing_nested_mount_target_fails_container_creation() {
         stderr.to_lowercase().contains("read-only file system"),
         "expected the failure to be a read-only-filesystem mountpoint-creation error, got: \
          {stderr}"
+    );
+}
+
+/// 不変条件6: `installed_plugins.json` のホスト絶対パス解決用に追加される
+/// 「ホスト絶対パス側」の2本目のマウントエントリ（`plugins_mount_entries` /
+/// `plugins_data_mount_entries` が `container_home != /home/vibepod` のときに
+/// 返す2本目）でも、1本目（不変条件1・2・4）と同じ rw/ro 不変条件が成立する。
+///
+/// **背景**: これまでの不変条件1〜5はすべて `container_home == /home/vibepod`
+/// で fixture を組んでおり、その場合 `plugins_mount_entries` /
+/// `plugins_data_mount_entries` は2本目のエントリを生成しない（1本目と
+/// コンテナ側パスが重複するため）。つまり「installed_plugins.json のホスト
+/// 絶対パスを再マウントする」という2本目の分岐は、実 docker 上で一度も
+/// 検証されていなかった（`docs/release-checklist.md` で「手動のまま」と
+/// 分類されていた）。ここでは合成パス（ホストの実 `$HOME` は使わない）を
+/// `container_home` として渡すことで2本目を発生させ、同じ3点
+/// （rw で書き込める／親は ro のまま／書き込みが ro 側の親ソースへ漏れず
+/// rw 側のステージにだけ着地する）を検証する。
+#[test]
+#[ignore]
+fn nested_mount_invariants_hold_for_absolute_host_path_entry() {
+    // ホストの実 $HOME を使うと実行環境（CI と開発機で異なる）にテスト結果が
+    // 依存してしまうため、テスト専用の合成パスを使う。
+    let synthetic_container_home = Path::new("/opt/vibepod-test-hosthome");
+    let fx = spawn_nested_mount_fixture("abs-home", true, false, synthetic_container_home);
+    assert_container_started(&fx);
+
+    let child_path = fx.container_plugins_data_path_absolute.as_ref().expect(
+        "expected plugins_data_mount_entries to return a second (host-absolute-path) entry \
+         when container_home != /home/vibepod",
+    );
+    let parent_path = fx.container_plugins_path_absolute.as_ref().expect(
+        "expected plugins_mount_entries to return a second (host-absolute-path) entry \
+         when container_home != /home/vibepod",
+    );
+
+    // 1. 子 rw マウント先（ホスト絶対パス側）に書き込める。
+    let write_path = format!("{child_path}/from_container_abs.txt");
+    let write = docker_exec(
+        &fx.container_name,
+        &["sh", "-c", &format!("echo written > {write_path}")],
+    );
+    assert!(
+        write.status.success(),
+        "writing inside the nested rw mount (host-absolute-path side) at {write_path} should \
+         succeed, stderr: {}",
+        String::from_utf8_lossy(&write.stderr)
+    );
+
+    // 2. 親（ホスト絶対パス側）は read-only のまま。
+    let ro_path = format!("{parent_path}/should_be_blocked.txt");
+    let ro_attempt = docker_exec(&fx.container_name, &["touch", &ro_path]);
+    assert!(
+        !ro_attempt.status.success(),
+        "writing directly under the parent ro mount (host-absolute-path side) at {ro_path} \
+         must fail, but it succeeded"
+    );
+    let ro_stderr = String::from_utf8_lossy(&ro_attempt.stderr);
+    assert!(
+        ro_stderr.to_lowercase().contains("read-only file system"),
+        "expected a read-only-filesystem error, got: {ro_stderr}"
+    );
+
+    // 3. コンテナ内で書いたファイルは、ホスト側の ro 親ソース（parent/data/）
+    //    には現れない（rw マウントの source と ro マウントの source は別物の
+    //    はずで、混同していればここに漏れる）。
+    let host_parent_data_file = fx.parent.path().join("data").join("from_container_abs.txt");
+    assert!(
+        !host_parent_data_file.exists(),
+        "a file written inside the container's child rw mount (host-absolute-path side) must \
+         not appear under the host parent dir at {} (that would mean the rw mount silently \
+         landed on the parent's ro source instead of its own stage)",
+        host_parent_data_file.display()
+    );
+
+    // 陽性対照: 書き込みが本当に発生したこと自体は、子マウントのソース側
+    // (`_stage`) に現れることで確認する。1本目・2本目とも同じホスト
+    // ソース（`plugins_data_mount_entries` の `stage_host` 引数）を共有する
+    // ため、着地先は不変条件4と同じ `_stage` ディレクトリになる。
+    let host_stage_file = fx._stage.path().join("from_container_abs.txt");
+    assert!(
+        host_stage_file.exists(),
+        "expected the write to land in the host stage dir ({}) — if this fails, the write \
+         went somewhere unexpected and the negative assertion above is not meaningful",
+        host_stage_file.display()
     );
 }
