@@ -2261,32 +2261,34 @@ fn mounts_label_parts(
     parts
 }
 
-/// `prepare.rs` 9b（既存コンテナとの設定差分検知）が呼ぶ、`vibepod.mounts`
-/// ラベルの「比較側」を組み立てる関数。
+/// `extra_mounts`（`vibepod.mounts` ラベルおよび実際のコンテナ作成の両方に
+/// 使う、通常マウントの入力 Vec）を組み立てる。
 ///
-/// **これ自体が 9b の実装そのもの**である（9b はこの関数を 1 回呼ぶだけ）。
-/// `build_config_labels`（「書き込み側」）が最終的に組み立てる `extra_mounts`
-/// / `rw_mounts` 相当の Vec をここで再構築し、既存の `mounts_label_parts` +
-/// `build_mounts_label` へそのまま渡す — ラベル組み立てロジック自体は一切
-/// 重複させない。以前は 9b がこのロジックをインラインで独自に持っており、
-/// 二箇所が独立実装のままズレる不具合（round 2、および 53ad645 で修正した
-/// 再発）の温床になっていた。
+/// **この関数と `assemble_rw_mounts` が `extra_mounts` / `rw_mounts` 組み立ての
+/// 唯一の正本である。新しいマウントを追加するときは必ずここに足すこと。
+/// ここを経由しない組み立てを増やすと、書き込み側（コンテナ作成時に
+/// `build_config_labels` がラベルへ書き込む値）と比較側
+/// （`mounts_label_for_existing_container` が既存コンテナと比較する値）が
+/// ズレて、コンテナを再作成した直後から「設定が変更されました」という警告が
+/// 恒久的に出続ける（このリポジトリで過去 3 回発生している不具合パターン）。**
 ///
-/// `sanitized_settings_host` が `Some` のとき、`user_mounts` にユーザー自身の
-/// `--mount` がサニタイズ済み settings と完全に同じ host+container を含んで
-/// いても、この関数は書き込み側と同じ手順（両方のエントリを `extra_mounts`
-/// に積んでから `mounts_label_parts` に通す）を踏むため、両エントリとも
-/// マーカーへ置換され、書き込み側と一致する。以前のインライン実装は
-/// ユーザー分を生文字列のまま残していたため、このケースだけ恒久的に
-/// 不一致になっていた。
-pub(super) fn mounts_label_for_existing_container(
+/// `user_mounts` は `--mount` 引数を `parse_mount_arg` でパース済みのもの
+/// （パースはエラー伝播が必要なため呼び出し側の責務のまま残す）。
+/// `sanitized_settings_host` が `Some` の場合、
+/// `(host, SANITIZED_SETTINGS_CONTAINER_PATH)` を末尾に積む
+/// （`prepare_sanitized_settings_mount` の呼び出し自体はファイル書き込みの
+/// 副作用があるため、これも呼び出し側の責務のまま残す — この関数は
+/// 「パース済み・解決済みの入力を受け取って並べるだけ」の純粋関数）。
+///
+/// 要素の順序は `user_mounts` → `claude_config_mounts` → sanitized settings
+/// の順で固定する。`build_mounts_label` が最終的に `sort()` するためラベル
+/// 文字列自体は順序に依存しないが、`extra_mounts` は `to_create_args()` の
+/// `-v` 引数の並び順にも使われるため、順序を変えると無用な差分が生まれる。
+pub(super) fn assemble_extra_mounts(
     user_mounts: &[(String, String)],
     claude_config_mounts: &[(String, String)],
     sanitized_settings_host: Option<&std::path::Path>,
-    plugins_data_stage: Option<&str>,
-    home: &std::path::Path,
-    codex_present: bool,
-) -> String {
+) -> Vec<(String, String)> {
     let mut extra_mounts: Vec<(String, String)> = Vec::new();
     extra_mounts.extend_from_slice(user_mounts);
     extra_mounts.extend_from_slice(claude_config_mounts);
@@ -2296,11 +2298,51 @@ pub(super) fn mounts_label_for_existing_container(
             SANITIZED_SETTINGS_CONTAINER_PATH.to_string(),
         ));
     }
+    extra_mounts
+}
 
-    let rw_mounts: Vec<(String, String)> = match plugins_data_stage {
+/// `rw_mounts`（書き込み許可が必要なマウントの入力 Vec）を組み立てる。
+///
+/// 詳細は `assemble_extra_mounts` の doc コメントを参照 — この2関数が
+/// `extra_mounts` / `rw_mounts` 組み立ての唯一の正本である。
+pub(super) fn assemble_rw_mounts(
+    plugins_data_stage: Option<&str>,
+    home: &std::path::Path,
+) -> Vec<(String, String)> {
+    match plugins_data_stage {
         Some(stage) => plugins_data_mount_entries(stage, home),
         None => Vec::new(),
-    };
+    }
+}
+
+/// `prepare.rs` 9b（既存コンテナとの設定差分検知）が呼ぶ、`vibepod.mounts`
+/// ラベルの「比較側」を組み立てる関数。
+///
+/// **これ自体が 9b の実装そのもの**である（9b はこの関数を 1 回呼ぶだけ）。
+/// `extra_mounts` / `rw_mounts` の組み立ては `assemble_extra_mounts` /
+/// `assemble_rw_mounts`（書き込み側の `prepare_context` が呼ぶのと同じ関数）
+/// に委譲し、その結果を既存の `mounts_label_parts` + `build_mounts_label` へ
+/// そのまま渡す — ラベル組み立てロジックも入力の組み立てロジックも一切
+/// 重複させない。以前は 9b が両方をインラインで独自に持っており、二箇所が
+/// 独立実装のままズレる不具合（round 2、53ad645 で修正した再発、および
+/// `assemble_extra_mounts` 導入前の再々発）の温床になっていた。
+///
+/// `sanitized_settings_host` が `Some` のとき、`user_mounts` にユーザー自身の
+/// `--mount` がサニタイズ済み settings と完全に同じ host+container を含んで
+/// いても、`assemble_extra_mounts` は書き込み側と同じ手順（両方のエントリを
+/// `extra_mounts` に積んでから `mounts_label_parts` に通す）を踏むため、両
+/// エントリともマーカーへ置換され、書き込み側と一致する。
+pub(super) fn mounts_label_for_existing_container(
+    user_mounts: &[(String, String)],
+    claude_config_mounts: &[(String, String)],
+    sanitized_settings_host: Option<&std::path::Path>,
+    plugins_data_stage: Option<&str>,
+    home: &std::path::Path,
+    codex_present: bool,
+) -> String {
+    let extra_mounts =
+        assemble_extra_mounts(user_mounts, claude_config_mounts, sanitized_settings_host);
+    let rw_mounts = assemble_rw_mounts(plugins_data_stage, home);
 
     let mount_parts = mounts_label_parts(&extra_mounts, &rw_mounts, sanitized_settings_host);
     build_mounts_label(mount_parts, codex_present)
@@ -2899,22 +2941,20 @@ mod tests {
                             );
 
                             // --- 書き込み側: prepare.rs が実際に extra_mounts /
-                            // rw_mounts を組み立てる手順（8b〜サニタイズ済み
-                            // settings 追加〜rw_mounts 追加）をそのまま再現する。
-                            let mut extra_mounts: Vec<(String, String)> = Vec::new();
-                            extra_mounts.extend(user_mounts.clone());
-                            extra_mounts.extend(claude_config_mounts.clone());
-                            if sanitized_settings_mounted {
-                                extra_mounts.push((
-                                    sanitized_settings_host_str.clone(),
-                                    SANITIZED_SETTINGS_CONTAINER_PATH.to_string(),
-                                ));
-                            }
+                            // rw_mounts を組み立てる際に呼ぶのと同じ共通関数
+                            // （`assemble_extra_mounts` / `assemble_rw_mounts`）を
+                            // ここでも呼ぶ。組み立て手順そのものをテスト内に
+                            // 複製すると、本番実装が変わってもこのテストは
+                            // 気づかずに緑のまま残り続ける（過去の失敗パターン）
+                            // ため、本番実装を直接通す。
+                            let extra_mounts = assemble_extra_mounts(
+                                &user_mounts,
+                                &claude_config_mounts,
+                                sanitized_settings_host_opt,
+                            );
 
-                            let mut rw_mounts: Vec<(String, String)> = Vec::new();
-                            if let Some(ref stage) = plugins_data_stage {
-                                rw_mounts.extend(plugins_data_mount_entries(stage, &home));
-                            }
+                            let rw_mounts =
+                                assemble_rw_mounts(plugins_data_stage.as_deref(), &home);
 
                             let parts_write_side = mounts_label_parts(
                                 &extra_mounts,

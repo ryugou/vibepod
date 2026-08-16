@@ -852,18 +852,13 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // vibepod 自体は継続動作する)。
     let codex_dir = super::prepare_codex_mount(&home, &config_dir, &runtime_dir)?;
 
-    // Parse --mount arguments
-    let mut extra_mounts = Vec::new();
+    // Parse --mount arguments（パースはエラー伝播が必要なため、
+    // `assemble_extra_mounts` の外＝呼び出し側の責務として残す）
+    let mut user_mounts = Vec::new();
     for arg in &opts.mount {
         let parsed =
             parse_mount_arg(arg).with_context(|| format!("Invalid --mount argument: {}", arg))?;
-        extra_mounts.push(parsed);
-    }
-
-    // `claude_config_mounts`（host `~/.claude/` の allowlist マウント）は
-    // 8b で既に解決済み。そのまま `extra_mounts` に積む。
-    for (host, container) in &claude_config_mounts {
-        extra_mounts.push((host.clone(), container.clone()));
+        user_mounts.push(parsed);
     }
 
     // ホストの settings.json を hooks/statusLine 除去のうえマウントする。
@@ -872,23 +867,24 @@ pub(super) async fn prepare_context(opts: &RunOptions) -> Result<Option<RunConte
     // 再構築せず「実際にマウントしたか」をそのまま持ち回ることで、9b の
     // 比較側（`host_settings_exists` が false なら `None`）と判定条件を
     // 構造的に一致させる（Copilot 指摘、PR #77）。
+    // 呼び出し自体はファイル書き込みの副作用があるため、
+    // `assemble_extra_mounts` の外に残す。
     let sanitized_settings_host =
-        match super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)? {
-            Some((host, container)) => {
-                let host_path = std::path::PathBuf::from(&host);
-                extra_mounts.push((host, container));
-                Some(host_path)
-            }
-            None => None,
-        };
+        super::prepare_sanitized_settings_mount(&home, &config_dir, &container_name)?
+            .map(|(host, _container)| std::path::PathBuf::from(host));
 
-    // `~/.claude/plugins/data` の rw ステージ。`extra_mounts` は
-    // `to_create_args()` で一律 `:ro` になるため、書き込みが必要なこちらは
-    // 別枠の `rw_mounts` に積む（9b で用意した `plugins_data_stage` を使う）。
-    let mut rw_mounts = Vec::new();
-    if let Some(ref stage) = plugins_data_stage {
-        rw_mounts.extend(super::plugins_data_mount_entries(stage, &home));
-    }
+    // `extra_mounts` / `rw_mounts` の組み立ては `assemble_extra_mounts` /
+    // `assemble_rw_mounts`（唯一の正本、doc コメント参照）に委譲する。
+    // `mounts_label_for_existing_container`（9b の比較側）もこの2関数を
+    // 呼ぶため、両者の入力組み立てが構造的に一致する — 新しいマウントを
+    // 追加するときはこの2関数だけを変更すればよく、書き込み側・比較側を
+    // 別々に更新し忘れてラベルがドリフトする事故を構造的に防ぐ。
+    let extra_mounts = super::assemble_extra_mounts(
+        &user_mounts,
+        &claude_config_mounts,
+        sanitized_settings_host.as_deref(),
+    );
+    let rw_mounts = super::assemble_rw_mounts(plugins_data_stage.as_deref(), &home);
 
     // Normalize lang_names before storing in RunContext so downstream
     // consumers (build_config_labels, future readers) can trust the
