@@ -46,6 +46,13 @@ const NON_TTY_TIMEOUT: Duration = Duration::from_secs(30);
 /// `child.id()` で控えておいた pid に対し OS の `kill` コマンドで SIGKILL を
 /// 送る（`Child::kill()` は `wait_with_output` に所有権を渡した別スレッド側
 /// にあるため、こちらのスレッドからは呼べない）。
+///
+/// `recv_timeout` の `Err` は `Timeout`（本当にタイムアウトまで応答が無かった）
+/// と `Disconnected`（ワーカースレッドが `send` する前に panic して終了した）
+/// の 2 種類があり、原因が異なるため区別してメッセージを出し分ける。
+/// `Disconnected` はワーカー側の panic が原因でありプロセスがハングした
+/// わけではないが、子プロセス自体が未回収のまま残っている可能性はあるため
+/// kill はどちらの場合も実行する。
 fn wait_with_timeout(child: Child, timeout: Duration, description: &str) -> Output {
     let pid = child.id();
     let (tx, rx) = mpsc::channel();
@@ -60,7 +67,7 @@ fn wait_with_timeout(child: Child, timeout: Duration, description: &str) -> Outp
         Ok(result) => {
             result.unwrap_or_else(|e| panic!("failed to wait for `{}`: {}", description, e))
         }
-        Err(_) => {
+        Err(mpsc::RecvTimeoutError::Timeout) => {
             // kill の成否そのものは本質ではない（既に終了していれば失敗して
             // 当然）。目的は次の panic で原因箇所を伝えることなので結果は
             // 握りつぶしてよい。
@@ -72,6 +79,25 @@ fn wait_with_timeout(child: Child, timeout: Duration, description: &str) -> Outp
                  non_tty_test.rs::wait_with_timeout. This means the process hung instead of \
                  exiting on stdin EOF; check for new blocking I/O before the TTY check.",
                 description, pid, timeout
+            );
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // ワーカースレッドが `send` する前に panic して終了したため channel
+            // が切断された状態。これは timeout を待たず即座に発生するので、
+            // 「タイムアウトした」「ハングした」という説明は事実に反する。
+            // 一方で、panic したワーカースレッドが所有していた子プロセスが
+            // 未回収のまま残っている可能性はあるため、プロセスリーク防止の
+            // ために kill は timeout 時と同様に実行する（成否は本質ではない
+            // ため結果は握りつぶす）。
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+            panic!(
+                "`{}` (pid={}) — the worker thread in non_tty_test.rs::wait_with_timeout \
+                 exited without sending a result, most likely because it panicked while \
+                 calling `wait_with_output`. This is not a hang/timeout; see the worker \
+                 thread's panic output above for the actual cause.",
+                description, pid
             );
         }
     }
